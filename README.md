@@ -1,4 +1,4 @@
-# Flora Workflow Studio
+# TribalAI Workflow Studio
 
 Production-ready full-stack app for building ML/geometry workflows on an infinite canvas and opening outputs in a 3D viewer.
 
@@ -25,7 +25,7 @@ Production-ready full-stack app for building ML/geometry workflows on an infinit
 - `prisma/*`: schema, migration, seed script.
 
 ## Routes
-- `/` landing page (flora-style)
+- `/` landing page (TribalAI-style)
 - `/app` dashboard (projects + create)
 - `/app/p/[projectId]/canvas` node editor
 - `/app/p/[projectId]/runs` run status/logs/artifacts

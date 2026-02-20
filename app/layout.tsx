@@ -11,7 +11,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Flora Workflow Studio",
+  title: "TribalAI Workflow Studio",
   description: "Infinite-canvas ML workflows with integrated 3D viewer"
 };
 

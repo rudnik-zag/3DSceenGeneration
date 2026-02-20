@@ -103,7 +103,7 @@ async function main() {
 
   const glbJson = Buffer.from(
     JSON.stringify({
-      asset: { version: "2.0", generator: "flora-workflow-studio-seed" },
+      asset: { version: "2.0", generator: "tribalai-workflow-studio-seed" },
       scene: 0,
       scenes: [{ nodes: [] }],
       nodes: []

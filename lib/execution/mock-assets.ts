@@ -37,7 +37,7 @@ function padTo4(buf: Buffer) {
 
 export function createMinimalGlbBuffer() {
   const json = {
-    asset: { version: "2.0", generator: "flora-workflow-studio" },
+    asset: { version: "2.0", generator: "tribalai-workflow-studio" },
     scene: 0,
     scenes: [{ nodes: [] }],
     nodes: []

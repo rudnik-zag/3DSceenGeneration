@@ -1,4 +1,4 @@
-# Flora Workflow Studio: Implementation + Runbook
+# TribalAI Workflow Studio: Implementation + Runbook
 
 This file documents what was implemented in this repository and how to install/run it on Ubuntu Linux.
 
@@ -102,7 +102,7 @@ cp .env.example .env
 ```
 
 Default `.env.example` values already match local compose defaults:
-- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/flora3d?schema=public`
+- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tribalai3d?schema=public`
 - `REDIS_URL=redis://localhost:6379`
 - `S3_ENDPOINT=http://localhost:9000`
 - etc.
@@ -180,7 +180,7 @@ corepack prepare pnpm@9.15.0 --activate
 - Start PostgreSQL (`docker compose up -d postgres`).
 - Verify connectivity:
 ```bash
-psql "postgresql://postgres:postgres@localhost:5432/flora3d" -c "select 1;"
+psql "postgresql://postgres:postgres@localhost:5432/tribalai3d" -c "select 1;"
 ```
 
 ### Viewer artifact URL returns 404
