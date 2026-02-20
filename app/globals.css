@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 33% 6%;
+  --foreground: 210 20% 94%;
+  --card: 223 28% 9%;
+  --card-foreground: 210 20% 94%;
+  --popover: 223 28% 9%;
+  --popover-foreground: 210 20% 94%;
+  --primary: 150 63% 58%;
+  --primary-foreground: 223 39% 6%;
+  --secondary: 221 20% 14%;
+  --secondary-foreground: 210 20% 92%;
+  --muted: 221 18% 12%;
+  --muted-foreground: 215 15% 64%;
+  --accent: 217 20% 16%;
+  --accent-foreground: 210 25% 92%;
+  --destructive: 0 70% 55%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 222 18% 18%;
+  --input: 222 18% 18%;
+  --ring: 150 60% 52%;
+  --radius: 0.95rem;
+  --chart-1: 149 63% 58%;
+  --chart-2: 195 79% 58%;
+  --chart-3: 44 89% 62%;
+  --chart-4: 14 85% 64%;
+  --chart-5: 260 75% 66%;
+}
+
+* {
+  @apply border-border;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-feature-settings: "ss01" 1, "cv01" 1, "cv11" 1;
+  background-image:
+    radial-gradient(circle at 15% 10%, rgba(59, 130, 246, 0.12), transparent 26%),
+    radial-gradient(circle at 88% 8%, rgba(16, 185, 129, 0.1), transparent 22%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, rgba(255, 255, 255, 0) 32%);
+}
+
+canvas {
+  touch-action: none;
+}
+
+.react-flow__controls,
+.react-flow__minimap {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls-button {
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.react-flow__controls-button:hover {
+  background: hsl(var(--accent));
+}
+
+.react-flow__edge-path {
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(157, 178, 219, 0.2));
+}
+
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 10 8;
+  animation: dashdraw 0.85s linear infinite;
+}
+
+.react-flow__node {
+  transition: box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.canvas-dot-bg {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+.panel-blur {
+  background: linear-gradient(140deg, rgba(21, 24, 36, 0.95), rgba(13, 16, 28, 0.94));
+  backdrop-filter: blur(10px);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.32);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
