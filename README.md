@@ -1,152 +1,102 @@
 # TribalAI Workflow Studio
 
-Production-ready full-stack app for building ML/geometry workflows on an infinite canvas and opening outputs in a 3D viewer.
+Full-stack workflow platform for AI/geometry pipelines:
+- premium landing page (`/`)
+- project dashboard (`/app`)
+- infinite canvas editor (`/app/p/[projectId]/canvas`)
+- run tracking (`/app/p/[projectId]/runs`)
+- 3D viewer (`/app/p/[projectId]/viewer?artifactId=...`)
 
 ## Stack
-- Next.js 14 App Router + TypeScript
-- TailwindCSS + shadcn/ui primitives
-- Framer Motion for landing interactions
-- React Flow for node editor
-- Three.js for GLB/PLY viewer
-- BullMQ + Redis for background execution
-- PostgreSQL + Prisma for metadata
-- MinIO (S3-compatible) for artifacts
-- Docker Compose for local infra
+- Next.js 14 (App Router) + TypeScript
+- TailwindCSS + shadcn/ui
+- Framer Motion
+- React Flow
+- Three.js (GLB/PLY) + Babylon.js Gaussian Splatting renderer
+- BullMQ + Redis
+- PostgreSQL + Prisma
+- S3-compatible storage (MinIO in local dev)
 
-## Architecture Overview
-- `app/`: Next.js routes and API endpoints.
-- `components/canvas/*`: React Flow editor, palette, custom nodes, inspector.
-- `components/viewer/*`: Three.js viewer runtime (GLB/PLY + splat-ready hook).
-- `lib/graph/*`: strict node registry, graph parsing, DAG/topological plan, cache key hashing.
-- `lib/execution/*`: pluggable execution engine and `MockModelRunner`.
-- `lib/queue/*`: BullMQ queue setup.
-- `lib/storage/*`: S3/MinIO storage and signed URL helpers.
-- `worker/index.ts`: BullMQ worker process executing queued runs.
-- `prisma/*`: schema, migration, seed script.
+## What Is Implemented (Current)
+- Strict graph/node schema and typed ports.
+- Node execution queue with BullMQ worker and run progress/logs.
+- Caching: `hash(nodeType + params + orderedInputHashes + mode)`.
+- GroundingDINO + SAM2 node flow with guided/full segmentation rules.
+- Image upload directly in `input.image` node (drag/drop + preview).
+- Node creation via canvas context menu (right-click or double-click).
+- Edge-drop UX: drag connection to empty canvas -> add-node menu opens and auto-connects.
+- Viewer renderer switch:
+  - GLB/PLY -> Three.js
+  - `.splat/.spz/.compressed.ply/.ksplat` and GS kinds -> Babylon GS
+- Local file open in viewer (`.glb/.gltf/.ply/.splat/.spz/.ksplat`).
+- Project deletion now deletes DB rows and related storage objects under `projects/{projectId}/`.
+- Storage fallback when S3/MinIO is unreachable: uses `.local-storage/`.
 
-## Routes
-- `/` landing page (TribalAI-style)
-- `/app` dashboard (projects + create)
-- `/app/p/[projectId]/canvas` node editor
-- `/app/p/[projectId]/runs` run status/logs/artifacts
-- `/app/p/[projectId]/viewer?artifactId=...` 3D viewer
-- `/api/*` projects, graph versions, runs, artifacts, uploads, demo open
-  - Node run endpoint: `POST /api/projects/[projectId]/nodes/[nodeId]/run`
+## Key Paths
+- `app/` routes + APIs
+- `components/canvas/` editor + node UI
+- `components/viewer/` Three.js + Babylon GS viewer modules
+- `lib/execution/` run engine + executors
+- `lib/graph/` node registry + planning + cache keys
+- `lib/storage/s3.ts` storage, signed URLs, fallback, prefix delete
+- `worker/index.ts` BullMQ worker
+- `prisma/` schema, migrations, seed
+- `docs/IMPLEMENTATION_RUNBOOK.md` deeper implementation notes
 
-## Graph JSON Format
-`GraphDocument`:
-```ts
-{
-  nodes: Array<{
-    id: string;
-    type: WorkflowNodeType;
-    position: { x: number; y: number };
-    data: { label: string; params: Record<string, unknown>; status?: NodeRuntimeStatus };
-  }>;
-  edges: Array<{
-    id: string;
-    source: string;
-    target: string;
-    sourceHandle?: string;
-    targetHandle?: string;
-  }>;
-  viewport: { x: number; y: number; zoom: number };
-}
+## Prerequisites (Ubuntu)
+- Node.js 20+
+- Corepack
+- Docker + Docker Compose plugin
+- `psql` client (recommended for DB checks)
+- Optional for real GroundingDINO execution: Conda env `grounding_dino`
+
+If `pnpm` is missing:
+```bash
+corepack enable
+corepack prepare pnpm@9.15.0 --activate
+pnpm -v
 ```
-Saved as JSONB in `Graph.graphJson` with immutable versions in `Graph.version`.
 
-## Project Image Uploads
-- `input.image` node supports click-upload and drag/drop directly on the node.
-- UI preview is resized client-side for stable node size.
-- Original file is uploaded in background to S3/MinIO.
-- Upload metadata is persisted in PostgreSQL table `UploadAsset` (project scoped), with storage path grouped by project name:
-  - `projects/{projectId}/{projectSlug}/images/{timestamp}_{filename}`
-
-## Caching Model
-Per-node cache key:
-```txt
-hash(nodeType + stable(params) + ordered inputArtifactHashes + mode)
+If corepack permission issues appear:
+```bash
+COREPACK_HOME=/tmp/corepack corepack prepare pnpm@9.15.0 --activate
+COREPACK_HOME=/tmp/corepack corepack pnpm -v
 ```
-Per-output cache key:
-```txt
-hash(nodeCacheBaseKey + outputPortId)
-```
-Implementation:
-- `lib/graph/cache.ts` (`makeCacheKey`)
-- Worker checks `CacheEntry.cacheKey` per output port before execution.
-- Cache hit reuses all output artifacts and marks node as cache-hit in run logs.
 
-## Execution Engine and Extensibility
-Current engine:
-- Queue job payload: `{ projectId, graphId, runId, startNodeId? }`
-- Worker compiles graph to DAG with typed `inputBindings` (target port <- source handle).
-- `startNodeId` executes only that node + required upstream dependencies.
-- Updates run progress/logs/status during execution.
-- Stores artifacts in MinIO using key pattern:
-  - `projects/{projectId}/runs/{runId}/nodes/{nodeId}/artifact_{artifactId}.ext`
-
-Pluggable model execution:
-- Contract: `executeNode(nodeType, params, inputArtifacts) -> outputs[]` in `lib/execution/contracts.ts`.
-- `MockModelRunner` in `lib/execution/mock-runner.ts` dispatches by node type.
-- GroundingDINO and SAM2 executors are split in:
-  - `lib/execution/executors/groundingdino.ts`
-  - `lib/execution/executors/sam2.ts`
-- `model.groundingdino` now calls real Python inference through:
-  - `conda run -n grounding_dino python demo/inference_for_webapp.py ...`
-  - script path: `models/GroundingDINO/demo/inference_for_webapp.py`
-- Replace/extend remaining mock executors with Python/FastAPI/local binaries.
-- Keep API contract: return artifact buffer + mime/kind/meta + optional preview.
-
-## GroundingDINO + SAM2 Behavior
-- `model.groundingdino`
-  - Input: required `Image`
-  - Outputs:
-    - `boxes` JSON (hidden/advanced)
-    - `overlay` image preview
-  - Params: `prompt`, `threshold`
-  - If prompt is empty, Python script uses `DEFAULT_GROUNDING_DINO_CLASSES`
-  - Produces:
-    - overlay image (shown in node)
-    - boxes JSON (hidden, for downstream SAM2 guided mode)
-- `model.sam2`
-  - Inputs: required `Image`, optional `boxes` JSON
-  - Outputs:
-    - `mask` image preview
-    - `overlay` image
-    - `meta` JSON (hidden/advanced)
-  - Mode rules:
-    - If `boxes` is connected -> guided mode.
-    - If no `boxes` -> full segmentation mode.
-    - If both direct image and boxes image-source disagree by hash, warning is set:
-      - `Boxes input does not match image input. Using GroundingDINO source image.`
-    - Guided mode always prefers GroundingDINO source image from boxes metadata.
-
-## 3D Viewer Notes
-Implemented:
-- GLB via `GLTFLoader`
-- KTX2/BasisU (`KTX2Loader`) lazy setup
-- Meshopt decoder lazy setup
-- Draco decoder lazy setup
-- PLY point cloud via `PLYLoader` + point-size control
-- Splat hook stub (`components/viewer/use-splat-loader.ts`) ready for ksplat/spz integration
-
-Future real conversion pipeline:
-- Add CLI bridge module for `gltfpack`, `gltf-transform`, `draco_encoder`.
-- Call from execution/export node implementation.
-- Persist conversion stats into `Artifact.meta`.
-
-## Local Development
-### 1) Environment
+## Environment Setup
+Create `.env`:
 ```bash
 cp .env.example .env
 ```
 
-### 2) Start infra
+Default local values:
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tribalai3d?schema=public
+REDIS_URL=redis://localhost:6379
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=artifacts
+S3_REGION=us-east-1
+S3_FORCE_PATH_STYLE=true
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+## Concrete Run Instructions (Recommended)
+This is the standard setup: infra in Docker, app+worker on host.
+
+### 1) Start background infra
 ```bash
 docker compose up -d postgres redis minio
 ```
 
-### 3) Install and prepare DB
+### 2) Verify services are alive
+```bash
+curl -i http://localhost:9000/minio/health/live
+psql "postgresql://postgres:postgres@localhost:5432/tribalai3d" -c "select 1;"
+```
+
+### 3) Install deps + prepare DB
 ```bash
 pnpm install
 pnpm db:generate
@@ -154,143 +104,81 @@ pnpm db:migrate
 pnpm db:seed
 ```
 
-### 4) Run app + worker
+### 4) Run app and worker (two terminals)
+Terminal A:
 ```bash
 pnpm dev
+```
+Terminal B:
+```bash
 pnpm worker
 ```
 
-### GroundingDINO Runtime Prereq
-Install and prepare conda env `grounding_dino` with model dependencies and weights under:
-- `models/GroundingDINO/weights/groundingdino_swint_ogc.pth`
+Open:
+- App: `http://localhost:3000`
+- MinIO console: `http://localhost:9001` (`minioadmin` / `minioadmin`)
 
-Worker command internally executes:
+## Alternative: Run Everything in Docker
 ```bash
-conda run -n grounding_dino python demo/inference_for_webapp.py \
-  -c groundingdino/config/GroundingDINO_SwinT_OGC.py \
-  -p weights/groundingdino_swint_ogc.pth \
-  -i <input_from_input.image_node> \
-  -o <.local-storage/projects/{projectId}/model_outputs/groundingdino/runs/{runId}/nodes/{nodeId}> \
-  -t <groundingdino_node_prompt_or_default_classes>
+docker compose up --build
 ```
 
-App: `http://localhost:3000`
-
-MinIO console: `http://localhost:9001` (`minioadmin` / `minioadmin`)
-
-## Full Repository Tree
-```text
-.
-├── Dockerfile
-├── README.md
-├── app
-│   ├── api
-│   │   ├── artifacts
-│   │   │   └── [artifactId]
-│   │   │       └── route.ts
-│   │   ├── demo
-│   │   │   └── open
-│   │   │       └── route.ts
-│   │   ├── projects
-│   │   │   ├── [projectId]
-│   │   │   │   ├── graph
-│   │   │   │   │   └── route.ts
-│   │   │   │   ├── route.ts
-│   │   │   │   └── runs
-│   │   │   │       └── route.ts
-│   │   │   └── route.ts
-│   │   ├── runs
-│   │   │   └── [runId]
-│   │   │       └── route.ts
-│   │   └── uploads
-│   │       └── route.ts
-│   ├── app
-│   │   ├── layout.tsx
-│   │   ├── p
-│   │   │   └── [projectId]
-│   │   │       ├── canvas
-│   │   │       │   └── page.tsx
-│   │   │       ├── layout.tsx
-│   │   │       ├── page.tsx
-│   │   │       ├── runs
-│   │   │       │   └── page.tsx
-│   │   │       └── viewer
-│   │   │           └── page.tsx
-│   │   └── page.tsx
-│   ├── globals.css
-│   ├── layout.tsx
-│   └── page.tsx
-├── components
-│   ├── canvas
-│   │   ├── canvas-editor.tsx
-│   │   └── workflow-node.tsx
-│   ├── landing
-│   │   └── landing-page.tsx
-│   ├── layout
-│   │   ├── app-top-nav.tsx
-│   │   ├── dashboard-client.tsx
-│   │   └── runs-panel.tsx
-│   ├── ui
-│   │   ├── badge.tsx
-│   │   ├── button.tsx
-│   │   ├── card.tsx
-│   │   ├── dialog.tsx
-│   │   ├── dropdown-menu.tsx
-│   │   ├── input.tsx
-│   │   ├── label.tsx
-│   │   ├── scroll-area.tsx
-│   │   ├── select.tsx
-│   │   ├── separator.tsx
-│   │   ├── slider.tsx
-│   │   ├── table.tsx
-│   │   ├── tabs.tsx
-│   │   ├── toast.tsx
-│   │   ├── toaster.tsx
-│   │   └── textarea.tsx
-│   └── viewer
-│       ├── use-splat-loader.ts
-│       └── viewer-canvas.tsx
-├── docker-compose.yml
-├── hooks
-│   └── use-toast.ts
-├── lib
-│   ├── db.ts
-│   ├── default-user.ts
-│   ├── env.ts
-│   ├── execution
-│   │   ├── mock-assets.ts
-│   │   ├── mock-runner.ts
-│   │   └── run-workflow.ts
-│   ├── graph
-│   │   ├── cache.ts
-│   │   ├── node-specs.ts
-│   │   └── plan.ts
-│   ├── queue
-│   │   ├── connection.ts
-│   │   └── queues.ts
-│   ├── storage
-│   │   ├── keys.ts
-│   │   └── s3.ts
-│   └── utils.ts
-├── next.config.mjs
-├── package.json
-├── postcss.config.js
-├── prisma
-│   ├── migrations
-│   │   ├── 20260218000000_init
-│   │   │   └── migration.sql
-│   │   └── migration_lock.toml
-│   ├── schema.prisma
-│   └── seed.ts
-├── public
-│   └── demo-assets
-│       ├── gallery-1.svg
-│       ├── gallery-2.svg
-│       └── gallery-3.svg
-├── tailwind.config.ts
-├── tsconfig.json
-├── types
-│   └── workflow.ts
-└── worker
-    └── index.ts
+## GroundingDINO Runtime (Optional but Supported)
+`model.groundingdino` is wired to call:
+```bash
+conda run -n grounding_dino python demo/inference_for_webapp.py ...
 ```
+Expected:
+- script: `models/GroundingDINO/demo/inference_for_webapp.py`
+- weights path available (for example `models/GroundingDINO/weights/groundingdino_swint_ogc.pth`)
+
+If Conda/env/weights are missing, executor can fail and run will show error logs.
+
+## Common Troubleshooting
+### `curl: (1) Received HTTP/0.9 when not allowed` on MinIO health URL
+Port `9000` is serving something that is not valid MinIO HTTP API for your app.
+
+Fix:
+1. Check what owns port 9000:
+```bash
+sudo lsof -nP -iTCP:9000 -sTCP:LISTEN
+```
+2. Run MinIO on clean ports:
+```bash
+minio server ~/minio-data --address :9100 --console-address :9101
+```
+3. Update `.env`:
+```env
+S3_ENDPOINT=http://127.0.0.1:9100
+```
+4. Restart app + worker.
+
+### `relation "UploadAsset" does not exist`
+Run migrations:
+```bash
+pnpm db:migrate
+```
+
+### `Database ... does not exist`
+Create/start DB service first, then migrate:
+```bash
+docker compose up -d postgres
+pnpm db:migrate
+```
+
+### S3 endpoint unavailable / parse errors
+Check `.env` endpoint and protocol (`http` vs `https`) and that MinIO is running on that exact port.
+
+## Scripts
+- `pnpm dev` start Next.js dev server
+- `pnpm worker` start BullMQ worker
+- `pnpm db:generate` Prisma client
+- `pnpm db:migrate` run migrations
+- `pnpm db:seed` seed demo data
+- `pnpm build` production build
+
+## Notes
+- If S3/MinIO is unavailable, uploads/artifacts continue through local fallback at `.local-storage/`.
+- Deleting a project now removes:
+  - DB rows (`Project`, `Graph`, `Run`, `Artifact`, `CacheEntry`, `UploadAsset`)
+  - stored objects under `projects/{projectId}/`.

@@ -1,143 +1,124 @@
-# TribalAI Workflow Studio: Implementation + Runbook
+# TribalAI Workflow Studio: Implementation Runbook
 
-This file documents what was implemented in this repository and how to install/run it on Ubuntu Linux.
+This document is synced with the current repository behavior and `README.md`.
 
-## 1) What Was Implemented
+## 1) Current Implementation Status
 
-### Core Product
-- Next.js 14 App Router + TypeScript application with:
-  - Landing page (`/`)
-  - Dashboard (`/app`)
-  - Canvas workflow editor (`/app/p/[projectId]/canvas`)
-  - Runs view (`/app/p/[projectId]/runs`)
-  - 3D viewer (`/app/p/[projectId]/viewer?artifactId=...`)
-- API routes under `/api/*` for projects, graph versions, runs, artifacts, uploads, demo flow.
+### Product Surface
+- Landing page: `/`
+- Dashboard: `/app`
+- Canvas editor: `/app/p/[projectId]/canvas`
+- Runs page: `/app/p/[projectId]/runs`
+- Viewer page: `/app/p/[projectId]/viewer?artifactId=...`
 
-### Data + Infra
-- Prisma + PostgreSQL models for `User`, `Project`, `Graph`, `Run`, `Artifact`, `CacheEntry`.
-- BullMQ + Redis queue for workflow jobs.
-- S3-compatible storage integration (MinIO in dev), signed URLs, existence checks, bucket auto-create.
-- Docker Compose services for `app`, `worker`, `postgres`, `redis`, `minio`.
+### Core Stack
+- Next.js 14 App Router + TypeScript
+- Tailwind + shadcn/ui
+- React Flow (canvas)
+- Three.js + Babylon.js Gaussian Splat renderer switch
+- BullMQ + Redis
+- PostgreSQL + Prisma
+- S3-compatible storage (MinIO in dev)
 
-### Canvas Editor (React Flow)
-- Infinite-canvas behavior with pan/zoom, minimap, controls, snap-to-grid.
-- Custom node cards with status badges and output hints.
-- Inspector tabs: Params / Outputs / Logs.
-- Save graph versions, run workflow, run from selection, stop run.
-- **Right-click node creation UX (latest):**
-  - Class-first selector in context menu: `Inputs`, `Models`, `Geometry`, `Outputs`.
-  - Node list filtered by selected class.
-  - Additional “All Classes” quick switch section.
-- Left node palette no longer contains add-node cards; node creation is intentionally centralized in right-click menu.
+### Graph/Execution
+- Typed node registry and DAG planning.
+- Worker executes topological plan with run logs/progress.
+- Node-level caching with deterministic key:
+  - `hash(nodeType + params + orderedInputArtifactHashes + mode)`
+- Node-run supports `startNodeId` (run selected node + dependencies).
+- `input.image` source handling:
+  - Uses uploaded source directly (`storageKey`) instead of re-triggering fake processing.
 
-### Workflow Execution + Caching
-- Graph compile -> DAG -> topological execution plan.
-- Worker executes node tasks in dependency order.
-- Run status/progress/log updates persisted during execution.
-- Caching by hash key from `nodeType + params + ordered input artifact hashes`.
-- Cache hits reuse artifacts and mark node as `cache-hit`.
-- Mock runner architecture is pluggable for real model executors later.
+### Canvas UX
+- Right-click/double-click context menu for add-node.
+- Node categories in menu: Inputs / Models / Geometry / Outputs.
+- Drag edge to empty canvas -> add-node menu opens and auto-connects.
+- Node delete works from toolbar/keyboard.
 
-### Viewer (Three.js)
-- GLB loading with lazy decoders (Draco, Meshopt, KTX2/Basis).
-- PLY point cloud rendering with point-size control.
-- Splat hook module ready for future ksplat/spz integration.
-- Scene graph panel, object picking, transform controls, fit/reset tools, screenshot, runtime stats.
+### Viewer
+- Renderer auto-switch:
+  - Three.js for `mesh_glb`, `point_ply` (and standard `.ply/.glb/.gltf`)
+  - Babylon GS for `.splat/.spz/.compressed.ply/.ksplat` and GS kinds
+- Local file load in viewer supports above formats.
 
-### Viewer Enhancements Added During This Iteration
-- Local file loading in viewer (open `.ply`, `.glb/.gltf`, `.ksplat/.spz`) even without pipeline artifact.
-- Improved PLY handling:
-  - Supports binary little-endian PLY with Gaussian-style fields (`f_dc_0`, `f_dc_1`, `f_dc_2`, etc.).
-  - Converts SH DC channels to displayable RGB.
-  - Downsamples very large point sets for interactive rendering.
-- Point-size slider tuned to requested rule:
-  - `min = 0.001`
-  - `max = min * 5`
-  - `step = 0.0001`
+### Storage
+- Signed URL flow when MinIO is healthy.
+- Automatic fallback to `.local-storage/` when S3 endpoint is unavailable.
+- Project delete now also removes storage objects under `projects/{projectId}/`.
 
-## 2) Project Structure (Key Paths)
+## 2) Prerequisites (Ubuntu)
 
-- `app/` Next.js routes and APIs
-- `components/canvas/` canvas editor and node UI
-- `components/viewer/` 3D viewer modules
-- `lib/graph/` node registry, planning, cache helpers
-- `lib/execution/` mock execution engine
-- `lib/storage/` S3/MinIO helpers
-- `worker/index.ts` BullMQ worker process
-- `prisma/` schema, migrations, seed
-- `docker-compose.yml` local infra/services
-
-## 3) Ubuntu Dependencies
-
-### Required
 - Node.js 20+
-- Corepack (comes with Node 20)
-- Docker + Docker Compose plugin (recommended)
-- or local PostgreSQL + Redis + MinIO binaries if not using Docker
+- Corepack
+- Docker + Docker Compose plugin
+- Optional: `psql`, `redis-cli`, Conda (`grounding_dino` env for real DINO runtime)
 
-### Install Node 20 + Corepack (if missing)
-```bash
-node -v
-corepack --version
-```
-
-If `pnpm` is missing, enable it through corepack:
+If `pnpm` is missing:
 ```bash
 corepack enable
 corepack prepare pnpm@9.15.0 --activate
 pnpm -v
 ```
 
-If corepack home permission issues appear:
+If corepack permission issues occur:
 ```bash
 COREPACK_HOME=/tmp/corepack corepack prepare pnpm@9.15.0 --activate
 COREPACK_HOME=/tmp/corepack corepack pnpm -v
 ```
 
-## 4) Environment Setup
+## 3) Environment Configuration
 
-Create local env file:
+Create env:
 ```bash
 cp .env.example .env
 ```
 
-Default `.env.example` values already match local compose defaults:
-- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tribalai3d?schema=public`
-- `REDIS_URL=redis://localhost:6379`
-- `S3_ENDPOINT=http://localhost:9000`
-- etc.
-
-If your MinIO runs on another port (example `9100`), update:
+Default local values:
 ```env
-S3_ENDPOINT=http://localhost:9100
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tribalai3d?schema=public
+REDIS_URL=redis://localhost:6379
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=artifacts
+S3_REGION=us-east-1
+S3_FORCE_PATH_STYLE=true
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-## 5) Run (Recommended: Docker for Infra + Host App)
+If port `9000` is bad/occupied, run MinIO on `9100` and change:
+```env
+S3_ENDPOINT=http://127.0.0.1:9100
+```
 
-### 5.1 Start infra
+## 4) Full Local Run (Recommended)
+
+### Step 1: Start background infra
 ```bash
 docker compose up -d postgres redis minio
 ```
 
-### 5.2 Install app dependencies
+### Step 2: Verify infra
 ```bash
-pnpm install
+curl -i http://localhost:9000/minio/health/live
+psql "postgresql://postgres:postgres@localhost:5432/tribalai3d" -c "select 1;"
 ```
 
-### 5.3 Prepare database
+### Step 3: Install deps + DB
 ```bash
+pnpm install
 pnpm db:generate
 pnpm db:migrate
 pnpm db:seed
 ```
 
-### 5.4 Start app + worker
-In terminal 1:
+### Step 4: Start app and worker
+Terminal A:
 ```bash
 pnpm dev
 ```
 
-In terminal 2:
+Terminal B:
 ```bash
 pnpm worker
 ```
@@ -146,64 +127,88 @@ Open:
 - App: `http://localhost:3000`
 - MinIO console: `http://localhost:9001`
 
-## 6) Run Fully in Docker
+## 5) Alternative: Full Docker Run
 
 ```bash
 docker compose up --build
 ```
 
-This starts app + worker + postgres + redis + minio together.
+This runs app + worker + postgres + redis + minio together.
 
-## 7) First-Run Flow
+## 6) GroundingDINO Runtime Notes
 
-1. Open `/` and click **Get started** or **Open demo**.
-2. Open a project and go to **Canvas**.
-3. Right-click on canvas, pick class (`Inputs/Models/Geometry/Outputs`), then select node.
-4. Save and run workflow.
-5. Open **Runs** to inspect progress/logs.
-6. Open **Viewer** from artifact link, or upload local `.ply/.glb` directly in viewer.
+The GroundingDINO executor can call Python:
+```bash
+conda run -n grounding_dino python demo/inference_for_webapp.py ...
+```
 
-## 8) Common Troubleshooting
+Expected:
+- `models/GroundingDINO/demo/inference_for_webapp.py` exists
+- model weights available in expected path
+
+If Conda/weights are missing, run logs show failure in the run panel.
+
+## 7) Smoke Test Checklist
+
+1. Open `/app`, create a project, confirm it opens canvas.
+2. Add `input.image`, upload image, confirm node preview appears.
+3. Add `model.groundingdino`, connect and run node.
+4. Add `model.sam2`, connect from DINO and verify guided mode.
+5. Open runs page and verify logs/progress/artifacts.
+6. Open viewer with artifact:
+   - GLB/PLY -> Three renderer
+   - splat formats -> Babylon GS renderer
+7. Delete project and verify related files disappear from `.local-storage/projects/{projectId}`.
+
+## 8) Known/Expected Warnings
+
+- If MinIO is unavailable:
+  - logs show S3 unavailable/fallback warnings
+  - app still works using `.local-storage/`
+- Redis warning about minimum recommended version:
+  - non-blocking in current dev flow if queue still runs
+
+## 9) Troubleshooting
+
+### `curl: (1) Received HTTP/0.9 when not allowed`
+Port is not serving valid MinIO HTTP API.
+
+Check owner:
+```bash
+sudo lsof -nP -iTCP:9000 -sTCP:LISTEN
+```
+
+Run MinIO on clean ports:
+```bash
+minio server ~/minio-data --address :9100 --console-address :9101
+```
+
+Update `.env` to:
+```env
+S3_ENDPOINT=http://127.0.0.1:9100
+```
+
+Restart app + worker.
+
+### `Parse Error: Expected HTTP/, RTSP/ or ICE/`
+Usually wrong endpoint/protocol (`http` vs `https`) or wrong service behind configured S3 port.
+
+### `relation "UploadAsset" does not exist`
+Run:
+```bash
+pnpm db:migrate
+```
+
+### `Database ... does not exist`
+Start/create Postgres database first, then migrate.
 
 ### `pnpm: command not found`
-Use corepack:
-```bash
-corepack enable
-corepack prepare pnpm@9.15.0 --activate
-```
+Use corepack setup above.
 
-### Prisma error: `Environment variable not found: DATABASE_URL`
-- Ensure `.env` exists in repo root.
-- Ensure `DATABASE_URL` is set correctly.
+## 10) Operational Notes
 
-### Prisma `P1001: Can't reach database server`
-- Start PostgreSQL (`docker compose up -d postgres`).
-- Verify connectivity:
-```bash
-psql "postgresql://postgres:postgres@localhost:5432/tribalai3d" -c "select 1;"
-```
+- Project deletion flow now removes:
+  - DB entities (`Project`, `Graph`, `Run`, `Artifact`, `CacheEntry`, `UploadAsset`)
+  - Storage prefix `projects/{projectId}/` in S3 and local fallback.
+- Storage module automatically throttles repeated fallback warnings.
 
-### Viewer artifact URL returns 404
-- Artifact metadata may exist but object file is missing in MinIO/S3.
-- Re-run workflow to regenerate artifact.
-- Confirm `S3_ENDPOINT`, `S3_BUCKET`, and MinIO process/port are correct.
-
-### MinIO port conflict
-If `9000` is occupied, run MinIO on another port and update `.env` `S3_ENDPOINT` accordingly.
-
-## 9) Extending with Real Models
-
-Current execution is intentionally modular:
-- Keep graph planning + run orchestration in Node/worker.
-- Replace mock node execution with calls to Python/FastAPI/local tools.
-- Return artifacts via existing storage + metadata flow.
-
-## 10) Extending Export Pipeline (meshopt/KTX2/Draco)
-
-Future integration path:
-- Add conversion module invoked by export node (`out.export_scene`).
-- Use CLI wrappers for tools (e.g., `gltfpack`, `gltf-transform`, draco pipeline).
-- Store conversion stats in `Artifact.meta`.
-
----
-If you want, I can also generate a shorter `QUICKSTART.md` that only contains the minimal commands for daily development.
