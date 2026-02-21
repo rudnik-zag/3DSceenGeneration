@@ -11,6 +11,9 @@ __pycache__/
 build/
 develop-eggs/
 node_modules/
+my_test_image/
+output/
+weights/
 .next/
 dist/
 downloads/

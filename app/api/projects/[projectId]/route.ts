@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db";
+import { getOrCreateDefaultUser } from "@/lib/default-user";
 
 export async function GET(
   _req: NextRequest,
@@ -30,4 +31,34 @@ export async function GET(
   }
 
   return NextResponse.json({ project });
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ projectId: string }> }
+) {
+  const { projectId } = await params;
+  const user = await getOrCreateDefaultUser();
+
+  const project = await prisma.project.findFirst({
+    where: {
+      id: projectId,
+      userId: user.id
+    },
+    select: { id: true, name: true }
+  });
+
+  if (!project) {
+    return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.cacheEntry.deleteMany({ where: { projectId } });
+    await tx.artifact.deleteMany({ where: { projectId } });
+    await tx.run.deleteMany({ where: { projectId } });
+    await tx.graph.deleteMany({ where: { projectId } });
+    await tx.project.delete({ where: { id: projectId } });
+  });
+
+  return NextResponse.json({ ok: true, deletedProjectId: projectId, deletedProjectName: project.name });
 }

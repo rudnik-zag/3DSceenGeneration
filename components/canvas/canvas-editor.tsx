@@ -17,7 +17,10 @@ import {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import {
+  Boxes,
+  Camera,
   ExternalLink,
+  Image as ImageIcon,
   LocateFixed,
   Map,
   Minus,
@@ -25,9 +28,12 @@ import {
   Play,
   Plus,
   Save,
+  Scan,
   Share2,
   SlidersHorizontal,
+  Sparkles,
   Square,
+  Type,
   WandSparkles,
   Zap,
   ZoomIn
@@ -47,7 +53,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
 import { nodeGroups, nodeSpecRegistry } from "@/lib/graph/node-specs";
-import { cn } from "@/lib/utils";
 import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
@@ -100,6 +105,44 @@ const nodeTypes = {
   "out.open_in_viewer": WorkflowNode
 };
 
+const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
+  "input.text": "T",
+  "input.image": "I",
+  "input.cameraPath": "C",
+  "model.groundingdino": "G",
+  "model.sam2": "S",
+  "model.sam3d_objects": "3",
+  "model.qwen_vl": "Q",
+  "model.qwen_image_edit": "E",
+  "model.texturing": "X",
+  "geo.depth_estimation": "D",
+  "geo.pointcloud_from_depth": "P",
+  "geo.mesh_reconstruction": "M",
+  "geo.uv_unwrap": "U",
+  "geo.bake_textures": "B",
+  "out.export_scene": "O",
+  "out.open_in_viewer": "V"
+};
+
+const categoryLabelMap: Record<ContextMenuCategory, string> = {
+  Inputs: "Add Source",
+  Models: "Add Model",
+  Geometry: "Add Geometry",
+  Outputs: "Add Output"
+};
+
+function getContextRowIcon(type: WorkflowNodeType) {
+  if (type.startsWith("input.text")) return Type;
+  if (type.startsWith("input.image")) return ImageIcon;
+  if (type.startsWith("input.cameraPath")) return Camera;
+  if (type.startsWith("model.groundingdino")) return Scan;
+  if (type.startsWith("model.sam")) return Boxes;
+  if (type.startsWith("model.")) return WandSparkles;
+  if (type.startsWith("out.")) return ExternalLink;
+  if (type.startsWith("geo.")) return Sparkles;
+  return Sparkles;
+}
+
 function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
   const artifact = artifacts.find((a) => a.nodeId === base.id);
   return {
@@ -146,7 +189,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     jsonSnippet: null
   });
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
-  const [selectedContextCategory, setSelectedContextCategory] = useState<ContextMenuCategory>("Inputs");
   const [showMiniMap, setShowMiniMap] = useState(true);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasPanelRef = useRef<HTMLDivElement>(null);
@@ -163,10 +205,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         }))
         .filter((group) => group.specs.length > 0),
     [orderedCategories]
-  );
-  const activeContextGroup = useMemo(
-    () => contextMenuGroups.find((group) => group.category === selectedContextCategory) ?? contextMenuGroups[0],
-    [contextMenuGroups, selectedContextCategory]
   );
 
   useEffect(() => {
@@ -201,12 +239,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.removeEventListener("keydown", onEscape);
     };
   }, [paneMenu]);
-
-  useEffect(() => {
-    if (!contextMenuGroups.some((group) => group.category === selectedContextCategory)) {
-      setSelectedContextCategory(contextMenuGroups[0]?.category ?? "Inputs");
-    }
-  }, [contextMenuGroups, selectedContextCategory]);
 
   useEffect(() => {
     const artifactId = selectedNode?.data.latestArtifactId;
@@ -296,37 +328,80 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     event.dataTransfer.dropEffect = "move";
   };
 
-  const onPaneContextMenu = useCallback(
-    (event: React.MouseEvent) => {
-      event.preventDefault();
-
-      const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+  const openPaneMenuAtScreenPoint = useCallback(
+    (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
       const rect = canvasPanelRef.current?.getBoundingClientRect();
-      const initialCategory = contextMenuGroups[0]?.category ?? "Inputs";
-      setSelectedContextCategory(initialCategory);
+      const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
 
       if (!rect) {
-        setPaneMenu({ x: event.clientX, y: event.clientY, flowX: flow.x, flowY: flow.y });
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
         return;
       }
 
-      const menuWidth = 320;
-      const menuHeight = 480;
-      const rawX = event.clientX - rect.left;
-      const rawY = event.clientY - rect.top;
+      const menuWidth = 318;
+      const menuHeight = 540;
+      const rawX = clientX - rect.left;
+      const rawY = clientY - rect.top;
       const x = Math.max(10, Math.min(rawX, rect.width - menuWidth - 10));
       const y = Math.max(10, Math.min(rawY, rect.height - menuHeight - 10));
 
       setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
     },
-    [contextMenuGroups, reactFlow]
+    [reactFlow]
   );
 
-  const addNodeFromContextMenu = (nodeType: WorkflowNodeType) => {
+  const onPaneContextMenu = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault();
+      openPaneMenuAtScreenPoint(event.clientX, event.clientY);
+    },
+    [openPaneMenuAtScreenPoint]
+  );
+
+  const onPaneClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (event.detail === 2) {
+        openPaneMenuAtScreenPoint(event.clientX, event.clientY);
+        return;
+      }
+      setPaneMenu(null);
+    },
+    [openPaneMenuAtScreenPoint]
+  );
+
+  const addNodeFromContextMenu = useCallback(
+    (nodeType: WorkflowNodeType) => {
+      if (!paneMenu) return;
+      addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
+      setPaneMenu(null);
+    },
+    [addNode, paneMenu]
+  );
+
+  useEffect(() => {
     if (!paneMenu) return;
-    addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
-    setPaneMenu(null);
-  };
+
+    const onShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable;
+      if (isTyping) return;
+
+      const pressed = event.key.toUpperCase();
+      const match = (Object.entries(shortcutByNodeType) as Array<[WorkflowNodeType, string]>).find(
+        ([, shortcut]) => shortcut.toUpperCase() === pressed
+      );
+
+      if (!match) return;
+      event.preventDefault();
+      addNodeFromContextMenu(match[0]);
+    };
+
+    window.addEventListener("keydown", onShortcut);
+    return () => window.removeEventListener("keydown", onShortcut);
+  }, [paneMenu, addNodeFromContextMenu]);
 
   const addNodeAtViewportCenter = (nodeType: WorkflowNodeType) => {
     const rect = canvasPanelRef.current?.getBoundingClientRect();
@@ -357,11 +432,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
   const openNodeMenuAtViewportCenter = useCallback(() => {
     const rect = canvasPanelRef.current?.getBoundingClientRect();
-    const initialCategory = contextMenuGroups[0]?.category ?? "Inputs";
-    setSelectedContextCategory(initialCategory);
-
     if (!rect) {
-      setPaneMenu({ x: 92, y: 72, flowX: 80, flowY: 80 });
+      openPaneMenuAtScreenPoint(92, 72, { x: 80, y: 80 });
       return;
     }
 
@@ -369,13 +441,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2
     });
-    setPaneMenu({
-      x: 92,
-      y: 72,
-      flowX: flow.x,
-      flowY: flow.y
-    });
-  }, [contextMenuGroups, reactFlow]);
+    openPaneMenuAtScreenPoint(rect.left + 92, rect.top + 72, { x: flow.x, y: flow.y });
+  }, [openPaneMenuAtScreenPoint, reactFlow]);
 
   const insertImagePromptTemplate = useCallback(() => {
     const rect = canvasPanelRef.current?.getBoundingClientRect();
@@ -894,7 +961,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
           </div>
 
-          <div className="absolute left-3 top-1/2 z-20 -translate-y-1/2 space-y-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm">
+          <div className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm">
             <Button size="icon" variant="outline" className="h-10 w-10 rounded-full" onClick={openNodeMenuAtViewportCenter}>
               <Plus className="h-4 w-4" />
             </Button>
@@ -925,7 +992,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onPaneContextMenu={onPaneContextMenu}
-            onPaneClick={() => setPaneMenu(null)}
+            onPaneClick={onPaneClick}
             fitView
             panOnScroll
             panOnDrag
@@ -950,78 +1017,47 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           {paneMenu ? (
             <div
               ref={paneMenuRef}
-              className="absolute z-30 w-80 rounded-2xl border border-border/70 bg-[#090d18]/95 p-3 shadow-[0_28px_80px_rgba(0,0,0,0.55)] backdrop-blur-md"
+              className="absolute z-30 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md"
               style={{ left: paneMenu.x, top: paneMenu.y }}
             >
               <div className="mb-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Add Node</p>
-                <p className="text-xs text-zinc-400">Right-click menu at cursor position</p>
-              </div>
-              <div className="mb-2 grid grid-cols-2 gap-1">
-                {contextMenuGroups.map((group) => (
-                  <button
-                    key={`tab-${group.category}`}
-                    type="button"
-                    onClick={() => setSelectedContextCategory(group.category)}
-                    className={cn(
-                      "rounded-lg border px-2 py-1.5 text-left text-[11px] font-medium transition",
-                      selectedContextCategory === group.category
-                        ? "border-primary/50 bg-primary/15 text-zinc-100"
-                        : "border-border/70 bg-background/50 text-zinc-300 hover:border-primary/35 hover:bg-accent"
-                    )}
-                  >
-                    {group.category}
-                  </button>
-                ))}
+                <p className="text-xs text-zinc-500">Add Node</p>
               </div>
 
-              <ScrollArea className="max-h-[20rem] pr-2">
+              <ScrollArea className="max-h-[24rem] pr-2">
                 <div className="space-y-3">
-                  {activeContextGroup ? (
-                    <div>
-                      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-300">
-                        {activeContextGroup.category}
-                      </p>
-                      <div className="space-y-1.5">
-                        {activeContextGroup.specs.map((spec) => (
-                          <button
-                            key={`active-${spec.type}`}
-                            type="button"
-                            onClick={() => addNodeFromContextMenu(spec.type)}
-                            className="w-full rounded-lg border border-border/70 bg-background/50 px-2.5 py-1.5 text-left text-xs transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent"
-                          >
-                            <p className="font-medium text-zinc-100">{spec.title}</p>
-                            <p className="text-[10px] text-zinc-400">{spec.type}</p>
-                          </button>
-                        ))}
+                  {contextMenuGroups.map((group) => (
+                    <div key={`ctx-${group.category}`} className="rounded-xl border border-white/10 bg-white/[0.015] p-2">
+                      <p className="mb-1.5 text-xs text-zinc-500">{categoryLabelMap[group.category]}</p>
+                      <div className="space-y-1">
+                        {group.specs.map((spec) => {
+                          const RowIcon = getContextRowIcon(spec.type);
+                          const shortcut = shortcutByNodeType[spec.type];
+                          return (
+                            <button
+                              key={`ctx-node-${spec.type}`}
+                              type="button"
+                              onClick={() => addNodeFromContextMenu(spec.type)}
+                              className="group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-2 text-left text-sm text-zinc-200 transition hover:border-white/10 hover:bg-white/5"
+                            >
+                              <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-200">
+                                <RowIcon className="h-4 w-4" />
+                              </span>
+                              <span className="flex-1 leading-none">{spec.title}</span>
+                              {shortcut ? <span className="text-xs text-zinc-500">{shortcut}</span> : null}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">No nodes in this category.</p>
-                  )}
-
-                  <div className="border-t border-border/70 pt-2">
-                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">All Classes</p>
-                    <div className="space-y-1">
-                      {contextMenuGroups.map((group) => (
-                        <button
-                          key={`jump-${group.category}`}
-                          type="button"
-                          onClick={() => setSelectedContextCategory(group.category)}
-                          className={cn(
-                            "w-full rounded-lg border px-2.5 py-1.5 text-left text-xs transition",
-                            selectedContextCategory === group.category
-                              ? "border-primary/40 bg-primary/10 text-zinc-100"
-                              : "border-border/70 bg-background/40 text-zinc-300 hover:bg-accent"
-                          )}
-                        >
-                          {group.category} ({group.specs.length})
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </ScrollArea>
+
+              <div className="mt-3 flex items-center justify-between border-t border-white/10 px-1 pt-2 text-xs text-zinc-500">
+                <span>↕ Navigate</span>
+                <span>↵ Select</span>
+              </div>
             </div>
           ) : null}
         </div>

@@ -2,10 +2,18 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { toast } from "@/hooks/use-toast";
 
@@ -23,8 +31,10 @@ export interface ProjectItem {
 export function DashboardClient({ initialProjects }: { initialProjects: ProjectItem[] }) {
   const [projects, setProjects] = useState(initialProjects);
   const [name, setName] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const router = useRouter();
 
   const sorted = useMemo(
@@ -37,13 +47,19 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
     [sorted, search]
   );
 
-  const createProject = async () => {
+  const createProject = async (rawName?: string) => {
+    const projectName = (rawName ?? name).trim();
+    if (!projectName) {
+      toast({ title: "Project name required", description: "Enter a name before creating the project." });
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name })
+        body: JSON.stringify({ name: projectName })
       });
       if (!res.ok) {
         throw new Error("Failed to create project");
@@ -57,6 +73,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
         ...prev
       ]);
       setName("");
+      setCreateOpen(false);
       toast({ title: "Project created", description: data.project.name });
       router.push(`/app/p/${data.project.id}/canvas`);
       router.refresh();
@@ -67,8 +84,60 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
     }
   };
 
+  const deleteProject = async (projectId: string, projectName: string) => {
+    const confirmed = window.confirm(`Delete project "${projectName}"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeletingId(projectId);
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: "DELETE"
+      });
+      if (!res.ok) {
+        throw new Error("Failed to delete project");
+      }
+
+      setProjects((prev) => prev.filter((project) => project.id !== projectId));
+      toast({ title: "Project deleted", description: projectName });
+      router.refresh();
+    } catch (error) {
+      toast({ title: "Delete failed", description: error instanceof Error ? error.message : "Unknown error" });
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="rounded-2xl border-border/70 panel-blur">
+          <DialogHeader>
+            <DialogTitle className="text-white">Create Project</DialogTitle>
+            <DialogDescription>Give your project a name and start from the canvas.</DialogDescription>
+          </DialogHeader>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void createProject();
+              }
+            }}
+            className="h-10 rounded-xl border-border/70 bg-background/70"
+            placeholder="Project name"
+          />
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setCreateOpen(false)} disabled={loading}>
+              Cancel
+            </Button>
+            <Button className="rounded-xl" onClick={() => void createProject()} disabled={loading}>
+              {loading ? "Creating..." : "Create Project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <div className="rounded-2xl border border-border/70 panel-blur p-4 md:p-5">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
@@ -86,31 +155,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                 placeholder="Search"
               />
             </div>
-            <Button className="h-9 rounded-xl" onClick={createProject} disabled={loading}>
+            <Button className="h-9 rounded-xl" onClick={() => setCreateOpen(true)}>
               <Plus className="mr-1.5 h-4 w-4" />
-              {loading ? "Creating..." : "New project"}
+              New project
             </Button>
           </div>
         </div>
       </div>
-
-      <Card className="rounded-2xl border-border/70 panel-blur">
-        <CardHeader>
-          <CardTitle className="text-base text-white">Quick Create</CardTitle>
-          <CardDescription>Give the project a name and jump directly into the canvas.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="h-10 rounded-xl border-border/70 bg-background/70"
-            placeholder="Project name"
-          />
-          <Button onClick={createProject} disabled={loading} className="h-10 rounded-xl">
-            {loading ? "Creating..." : "Create"}
-          </Button>
-        </CardContent>
-      </Card>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {filtered.map((project) => (
@@ -136,6 +187,16 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                 onClick={() => router.push(`/app/p/${project.id}/runs`)}
               >
                 Runs
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                className="ml-auto rounded-lg"
+                onClick={() => void deleteProject(project.id, project.name)}
+                disabled={deletingId === project.id}
+              >
+                <Trash2 className="mr-1 h-4 w-4" />
+                {deletingId === project.id ? "Deleting..." : "Delete"}
               </Button>
             </CardContent>
           </Card>
