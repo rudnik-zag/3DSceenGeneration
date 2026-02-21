@@ -28,7 +28,7 @@ async function canPersistUploadAsset() {
 
   try {
     const result = await prisma.$queryRaw<Array<{ table_name: string | null }>>(
-      Prisma.sql`SELECT to_regclass('public."UploadAsset"') AS table_name`
+      Prisma.sql`SELECT to_regclass('public."UploadAsset"')::text AS table_name`
     );
     uploadAssetTableExists = Boolean(result[0]?.table_name);
   } catch {

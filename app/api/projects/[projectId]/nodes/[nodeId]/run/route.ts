@@ -9,6 +9,7 @@ export async function POST(
 ) {
   const { projectId, nodeId } = await params;
   const body = await req.json().catch(() => ({}));
+  const forceNodeCacheBypass = body.forceNodeCacheBypass !== false;
 
   let graphId = typeof body.graphId === "string" ? body.graphId : undefined;
   if (!graphId) {
@@ -29,7 +30,7 @@ export async function POST(
       projectId,
       graphId,
       status: "queued",
-      logs: `[${new Date().toISOString()}] Node run queued (${nodeId})`,
+      logs: `[${new Date().toISOString()}] Node run queued (${nodeId}) forceCacheBypass=${forceNodeCacheBypass}`,
       progress: 0
     }
   });
@@ -40,7 +41,8 @@ export async function POST(
       projectId,
       graphId,
       runId: run.id,
-      startNodeId: nodeId
+      startNodeId: nodeId,
+      forceNodeIds: forceNodeCacheBypass ? [nodeId] : []
     },
     {
       jobId: run.id

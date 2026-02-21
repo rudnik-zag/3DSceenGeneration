@@ -92,6 +92,12 @@ interface PaneContextMenuState {
   flowY: number;
 }
 
+interface PendingConnectState {
+  nodeId: string;
+  handleId: string | null;
+  handleType: "source" | "target";
+}
+
 type ContextMenuCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 
 const nodeTypes = {
@@ -243,6 +249,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     jsonSnippet: null
   });
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
+  const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
   const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
   const [showMiniMap, setShowMiniMap] = useState(true);
@@ -252,6 +259,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
+  const suppressNextPaneClickRef = useRef(false);
   const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didHydrateDraftRef = useRef(false);
   const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
@@ -329,6 +337,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     if (!paneMenu) {
       setActiveMenuCategory(null);
       setMenuSearch("");
+      setPendingConnect(null);
       return;
     }
     if (!activeMenuCategory) {
@@ -458,7 +467,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, [selectedNode?.data.latestArtifactId, selectedNode?.data.previewUrl, selectedNode?.data.latestArtifactKind]);
 
   const onConnect = useCallback<OnConnect>(
-    (params) =>
+    (params) => {
+      setPendingConnect(null);
       setEdges((eds) =>
         addEdge(
           withStyledEdge({
@@ -467,8 +477,85 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           } as Edge),
           eds
         )
-      ),
+      );
+    },
     [setEdges]
+  );
+
+  const onConnectStart = useCallback((_event: unknown, params: { nodeId?: string | null; handleId?: string | null; handleType?: "source" | "target" | null }) => {
+    if (!params?.nodeId || !params.handleType) {
+      setPendingConnect(null);
+      return;
+    }
+    setPendingConnect({
+      nodeId: params.nodeId,
+      handleId: params.handleId ?? null,
+      handleType: params.handleType
+    });
+  }, []);
+
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent, connectionState?: { isValid: boolean }) => {
+      if (!pendingConnect) return;
+      if (connectionState?.isValid) {
+        setPendingConnect(null);
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const droppedInsideCanvas = canvasPanelRef.current?.contains(target ?? null) ?? false;
+      const droppedOnUiElement = Boolean(
+        target?.closest(
+          ".react-flow__node, .react-flow__handle, .react-flow__edgeupdater, .react-flow__controls, .react-flow__minimap, .react-flow__attribution, [data-no-connect-menu='true']"
+        )
+      );
+      if (!droppedInsideCanvas || droppedOnUiElement) {
+        setPendingConnect(null);
+        return;
+      }
+
+      const clientX =
+        "clientX" in event
+          ? event.clientX
+          : event.changedTouches && event.changedTouches[0]
+            ? event.changedTouches[0].clientX
+            : null;
+      const clientY =
+        "clientY" in event
+          ? event.clientY
+          : event.changedTouches && event.changedTouches[0]
+            ? event.changedTouches[0].clientY
+            : null;
+
+      if (typeof clientX !== "number" || typeof clientY !== "number") {
+        setPendingConnect(null);
+        return;
+      }
+
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const flow = reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+      if (!rect) {
+        suppressNextPaneClickRef.current = true;
+        setTimeout(() => {
+          suppressNextPaneClickRef.current = false;
+        }, 0);
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
+        return;
+      }
+
+      const menuWidth = 318;
+      const menuHeight = 540;
+      const rawX = clientX - rect.left;
+      const rawY = clientY - rect.top;
+      const x = Math.max(10, Math.min(rawX, rect.width - menuWidth - 10));
+      const y = Math.max(10, Math.min(rawY, rect.height - menuHeight - 10));
+      suppressNextPaneClickRef.current = true;
+      setTimeout(() => {
+        suppressNextPaneClickRef.current = false;
+      }, 0);
+      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
+    },
+    [pendingConnect, reactFlow]
   );
 
   const addNode = useCallback(
@@ -491,6 +578,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         }
       };
       setNodes((prev) => [...prev, newNode]);
+      return id;
     },
     [nodeScalePreset, setNodes]
   );
@@ -552,6 +640,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent) => {
       event.preventDefault();
+      setPendingConnect(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
@@ -559,7 +648,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
   const onPaneClick = useCallback(
     (_event: React.MouseEvent) => {
+      if (suppressNextPaneClickRef.current) {
+        return;
+      }
       setPaneMenu(null);
+      setPendingConnect(null);
     },
     []
   );
@@ -576,10 +669,46 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const addNodeFromContextMenu = useCallback(
     (nodeType: WorkflowNodeType) => {
       if (!paneMenu) return;
-      addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
+      const newNodeId = addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
+      if (pendingConnect) {
+        if (pendingConnect.handleType === "source") {
+          const targetHandle = nodeSpecRegistry[nodeType].inputPorts[0]?.id;
+          if (targetHandle) {
+            setEdges((prev) =>
+              addEdge(
+                withStyledEdge({
+                  id: `${pendingConnect.nodeId}-${newNodeId}-${Date.now()}`,
+                  source: pendingConnect.nodeId,
+                  sourceHandle: pendingConnect.handleId ?? undefined,
+                  target: newNodeId,
+                  targetHandle
+                } as Edge),
+                prev
+              )
+            );
+          }
+        } else {
+          const sourceHandle = nodeSpecRegistry[nodeType].outputPorts[0]?.id;
+          if (sourceHandle) {
+            setEdges((prev) =>
+              addEdge(
+                withStyledEdge({
+                  id: `${newNodeId}-${pendingConnect.nodeId}-${Date.now()}`,
+                  source: newNodeId,
+                  sourceHandle,
+                  target: pendingConnect.nodeId,
+                  targetHandle: pendingConnect.handleId ?? undefined
+                } as Edge),
+                prev
+              )
+            );
+          }
+        }
+      }
+      setPendingConnect(null);
       setPaneMenu(null);
     },
-    [addNode, paneMenu]
+    [addNode, paneMenu, pendingConnect, setEdges]
   );
 
   useEffect(() => {
@@ -1000,6 +1129,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     const lines = logs.split("\n");
     const executed = new Set<string>();
     const cached = new Set<string>();
+    const sourceResolved = new Set<string>();
     const errored = new Set<string>();
     const groupedArtifacts = artifactPairs.reduce<Record<string, typeof artifactPairs>>((acc, artifact) => {
       if (!acc[artifact.nodeId]) acc[artifact.nodeId] = [];
@@ -1010,8 +1140,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     lines.forEach((line) => {
       const executedMatch = line.match(/\] (.+) executed/);
       const cacheMatch = line.match(/\] (.+) cache-hit/);
+      const sourceResolvedMatch = line.match(/\] (.+) source-resolved/);
       if (executedMatch?.[1]) executed.add(executedMatch[1]);
       if (cacheMatch?.[1]) cached.add(cacheMatch[1]);
+      if (sourceResolvedMatch?.[1]) sourceResolved.add(sourceResolvedMatch[1]);
       if (line.includes("ERROR")) {
         const maybeNode = nodes.find((n) => line.includes(n.id));
         if (maybeNode) errored.add(maybeNode.id);
@@ -1067,8 +1199,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
         if (errored.has(node.id)) runtimeStatus = "error";
         else if (cached.has(node.id)) runtimeStatus = "cache-hit";
+        else if (sourceResolved.has(node.id)) runtimeStatus = "success";
         else if (executed.has(node.id)) runtimeStatus = "success";
-        else if (hasRunningOrQueued) runtimeStatus = "running";
+        else if (hasRunningOrQueued && node.data.status === "running") runtimeStatus = "running";
 
         return {
           ...node,
@@ -1181,9 +1314,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           ...node,
           data: {
             ...node.data,
-            status: targets.has(node.id) ? "running" : node.data.status,
-            runProgress: targets.has(node.id) ? 0 : node.data.runProgress ?? 0,
-            runtimeWarning: targets.has(node.id) ? null : node.data.runtimeWarning
+            status:
+              targets.has(node.id) && node.type !== "input.image"
+                ? "running"
+                : node.data.status,
+            runProgress:
+              targets.has(node.id) && node.type !== "input.image"
+                ? 0
+                : node.data.runProgress ?? 0,
+            runtimeWarning:
+              targets.has(node.id) && node.type !== "input.image"
+                ? null
+                : node.data.runtimeWarning
           }
         }))
       );
@@ -1703,6 +1845,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onConnectStart={onConnectStart}
+            onConnectEnd={onConnectEnd}
             onPaneContextMenu={onPaneContextMenu}
             onPaneClick={onPaneClick}
             fitView

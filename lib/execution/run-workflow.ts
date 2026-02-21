@@ -15,6 +15,7 @@ export interface RunWorkflowInput {
   graphId: string;
   runId: string;
   startNodeId?: string;
+  forceNodeIds?: string[];
 }
 
 const runner = new MockModelRunner();
@@ -22,6 +23,14 @@ const runner = new MockModelRunner();
 interface RuntimeArtifactRef extends ResolvedArtifactInput {
   createdAt: Date;
   previewStorageKey: string | null;
+}
+
+function inferImageMimeTypeFromPath(value: string) {
+  const lowered = value.toLowerCase();
+  if (lowered.endsWith(".png")) return "image/png";
+  if (lowered.endsWith(".webp")) return "image/webp";
+  if (lowered.endsWith(".svg")) return "image/svg+xml";
+  return "image/jpeg";
 }
 
 function appendLog(prev: string, line: string) {
@@ -139,6 +148,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     }
 
     const document = parseGraphDocument(graph.graphJson);
+    const documentNodeById = new Map(document.nodes.map((node) => [node.id, node]));
     const plan = buildExecutionPlan(document, input.startNodeId);
     const producedByOutput = new Map<string, RuntimeArtifactRef>();
     const producedByArtifactId = new Map<string, RuntimeArtifactRef>();
@@ -148,6 +158,8 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const task = plan.tasks[i];
       const spec = nodeSpecRegistry[task.nodeType];
       const now = new Date().toISOString();
+      const forcedNodeSet = new Set(input.forceNodeIds ?? []);
+      const shouldBypassCache = forcedNodeSet.has(task.nodeId);
       const currentRun = await prisma.run.findUnique({ where: { id: input.runId } });
       if (currentRun?.status === "canceled") {
         throw new Error("Run canceled by user");
@@ -156,8 +168,47 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const inputsByPort: Record<string, RuntimeArtifactRef[]> = {};
       for (const binding of task.inputBindings) {
         const produced = producedByOutput.get(mapKey(binding.sourceNodeId, binding.sourceOutputId));
-        const resolved =
+        let resolved =
           produced ?? (await findLatestArtifactByNodeOutput(input.projectId, binding.sourceNodeId, binding.sourceOutputId));
+
+        if (!resolved) {
+          const sourceNode = documentNodeById.get(binding.sourceNodeId);
+          const sourceStorageKey =
+            sourceNode?.type === "input.image" &&
+            sourceNode?.data?.params &&
+            typeof sourceNode.data.params.storageKey === "string"
+              ? sourceNode.data.params.storageKey
+              : "";
+
+          if (sourceNode?.type === "input.image" && binding.sourceOutputId === "image" && sourceStorageKey) {
+            const sourceBuffer = await getObjectBuffer(sourceStorageKey);
+            const sourceHash = stableHashForOutput(sourceBuffer);
+            const filename =
+              typeof sourceNode.data?.params?.filename === "string" && sourceNode.data.params.filename.length > 0
+                ? sourceNode.data.params.filename
+                : sourceStorageKey.split("/").pop() ?? "image.jpg";
+            resolved = {
+              artifactId: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
+              nodeId: binding.sourceNodeId,
+              outputId: "image",
+              kind: "image",
+              hash: sourceHash,
+              mimeType: inferImageMimeTypeFromPath(filename),
+              storageKey: sourceStorageKey,
+              byteSize: sourceBuffer.length,
+              meta: {
+                outputKey: "image",
+                filename,
+                sourceStorageKey
+              },
+              createdAt: new Date(),
+              previewStorageKey: null
+            };
+            producedByOutput.set(mapKey(binding.sourceNodeId, "image"), resolved);
+            producedByArtifactId.set(resolved.artifactId, resolved);
+          }
+        }
+
         if (!resolved) {
           continue;
         }
@@ -211,6 +262,47 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         }
       }
 
+      if (task.nodeType === "input.image") {
+        const storageKey = typeof task.params.storageKey === "string" ? task.params.storageKey : "";
+        if (storageKey) {
+          const sourceBuffer = await getObjectBuffer(storageKey);
+          const sourceHash = stableHashForOutput(sourceBuffer);
+          const filename =
+            typeof task.params.filename === "string" && task.params.filename.length > 0
+              ? task.params.filename
+              : storageKey.split("/").pop() ?? "image.jpg";
+          const sourceArtifact: RuntimeArtifactRef = {
+            artifactId: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+            nodeId: task.nodeId,
+            outputId: "image",
+            kind: "image",
+            hash: sourceHash,
+            mimeType: inferImageMimeTypeFromPath(filename),
+            storageKey,
+            byteSize: sourceBuffer.length,
+            meta: {
+              outputKey: "image",
+              filename,
+              sourceStorageKey: storageKey
+            },
+            createdAt: new Date(),
+            previewStorageKey: null
+          };
+          producedByOutput.set(mapKey(task.nodeId, "image"), sourceArtifact);
+          producedByArtifactId.set(sourceArtifact.artifactId, sourceArtifact);
+
+          const progress = Math.round(((i + 1) / total) * 100);
+          await updateRun(input.runId, {
+            progress,
+            logs: appendLog(
+              currentRun?.logs ?? "",
+              `[${now}] ${task.nodeId} source-resolved storageKey=${storageKey}`
+            )
+          });
+          continue;
+        }
+      }
+
       const nodeBaseCacheKey = makeCacheKey(
         task.nodeType,
         task.params,
@@ -219,21 +311,23 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       );
 
       const outputCacheHits = new Map<string, RuntimeArtifactRef>();
-      let allOutputsCached = true;
-      for (const outputPort of spec.outputPorts) {
-        const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, outputPort.id);
-        const hit = await prisma.cacheEntry.findUnique({
-          where: { cacheKey: outputCacheKey },
-          include: { artifact: true }
-        });
-        if (!hit?.artifact) {
-          allOutputsCached = false;
-          break;
+      let allOutputsCached = !shouldBypassCache;
+      if (!shouldBypassCache) {
+        for (const outputPort of spec.outputPorts) {
+          const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, outputPort.id);
+          const hit = await prisma.cacheEntry.findUnique({
+            where: { cacheKey: outputCacheKey },
+            include: { artifact: true }
+          });
+          if (!hit?.artifact) {
+            allOutputsCached = false;
+            break;
+          }
+          outputCacheHits.set(outputPort.id, mapArtifact(hit.artifact));
         }
-        outputCacheHits.set(outputPort.id, mapArtifact(hit.artifact));
       }
 
-      if (allOutputsCached && outputCacheHits.size > 0) {
+      if (allOutputsCached && outputCacheHits.size > 0 && !shouldBypassCache) {
         for (const [outputId, artifact] of outputCacheHits.entries()) {
           producedByOutput.set(mapKey(task.nodeId, outputId), artifact);
           producedByArtifactId.set(artifact.artifactId, artifact);
@@ -249,6 +343,15 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           )
         });
         continue;
+      }
+
+      if (shouldBypassCache) {
+        await updateRun(input.runId, {
+          logs: appendLog(
+            currentRun?.logs ?? "",
+            `[${now}] ${task.nodeId} cache-bypass forced`
+          )
+        });
       }
 
       const result = await runner.executeNode({

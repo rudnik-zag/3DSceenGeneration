@@ -13,7 +13,7 @@ const imageInput = z.object({
 const cameraPathInput = z.object({ json: z.string().default("[]") });
 const thresholdParams = z.object({ threshold: z.number().min(0).max(1).default(0.35) });
 const groundingDinoParams = z.object({
-  prompt: z.string().default("person, object"),
+  prompt: z.string().default(""),
   threshold: z.number().min(0).max(1).default(0.35)
 });
 const sam2Params = z.object({
@@ -91,10 +91,15 @@ export const nodeSpecEntries = [
     ],
     paramSchema: groundingDinoParams,
     paramFields: [
-      { key: "prompt", label: "Detect Prompt", input: "textarea", placeholder: "person, chair, table" },
+      {
+        key: "prompt",
+        label: "Detect Prompt",
+        input: "textarea",
+        placeholder: "Optional. If empty, DEFAULT_GROUNDING_DINO_CLASSES from Python script is used."
+      },
       { key: "threshold", label: "Threshold", input: "number" }
     ],
-    defaultParams: { prompt: "person, object", threshold: 0.35 },
+    defaultParams: { prompt: "", threshold: 0.35 },
     ui: {
       previewOutputIds: ["overlay"],
       hiddenOutputIds: ["boxes"],

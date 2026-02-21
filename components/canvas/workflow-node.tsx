@@ -85,6 +85,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
+  const isGroundingDinoNode = nodeType === "model.groundingdino";
   const isInputImageNode = nodeType === "input.image";
   const inputImageSourceMode =
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
@@ -124,6 +125,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ? "w-[252px] max-w-[252px] min-w-[252px]"
             : "min-w-[238px]";
   const tag = modelTagMap[nodeType];
+  const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
+  const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
 
   return (
     <div
@@ -190,6 +193,21 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span>{data.runtimeWarning}</span>
+        </div>
+      ) : null}
+
+      {isGroundingDinoNode ? (
+        <div className="nodrag mb-2 space-y-1 rounded-lg border border-white/10 bg-black/25 p-2">
+          <p className="text-[10px] text-zinc-400">Classes to detect</p>
+          <input
+            className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+            value={dinoPrompt}
+            onChange={(event) => data.onUpdateParam?.(id, "prompt", event.target.value)}
+            placeholder="chair, house, car, tree ..."
+          />
+          {dinoPrompt.trim().length === 0 ? (
+            <p className="text-[10px] text-zinc-500">Empty prompt uses DEFAULT_GROUNDING_DINO_CLASSES.</p>
+          ) : null}
         </div>
       ) : null}
 
@@ -388,7 +406,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           className="mb-2 inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 text-[11px] font-medium text-emerald-200 transition hover:bg-emerald-500/20"
         >
           <Play className="h-3 w-3" />
-          Run
+          {isGroundingDinoNode && dinoHasOutput ? "Rerun" : "Run"}
           {typeof data.runProgress === "number" && data.status === "running" ? <span className="text-emerald-100/80">{data.runProgress}%</span> : null}
         </button>
       ) : null}

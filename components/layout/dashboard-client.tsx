@@ -15,6 +15,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { toast } from "@/hooks/use-toast";
 
 export interface ProjectItem {
@@ -110,28 +111,37 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
   return (
     <div className="space-y-6">
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="rounded-2xl border-border/70 panel-blur">
+        <DialogContent className="rounded-2xl border-border/70 panel-blur sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-white">Create Project</DialogTitle>
             <DialogDescription>Give your project a name and start from the canvas.</DialogDescription>
           </DialogHeader>
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void createProject();
-              }
-            }}
-            className="h-10 rounded-xl border-border/70 bg-background/70"
-            placeholder="Project name"
-          />
-          <DialogFooter>
-            <Button variant="outline" className="rounded-xl" onClick={() => setCreateOpen(false)} disabled={loading}>
+          <div className="space-y-2">
+            <Label htmlFor="project-name">Project name</Label>
+            <Input
+              id="project-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void createProject();
+                }
+              }}
+              className="h-10 rounded-xl border-border/70 bg-background/70"
+              placeholder="Project name"
+            />
+          </div>
+          <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl sm:min-w-[110px]"
+              onClick={() => setCreateOpen(false)}
+              disabled={loading}
+            >
               Cancel
             </Button>
-            <Button className="rounded-xl" onClick={() => void createProject()} disabled={loading}>
+            <Button className="h-10 rounded-xl sm:min-w-[140px]" onClick={() => void createProject()} disabled={loading}>
               {loading ? "Creating..." : "Create Project"}
             </Button>
           </DialogFooter>
@@ -145,17 +155,17 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
             <p className="mt-1 text-sm text-muted-foreground">Create and manage your workflow canvases.</p>
           </div>
 
-          <div className="flex w-full flex-col gap-2 sm:flex-row md:w-auto">
-            <div className="relative sm:min-w-[260px]">
+          <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center md:w-auto">
+            <div className="relative sm:min-w-[260px] md:min-w-[300px]">
               <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="h-9 rounded-xl border-border/70 bg-background/70 pl-9"
+                className="h-10 rounded-xl border-border/70 bg-background/70 pl-9"
                 placeholder="Search"
               />
             </div>
-            <Button className="h-9 rounded-xl" onClick={() => setCreateOpen(true)}>
+            <Button className="h-10 rounded-xl sm:px-4" onClick={() => setCreateOpen(true)}>
               <Plus className="mr-1.5 h-4 w-4" />
               New project
             </Button>

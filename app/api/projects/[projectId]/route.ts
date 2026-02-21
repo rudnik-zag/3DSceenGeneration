@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db";
 import { getOrCreateDefaultUser } from "@/lib/default-user";
+import { deleteStoragePrefix } from "@/lib/storage/s3";
 
 export async function GET(
   _req: NextRequest,
@@ -59,6 +60,8 @@ export async function DELETE(
     await tx.graph.deleteMany({ where: { projectId } });
     await tx.project.delete({ where: { id: projectId } });
   });
+
+  await deleteStoragePrefix(`projects/${projectId}/`);
 
   return NextResponse.json({ ok: true, deletedProjectId: projectId, deletedProjectName: project.name });
 }

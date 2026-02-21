@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import os
 import sys
@@ -257,6 +258,12 @@ def save_boxes_json(
         json.dump(payload, f, indent=2)
 
 
+def resolve_text_prompt(text_prompt):
+    if text_prompt and text_prompt.strip():
+        return text_prompt.strip()
+    return ", ".join(DEFAULT_GROUNDING_DINO_CLASSES)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Grounding DINO example (v2)", add_help=True)
     parser.add_argument("--config_file", "-c", type=str, required=True, help="path to config file")
@@ -264,7 +271,14 @@ if __name__ == "__main__":
         "--checkpoint_path", "-p", type=str, required=True, help="path to checkpoint file"
     )
     parser.add_argument("--image_path", "-i", type=str, required=True, help="path to image file")
-    parser.add_argument("--text_prompt", "-t", type=str, required=True, help="text prompt")
+    parser.add_argument(
+        "--text_prompt",
+        "-t",
+        type=str,
+        default="",
+        required=False,
+        help="text prompt (optional, defaults to DEFAULT_GROUNDING_DINO_CLASSES)"
+    )
     parser.add_argument(
         "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
     )
@@ -297,7 +311,7 @@ if __name__ == "__main__":
     config_file = args.config_file
     checkpoint_path = args.checkpoint_path
     image_path = args.image_path
-    text_prompt = args.text_prompt
+    text_prompt = resolve_text_prompt(args.text_prompt)
     output_dir = args.output_dir
     box_threshold = args.box_threshold
     text_threshold = args.text_threshold
@@ -314,6 +328,8 @@ if __name__ == "__main__":
         text_threshold = None
         print("Using token_spans. Set the text_threshold to None.")
 
+    parsed_token_spans = ast.literal_eval(token_spans) if token_spans is not None else None
+
     boxes_filt, pred_phrases, pred_scores = get_grounding_output(
         model,
         image,
@@ -321,7 +337,7 @@ if __name__ == "__main__":
         box_threshold,
         text_threshold,
         cpu_only=args.cpu_only,
-        token_spans=eval(f"{token_spans}"),
+        token_spans=parsed_token_spans,
     )
 
     plot_labels = [f"{p}({s:.4f})" for p, s in zip(pred_phrases, pred_scores)]

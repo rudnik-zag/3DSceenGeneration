@@ -91,7 +91,10 @@ Pluggable model execution:
 - GroundingDINO and SAM2 executors are split in:
   - `lib/execution/executors/groundingdino.ts`
   - `lib/execution/executors/sam2.ts`
-- Replace/extend with real executors that call Python/FastAPI/local binaries.
+- `model.groundingdino` now calls real Python inference through:
+  - `conda run -n grounding_dino python demo/inference_for_webapp.py ...`
+  - script path: `models/GroundingDINO/demo/inference_for_webapp.py`
+- Replace/extend remaining mock executors with Python/FastAPI/local binaries.
 - Keep API contract: return artifact buffer + mime/kind/meta + optional preview.
 
 ## GroundingDINO + SAM2 Behavior
@@ -101,6 +104,10 @@ Pluggable model execution:
     - `boxes` JSON (hidden/advanced)
     - `overlay` image preview
   - Params: `prompt`, `threshold`
+  - If prompt is empty, Python script uses `DEFAULT_GROUNDING_DINO_CLASSES`
+  - Produces:
+    - overlay image (shown in node)
+    - boxes JSON (hidden, for downstream SAM2 guided mode)
 - `model.sam2`
   - Inputs: required `Image`, optional `boxes` JSON
   - Outputs:
@@ -151,6 +158,20 @@ pnpm db:seed
 ```bash
 pnpm dev
 pnpm worker
+```
+
+### GroundingDINO Runtime Prereq
+Install and prepare conda env `grounding_dino` with model dependencies and weights under:
+- `models/GroundingDINO/weights/groundingdino_swint_ogc.pth`
+
+Worker command internally executes:
+```bash
+conda run -n grounding_dino python demo/inference_for_webapp.py \
+  -c groundingdino/config/GroundingDINO_SwinT_OGC.py \
+  -p weights/groundingdino_swint_ogc.pth \
+  -i <input_from_input.image_node> \
+  -o <.local-storage/projects/{projectId}/model_outputs/groundingdino/runs/{runId}/nodes/{nodeId}> \
+  -t <groundingdino_node_prompt_or_default_classes>
 ```
 
 App: `http://localhost:3000`
