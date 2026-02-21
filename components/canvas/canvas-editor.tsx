@@ -19,10 +19,11 @@ import "reactflow/dist/style.css";
 import {
   Boxes,
   Camera,
+  ChevronRight,
   ExternalLink,
   Image as ImageIcon,
   LocateFixed,
-  Map,
+  Map as MapIcon,
   Minus,
   PanelLeft,
   Play,
@@ -33,6 +34,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Trash2,
   Type,
   WandSparkles,
   Zap,
@@ -67,6 +69,12 @@ interface NodeArtifact {
   id: string;
   nodeId: string;
   kind: string;
+  outputKey?: string;
+  hidden?: boolean;
+  url?: string | null;
+  previewUrl?: string | null;
+  meta?: Record<string, unknown> | null;
+  createdAt?: string;
 }
 
 interface CanvasEditorProps {
@@ -144,15 +152,60 @@ function getContextRowIcon(type: WorkflowNodeType) {
 }
 
 function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
-  const artifact = artifacts.find((a) => a.nodeId === base.id);
+  const nodeType = base.type as WorkflowNodeType;
+  const spec = nodeSpecRegistry[nodeType];
+  const matched = artifacts
+    .filter((a) => a.nodeId === base.id)
+    .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
+
+  const outputArtifacts = matched.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>((acc, artifact) => {
+    const outputKey = artifact.outputKey ?? "default";
+    if (!acc[outputKey]) {
+      acc[outputKey] = {
+        id: artifact.id,
+        kind: artifact.kind,
+        hidden: Boolean(artifact.hidden),
+        url: artifact.url ?? null,
+        previewUrl: artifact.previewUrl ?? null,
+        createdAt: artifact.createdAt
+      };
+    }
+    return acc;
+  }, {});
+
+  const previewOutputIds = spec.ui?.previewOutputIds ?? [];
+  const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+  const previewArtifact =
+    previewOutputIds
+      .map((key) => outputArtifacts[key])
+      .find((artifact) => Boolean(artifact?.id)) ??
+    Object.entries(outputArtifacts)
+      .filter(([key, artifact]) => !artifact.hidden && !hiddenOutputIds.has(key))
+      .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
+    Object.values(outputArtifacts)[0];
+
+  const runtimeMetaCandidate = matched.find((artifact) => artifact.outputKey === "meta")?.meta ?? matched[0]?.meta ?? null;
+  const runtimeMode = runtimeMetaCandidate && typeof runtimeMetaCandidate.mode === "string" ? runtimeMetaCandidate.mode : undefined;
+  const runtimeWarning =
+    runtimeMetaCandidate && Array.isArray(runtimeMetaCandidate.warnings) && runtimeMetaCandidate.warnings.length > 0
+      ? String(runtimeMetaCandidate.warnings[0])
+      : runtimeMetaCandidate && typeof runtimeMetaCandidate.warning === "string"
+        ? runtimeMetaCandidate.warning
+        : null;
+
   return {
     ...base,
     data: {
       ...base.data,
       status: base.data.status ?? "idle",
-      latestArtifactId: artifact?.id,
-      latestArtifactKind: artifact?.kind,
-      uiScale: base.data.uiScale ?? "balanced"
+      latestArtifactId: previewArtifact?.id,
+      latestArtifactKind: previewArtifact?.kind,
+      previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? null,
+      outputArtifacts,
+      runtimeMode: typeof base.data.runtimeMode === "string" ? base.data.runtimeMode : runtimeMode,
+      runtimeWarning: base.data.runtimeWarning ?? runtimeWarning,
+      uiScale: base.data.uiScale ?? "balanced",
+      isCacheHit: base.data.isCacheHit ?? false
     }
   };
 }
@@ -184,17 +237,27 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const [isSaving, setIsSaving] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState(versions[0]?.id ?? "");
   const [runLogs, setRunLogs] = useState("");
+  const [showAdvancedInspector, setShowAdvancedInspector] = useState(false);
   const [selectedArtifactPreview, setSelectedArtifactPreview] = useState<{ previewUrl: string | null; jsonSnippet: string | null }>({
     previewUrl: null,
     jsonSnippet: null
   });
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
+  const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
+  const [menuSearch, setMenuSearch] = useState("");
   const [showMiniMap, setShowMiniMap] = useState(true);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runNodeRef = useRef<(nodeId: string) => void>(() => {});
+  const uploadNodeRef = useRef<(nodeId: string, file: File) => void>(() => {});
+  const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
+  const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const didHydrateDraftRef = useRef(false);
+  const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
 
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
+  const hasSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const orderedCategories = useMemo<ContextMenuCategory[]>(() => ["Inputs", "Models", "Geometry", "Outputs"], []);
   const contextMenuGroups = useMemo(
     () =>
@@ -206,6 +269,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         .filter((group) => group.specs.length > 0),
     [orderedCategories]
   );
+  const canNodeRun = useCallback((node: Node<GraphNodeData> | undefined) => {
+    if (!node) return false;
+    const nodeType = node.type as WorkflowNodeType;
+    const spec = nodeSpecRegistry[nodeType];
+    if (!spec.ui?.nodeRunEnabled) return false;
+    if (nodeType !== "input.image") return true;
+    const sourceMode = node.data.params?.sourceMode === "generate" ? "generate" : "upload";
+    const model = typeof node.data.params?.generatorModel === "string" ? node.data.params.generatorModel : "";
+    return sourceMode === "generate" && model.trim().length > 0;
+  }, []);
+  const activeMenuGroup = useMemo(
+    () => contextMenuGroups.find((group) => group.category === activeMenuCategory) ?? null,
+    [activeMenuCategory, contextMenuGroups]
+  );
+  const filteredActiveMenuSpecs = useMemo(() => {
+    if (!activeMenuGroup) return [];
+    const query = menuSearch.trim().toLowerCase();
+    if (!query) return activeMenuGroup.specs;
+    return activeMenuGroup.specs.filter((spec) => {
+      return spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query);
+    });
+  }, [activeMenuGroup, menuSearch]);
 
   useEffect(() => {
     return () => {
@@ -241,9 +326,100 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, [paneMenu]);
 
   useEffect(() => {
+    if (!paneMenu) {
+      setActiveMenuCategory(null);
+      setMenuSearch("");
+      return;
+    }
+    if (!activeMenuCategory) {
+      const firstCategory = contextMenuGroups[0]?.category;
+      if (firstCategory) {
+        setActiveMenuCategory(firstCategory);
+      }
+    }
+  }, [activeMenuCategory, contextMenuGroups, paneMenu]);
+
+  useEffect(() => {
+    if (didHydrateDraftRef.current) return;
+    didHydrateDraftRef.current = true;
+
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(draftStorageKey);
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as {
+        graph?: GraphDocument;
+      };
+      const graph = parsed?.graph;
+      if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+
+      const restoredNodes = graph.nodes.map((node) => {
+        const hydrated = buildNodeData(node as Node<GraphNodeData>, nodeArtifacts) as Node<GraphNodeData>;
+        const previewUrl =
+          node.data && typeof node.data.previewUrl === "string" && node.data.previewUrl.length > 0
+            ? node.data.previewUrl
+            : hydrated.data.previewUrl ?? null;
+        return {
+          ...hydrated,
+          data: {
+            ...hydrated.data,
+            previewUrl
+          }
+        };
+      }) as Node<GraphNodeData>[];
+
+      setNodes(restoredNodes);
+      setEdges(graph.edges.map((edge) => withStyledEdge(edge as Edge)));
+      const restoredPreset = restoredNodes[0]?.data.uiScale;
+      if (restoredPreset === "compact" || restoredPreset === "balanced" || restoredPreset === "cinematic") {
+        setNodeScalePreset(restoredPreset);
+      }
+      toast({ title: "Draft restored", description: "Recovered your latest unsaved canvas state." });
+    } catch {
+      window.localStorage.removeItem(draftStorageKey);
+    }
+  }, [draftStorageKey, nodeArtifacts, setEdges, setNodes]);
+
+  useEffect(() => {
+    const onDeleteShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable;
+      if (isTyping) return;
+
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+      if (selectedIds.length === 0) return;
+      event.preventDefault();
+      const nodeSet = new Set(selectedIds);
+      setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+      setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+      toast({
+        title: "Node deleted",
+        description: selectedIds.length > 1 ? `${selectedIds.length} nodes removed` : `${selectedIds[0]} removed`
+      });
+    };
+
+    window.addEventListener("keydown", onDeleteShortcut);
+    return () => window.removeEventListener("keydown", onDeleteShortcut);
+  }, [nodes, setEdges, setNodes]);
+
+  useEffect(() => {
+    setShowAdvancedInspector(false);
+  }, [selectedNode?.id]);
+
+  useEffect(() => {
     const artifactId = selectedNode?.data.latestArtifactId;
     if (!artifactId) {
       setSelectedArtifactPreview({ previewUrl: null, jsonSnippet: null });
+      return;
+    }
+
+    if (selectedNode?.data.previewUrl && selectedNode.data.latestArtifactKind !== "json") {
+      setSelectedArtifactPreview({ previewUrl: selectedNode.data.previewUrl, jsonSnippet: null });
       return;
     }
 
@@ -279,7 +455,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     return () => {
       mounted = false;
     };
-  }, [selectedNode?.data.latestArtifactId]);
+  }, [selectedNode?.data.latestArtifactId, selectedNode?.data.previewUrl, selectedNode?.data.latestArtifactKind]);
 
   const onConnect = useCallback<OnConnect>(
     (params) =>
@@ -307,7 +483,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           label: spec.title,
           params: { ...spec.defaultParams },
           status: "idle",
-          uiScale: nodeScalePreset
+          uiScale: nodeScalePreset,
+          onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
+          onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
+          onUpdateParam: (currentNodeId: string, key: string, value: string | number | boolean) =>
+            updateNodeParamRef.current(currentNodeId, key, value)
         }
       };
       setNodes((prev) => [...prev, newNode]);
@@ -327,6 +507,25 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
   };
+
+  const deleteNodesByIds = useCallback(
+    (nodeIds: string[]) => {
+      if (nodeIds.length === 0) return;
+      const nodeSet = new Set(nodeIds);
+      setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+      setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+      toast({
+        title: "Node deleted",
+        description: nodeIds.length > 1 ? `${nodeIds.length} nodes removed` : `${nodeIds[0]} removed`
+      });
+    },
+    [setEdges, setNodes]
+  );
+
+  const deleteSelectedNodes = useCallback(() => {
+    const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+    deleteNodesByIds(selectedIds);
+  }, [deleteNodesByIds, nodes]);
 
   const openPaneMenuAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
@@ -359,12 +558,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   );
 
   const onPaneClick = useCallback(
-    (event: React.MouseEvent) => {
-      if (event.detail === 2) {
-        openPaneMenuAtScreenPoint(event.clientX, event.clientY);
-        return;
-      }
+    (_event: React.MouseEvent) => {
       setPaneMenu(null);
+    },
+    []
+  );
+
+  const onCanvasDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement;
+      if (target.closest(".react-flow__node")) return;
+      openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
   );
@@ -526,24 +730,150 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     toast({ title: "Template inserted", description: "Added text + image + Qwen Image Edit starter nodes." });
   }, [nodeScalePreset, reactFlow, setEdges, setNodes]);
 
+  const updateNodeParamById = useCallback(
+    (nodeId: string, key: string, value: string | number | boolean) => {
+      if (!nodeId) return;
+      setNodes((prev) =>
+        prev.map((node) => {
+          if (node.id !== nodeId) return node;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              params: {
+                ...node.data.params,
+                [key]: value
+              }
+            }
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
+
   const updateSelectedNodeParam = (key: string, value: string | number | boolean) => {
     if (!selectedNode) return;
-    setNodes((prev) =>
-      prev.map((node) => {
-        if (node.id !== selectedNode.id) return node;
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            params: {
-              ...node.data.params,
-              [key]: value
-            }
-          }
-        };
-      })
-    );
+    updateNodeParamById(selectedNode.id, key, value);
   };
+
+  const createNodePreviewUrl = useCallback(async (file: File) => {
+    const objectUrl = URL.createObjectURL(file);
+    const asDataUrl = () =>
+      new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : objectUrl);
+        reader.onerror = () => resolve(objectUrl);
+        reader.readAsDataURL(file);
+      });
+    let shouldRevoke = true;
+    try {
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("Failed to load image preview"));
+        img.src = objectUrl;
+      });
+
+      const maxSide = 420;
+      const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        shouldRevoke = false;
+        return asDataUrl();
+      }
+      ctx.drawImage(image, 0, 0, width, height);
+      return canvas.toDataURL("image/jpeg", 0.86);
+    } catch {
+      shouldRevoke = false;
+      return asDataUrl();
+    } finally {
+      if (shouldRevoke) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    }
+  }, []);
+
+  const uploadImageForNode = useCallback(
+    async (nodeId: string, file: File) => {
+      if (!nodeId) return;
+      const localPreviewUrl = await createNodePreviewUrl(file);
+      setNodes((prev) =>
+        prev.map((node) => {
+          if (node.id !== nodeId || node.type !== "input.image") return node;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              previewUrl: localPreviewUrl,
+              params: {
+                ...node.data.params,
+                filename: file.name
+              }
+            }
+          };
+        })
+      );
+
+      try {
+        const uploadInit = await fetch("/api/uploads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId,
+            nodeId,
+            filename: file.name,
+            contentType: file.type || "application/octet-stream",
+            byteSize: file.size
+          })
+        });
+        if (!uploadInit.ok) {
+          const payload = await uploadInit.json().catch(() => ({}));
+          throw new Error(typeof payload.message === "string" ? payload.message : "Failed to prepare upload");
+        }
+        const uploadData = await uploadInit.json();
+        const uploadTarget = uploadData.uploadUrl ?? uploadData.directUploadUrl;
+        if (typeof uploadTarget !== "string" || uploadTarget.length === 0) {
+          throw new Error("Upload target is missing");
+        }
+        const uploadRes = await fetch(uploadTarget, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file
+        });
+        if (!uploadRes.ok) {
+          throw new Error(`Upload failed (${uploadRes.status})`);
+        }
+        setNodes((prev) =>
+          prev.map((node) => {
+            if (node.id !== nodeId || node.type !== "input.image") return node;
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                params: {
+                  ...node.data.params,
+                  storageKey: uploadData.key,
+                  filename: file.name,
+                  uploadAssetId: uploadData.uploadAssetId ?? ""
+                }
+              }
+            };
+          })
+        );
+        toast({ title: "Image uploaded", description: file.name });
+      } catch (error) {
+        toast({ title: "Upload failed", description: error instanceof Error ? error.message : "Unknown error" });
+      }
+    },
+    [createNodePreviewUrl, projectId, setNodes]
+  );
 
   const currentGraph = (): GraphDocument => ({
     nodes: nodes.map((n) => ({
@@ -566,6 +896,56 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     })),
     viewport: { x: 0, y: 0, zoom: 1 }
   });
+
+  const currentDraftGraph = (): GraphDocument => ({
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: n.type as WorkflowNodeType,
+      position: n.position,
+      data: {
+        label: n.data.label,
+        params: n.data.params,
+        status: n.data.status,
+        uiScale: n.data.uiScale ?? nodeScalePreset,
+        previewUrl: n.data.previewUrl ?? null
+      }
+    })),
+    edges: edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle ?? undefined,
+      targetHandle: e.targetHandle ?? undefined
+    })),
+    viewport: { x: 0, y: 0, zoom: 1 }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!didHydrateDraftRef.current) return;
+
+    if (draftSaveTimeoutRef.current) {
+      clearTimeout(draftSaveTimeoutRef.current);
+    }
+
+    draftSaveTimeoutRef.current = setTimeout(() => {
+      try {
+        const payload = {
+          updatedAt: new Date().toISOString(),
+          graph: currentDraftGraph()
+        };
+        window.localStorage.setItem(draftStorageKey, JSON.stringify(payload));
+      } catch {
+        // Ignore quota and serialization errors.
+      }
+    }, 450);
+
+    return () => {
+      if (draftSaveTimeoutRef.current) {
+        clearTimeout(draftSaveTimeoutRef.current);
+      }
+    };
+  }, [draftStorageKey, edges, nodeScalePreset, nodes]);
 
   const saveGraph = async ({ silent }: { silent?: boolean } = {}) => {
     setIsSaving(true);
@@ -601,11 +981,31 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     }
   };
 
-  const applyRunNodeState = (logs: string, status: string, artifactPairs: Array<{ nodeId: string; id: string; kind: string }>) => {
+  const applyRunNodeState = (
+    logs: string,
+    status: string,
+    runProgress: number,
+    artifactPairs: Array<{
+      nodeId: string;
+      id: string;
+      kind: string;
+      outputKey?: string;
+      hidden?: boolean;
+      previewUrl?: string | null;
+      url?: string | null;
+      createdAt?: string;
+      meta?: Record<string, unknown> | null;
+    }>
+  ) => {
     const lines = logs.split("\n");
     const executed = new Set<string>();
     const cached = new Set<string>();
     const errored = new Set<string>();
+    const groupedArtifacts = artifactPairs.reduce<Record<string, typeof artifactPairs>>((acc, artifact) => {
+      if (!acc[artifact.nodeId]) acc[artifact.nodeId] = [];
+      acc[artifact.nodeId].push(artifact);
+      return acc;
+    }, {});
 
     lines.forEach((line) => {
       const executedMatch = line.match(/\] (.+) executed/);
@@ -618,27 +1018,79 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       }
     });
 
-    setNodes((prev) =>
-      prev.map((node) => {
-        const pair = artifactPairs.find((a) => a.nodeId === node.id);
+    setNodes((prev) => {
+      const hasRunningOrQueued = status === "running" || status === "queued";
+      return prev.map((node) => {
+        const nodeType = node.type as WorkflowNodeType;
+        const spec = nodeSpecRegistry[nodeType];
+        const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
+          (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
+        );
+        const artifactByOutput = nodeArtifacts.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>(
+          (acc, artifact) => {
+            const outputKey = artifact.outputKey ?? "default";
+            if (!acc[outputKey]) {
+              acc[outputKey] = {
+                id: artifact.id,
+                kind: artifact.kind,
+                hidden: Boolean(artifact.hidden),
+                url: artifact.url ?? null,
+                previewUrl: artifact.previewUrl ?? null,
+                createdAt: artifact.createdAt
+              };
+            }
+            return acc;
+          },
+          {}
+        );
+
+        const previewArtifact =
+          (spec.ui?.previewOutputIds ?? [])
+            .map((outputId) => artifactByOutput[outputId])
+            .find((artifact) => Boolean(artifact?.id)) ??
+          Object.values(artifactByOutput).find((artifact) => !artifact.hidden) ??
+          Object.values(artifactByOutput)[0];
+
+        const metaArtifact = nodeArtifacts.find((artifact) => artifact.outputKey === "meta");
+        const runtimeMode =
+          metaArtifact?.meta && typeof metaArtifact.meta.mode === "string"
+            ? metaArtifact.meta.mode
+            : node.data.runtimeMode;
+        const runtimeWarning =
+          metaArtifact?.meta && Array.isArray(metaArtifact.meta.warnings) && metaArtifact.meta.warnings.length > 0
+            ? String(metaArtifact.meta.warnings[0])
+            : nodeArtifacts.find((artifact) => artifact.meta && typeof artifact.meta.warning === "string")?.meta?.warning
+              ? String(nodeArtifacts.find((artifact) => artifact.meta && typeof artifact.meta.warning === "string")?.meta?.warning)
+              : node.data.runtimeWarning;
+
         let runtimeStatus = node.data.status ?? "idle";
 
         if (errored.has(node.id)) runtimeStatus = "error";
         else if (cached.has(node.id)) runtimeStatus = "cache-hit";
         else if (executed.has(node.id)) runtimeStatus = "success";
-        else if (status === "running") runtimeStatus = "running";
+        else if (hasRunningOrQueued) runtimeStatus = "running";
 
         return {
           ...node,
           data: {
             ...node.data,
             status: runtimeStatus,
-            latestArtifactId: pair?.id ?? node.data.latestArtifactId,
-            latestArtifactKind: pair?.kind ?? node.data.latestArtifactKind
+            runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
+            latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
+            latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
+            previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null,
+            outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
+            isCacheHit: runtimeStatus === "cache-hit",
+            lastRunAt:
+              runtimeStatus === "success" || runtimeStatus === "cache-hit" || runtimeStatus === "error"
+                ? new Date().toISOString()
+                : node.data.lastRunAt,
+            runtimeMode,
+            runtimeWarning: runtimeWarning ?? null
           }
         };
-      })
-    );
+      });
+    });
   };
 
   const pollRun = (runId: string) => {
@@ -655,11 +1107,30 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       applyRunNodeState(
         data.run.logs ?? "",
         data.run.status,
-        (data.run.artifacts ?? []).map((a: { nodeId: string; id: string; kind: string }) => ({
-          nodeId: a.nodeId,
-          id: a.id,
-          kind: a.kind
-        }))
+        Number(data.run.progress ?? 0),
+        (data.run.artifacts ?? []).map(
+          (a: {
+            nodeId: string;
+            id: string;
+            kind: string;
+            outputKey?: string;
+            hidden?: boolean;
+            previewUrl?: string | null;
+            url?: string | null;
+            createdAt?: string;
+            meta?: Record<string, unknown> | null;
+          }) => ({
+            nodeId: a.nodeId,
+            id: a.id,
+            kind: a.kind,
+            outputKey: a.outputKey,
+            hidden: a.hidden,
+            previewUrl: a.previewUrl ?? null,
+            url: a.url ?? null,
+            createdAt: a.createdAt,
+            meta: a.meta ?? null
+          })
+        )
       );
 
       if (["success", "error", "canceled"].includes(data.run.status)) {
@@ -672,13 +1143,65 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     }, 1600);
   };
 
+  const markNodesPreparingRun = useCallback(
+    (startNodeId?: string) => {
+      if (!startNodeId) {
+        setNodes((prev) =>
+          prev.map((node) => ({
+            ...node,
+            data: {
+              ...node.data,
+              status: "running",
+              runProgress: 0,
+              runtimeWarning: null
+            }
+          }))
+        );
+        return;
+      }
+
+      const incoming = new Map<string, string[]>();
+      edges.forEach((edge) => {
+        const list = incoming.get(edge.target) ?? [];
+        list.push(edge.source);
+        incoming.set(edge.target, list);
+      });
+
+      const targets = new Set<string>();
+      const stack = [startNodeId];
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        if (targets.has(current)) continue;
+        targets.add(current);
+        (incoming.get(current) ?? []).forEach((source) => stack.push(source));
+      }
+
+      setNodes((prev) =>
+        prev.map((node) => ({
+          ...node,
+          data: {
+            ...node.data,
+            status: targets.has(node.id) ? "running" : node.data.status,
+            runProgress: targets.has(node.id) ? 0 : node.data.runProgress ?? 0,
+            runtimeWarning: targets.has(node.id) ? null : node.data.runtimeWarning
+          }
+        }))
+      );
+    },
+    [edges, setNodes]
+  );
+
   const startRun = async (startNodeId?: string) => {
     try {
       const latestGraphId = await saveGraph({ silent: true });
-      const res = await fetch(`/api/projects/${projectId}/runs`, {
+      markNodesPreparingRun(startNodeId);
+      const endpoint = startNodeId
+        ? `/api/projects/${projectId}/nodes/${startNodeId}/run`
+        : `/api/projects/${projectId}/runs`;
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ graphId: latestGraphId, startNodeId })
+        body: JSON.stringify(startNodeId ? { graphId: latestGraphId } : { graphId: latestGraphId, startNodeId })
       });
       if (!res.ok) throw new Error("Failed to queue run");
 
@@ -690,6 +1213,50 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
     }
   };
+
+  runNodeRef.current = (nodeId: string) => {
+    if (!nodeId) return;
+    void startRun(nodeId);
+  };
+  uploadNodeRef.current = (nodeId: string, file: File) => {
+    void uploadImageForNode(nodeId, file);
+  };
+  updateNodeParamRef.current = (nodeId: string, key: string, value: string | number | boolean) => {
+    updateNodeParamById(nodeId, key, value);
+  };
+
+  const stableNodeRunHandler = useCallback((nodeId: string) => {
+    runNodeRef.current(nodeId);
+  }, []);
+  const stableImageUploadHandler = useCallback((nodeId: string, file: File) => {
+    uploadNodeRef.current(nodeId, file);
+  }, []);
+  const stableParamUpdateHandler = useCallback((nodeId: string, key: string, value: string | number | boolean) => {
+    updateNodeParamRef.current(nodeId, key, value);
+  }, []);
+
+  useEffect(() => {
+    setNodes((prev) =>
+      prev.map((node) => {
+        if (
+          node.data.onRunNode === stableNodeRunHandler &&
+          node.data.onUploadImage === stableImageUploadHandler &&
+          node.data.onUpdateParam === stableParamUpdateHandler
+        ) {
+          return node;
+        }
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            onRunNode: stableNodeRunHandler,
+            onUploadImage: stableImageUploadHandler,
+            onUpdateParam: stableParamUpdateHandler
+          }
+        };
+      })
+    );
+  }, [stableImageUploadHandler, stableNodeRunHandler, stableParamUpdateHandler, setNodes]);
 
   const cancelRun = async () => {
     if (!activeRunId) return;
@@ -708,6 +1275,20 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   };
 
   const spec = selectedNode ? nodeSpecRegistry[selectedNode.type as WorkflowNodeType] : null;
+  const selectedNodeArtifacts = useMemo(() => {
+    if (!selectedNode?.data.outputArtifacts) return [];
+    return Object.entries(selectedNode.data.outputArtifacts)
+      .map(([outputId, artifact]) => ({ outputId, ...artifact }))
+      .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
+  }, [selectedNode?.data.outputArtifacts]);
+  const visibleNodeArtifacts = useMemo(
+    () => selectedNodeArtifacts.filter((artifact) => !artifact.hidden),
+    [selectedNodeArtifacts]
+  );
+  const advancedNodeArtifacts = useMemo(
+    () => selectedNodeArtifacts.filter((artifact) => artifact.hidden),
+    [selectedNodeArtifacts]
+  );
   const viewerArtifactId =
     selectedNode?.data.latestArtifactId ?? nodes.find((node) => Boolean(node.data.latestArtifactId))?.data.latestArtifactId ?? null;
   const viewerHref = viewerArtifactId
@@ -724,7 +1305,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <Button size="sm" className="rounded-xl" onClick={() => startRun()}>
             <Play className="mr-1 h-4 w-4" /> Run workflow
           </Button>
-          <Button size="sm" variant="secondary" className="rounded-xl" onClick={() => startRun(selectedNode?.id)} disabled={!selectedNode}>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="rounded-xl"
+            onClick={() => startRun(selectedNode?.id)}
+            disabled={!selectedNode || !canNodeRun(selectedNode)}
+          >
             <Zap className="mr-1 h-4 w-4" /> Run from selection
           </Button>
           <Button size="sm" variant="outline" className="rounded-xl" onClick={cancelRun} disabled={!activeRunId}>
@@ -732,6 +1319,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </Button>
           <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void saveGraph()} disabled={isSaving}>
             <Save className="mr-1 h-4 w-4" /> {isSaving ? "Saving..." : "Save"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="rounded-xl"
+            onClick={deleteSelectedNodes}
+            disabled={!hasSelection}
+          >
+            <Trash2 className="mr-1 h-4 w-4" /> Delete node
           </Button>
           <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
@@ -749,6 +1345,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <DropdownMenuContent align="start" className="w-[360px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
               <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">Node Palette</p>
               <p className="mb-2 text-xs text-zinc-500">Right-click on canvas to add at cursor, or add at viewport center below.</p>
+              <div className="mb-2 grid grid-cols-3 gap-1">
+                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("input.image")}>
+                  Input Image
+                </Button>
+                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.groundingdino")}>
+                  GroundingDINO
+                </Button>
+                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
+                  SAM2
+                </Button>
+              </div>
               <ScrollArea className="h-[62vh] pr-2">
                 <div className="space-y-3">
                   {contextMenuGroups.map((group) => (
@@ -798,14 +1405,59 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                       <div className="mb-3 space-y-1">
                         <h3 className="font-semibold text-white">{spec.title}</h3>
                         <p className="text-xs text-muted-foreground">{selectedNode.id}</p>
+                        {selectedNode.type === "model.sam2" ? (
+                          <p className="text-xs text-cyan-300">
+                            Mode:{" "}
+                            {selectedNode.data.runtimeMode === "guided"
+                              ? "Guided segmentation (from GroundingDINO)"
+                              : "Full segmentation"}
+                          </p>
+                        ) : null}
+                        {selectedNode.data.runtimeWarning ? (
+                          <p className="text-xs text-amber-300">{selectedNode.data.runtimeWarning}</p>
+                        ) : null}
                       </div>
                       <Separator className="mb-3" />
+                      {canNodeRun(selectedNode) ? (
+                        <Button className="mb-3 w-full rounded-xl" onClick={() => startRun(selectedNode.id)}>
+                          <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
+                        </Button>
+                      ) : selectedNode.type === "input.image" ? (
+                        <div className="mb-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
+                          Run is available only when source mode is <span className="text-zinc-200">generate</span>.
+                        </div>
+                      ) : null}
+                      <Button
+                        className="mb-3 w-full rounded-xl"
+                        variant="outline"
+                        onClick={() => deleteNodesByIds([selectedNode.id])}
+                      >
+                        <Trash2 className="mr-1 h-4 w-4" /> Delete this node
+                      </Button>
                       <ScrollArea className="h-[44vh] pr-2">
                         <div className="space-y-3">
                           {spec.paramFields.length === 0 ? (
                             <p className="text-sm text-muted-foreground">No editable parameters.</p>
                           ) : (
                             spec.paramFields.map((field) => {
+                              const inputSourceMode =
+                                selectedNode.type === "input.image" && selectedNode.data.params?.sourceMode === "generate"
+                                  ? "generate"
+                                  : "upload";
+                              if (
+                                selectedNode.type === "input.image" &&
+                                inputSourceMode === "upload" &&
+                                (field.key === "generatorModel" || field.key === "prompt")
+                              ) {
+                                return null;
+                              }
+                              if (
+                                selectedNode.type === "input.image" &&
+                                inputSourceMode === "generate" &&
+                                field.key === "storageKey"
+                              ) {
+                                return null;
+                              }
                               const value = selectedNode.data.params[field.key];
                               const key = `${selectedNode.id}-${field.key}`;
                               return (
@@ -846,50 +1498,110 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               );
                             })
                           )}
+                          {(selectedNode.type === "model.groundingdino" || selectedNode.type === "model.sam2") && selectedNodeArtifacts.length > 0 ? (
+                            <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
+                              <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
+                              <div className="space-y-1">
+                                {selectedNodeArtifacts.slice(0, 4).map((artifact) => (
+                                  <button
+                                    key={`param-artifact-${artifact.id}`}
+                                    type="button"
+                                    onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                    className="block w-full rounded-lg border border-border/70 bg-background/45 px-2 py-1 text-left text-xs text-zinc-300 transition hover:bg-accent"
+                                  >
+                                    {artifact.outputId} • {artifact.kind}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       </ScrollArea>
-                      <Button className="mt-3 w-full rounded-xl" onClick={() => startRun(selectedNode.id)}>
-                        <Play className="mr-1 h-4 w-4" /> Run from this node
-                      </Button>
                     </>
                   )}
                 </TabsContent>
 
                 <TabsContent value="outputs" className="mt-3 space-y-3">
-                  {!selectedNode?.data.latestArtifactId ? (
+                  {!selectedNode || selectedNodeArtifacts.length === 0 ? (
                     <p className="text-sm text-muted-foreground">No output for selected node yet.</p>
                   ) : (
-                    <Card className="rounded-xl border-primary/35 bg-primary/5">
-                      <CardContent className="space-y-2 p-3 text-sm">
-                        <p className="font-medium text-white">Latest output</p>
-                        <p className="text-xs text-muted-foreground">Kind: {selectedNode.data.latestArtifactKind}</p>
-                        <div className="flex gap-2">
+                    <>
+                      <Card className="rounded-xl border-primary/35 bg-primary/5">
+                        <CardContent className="space-y-2 p-3 text-sm">
+                          <p className="font-medium text-white">Visible outputs</p>
+                          <div className="space-y-2">
+                            {visibleNodeArtifacts.map((artifact) => (
+                              <div key={`artifact-visible-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/45 p-2">
+                                <p className="text-xs text-zinc-200">
+                                  {artifact.outputId} • {artifact.kind}
+                                </p>
+                                <div className="mt-1 flex gap-2">
+                                  {artifact.kind === "mesh_glb" || artifact.kind === "point_ply" || artifact.kind === "splat_ksplat" ? (
+                                    <Button
+                                      size="sm"
+                                      className="rounded-lg"
+                                      onClick={() => window.open(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`, "_blank")}
+                                    >
+                                      Open viewer
+                                    </Button>
+                                  ) : null}
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="rounded-lg"
+                                    onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                  >
+                                    Meta
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          {selectedArtifactPreview.previewUrl ? (
+                            <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                          ) : null}
+                          {selectedArtifactPreview.jsonSnippet ? (
+                            <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">
+                              {selectedArtifactPreview.jsonSnippet}
+                            </pre>
+                          ) : null}
+                        </CardContent>
+                      </Card>
+
+                      {advancedNodeArtifacts.length > 0 ? (
+                        <div className="space-y-2">
                           <Button
-                            size="sm"
-                            className="rounded-lg"
-                            onClick={() => window.open(`/app/p/${projectId}/viewer?artifactId=${selectedNode.data.latestArtifactId}`, "_blank")}
-                          >
-                            Open viewer
-                          </Button>
-                          <Button
-                            size="sm"
                             variant="outline"
+                            size="sm"
                             className="rounded-lg"
-                            onClick={() => window.open(`/api/artifacts/${selectedNode.data.latestArtifactId}`, "_blank")}
+                            onClick={() => setShowAdvancedInspector((value) => !value)}
                           >
-                            Meta
+                            {showAdvancedInspector ? "Hide Advanced Outputs" : "Show Advanced Outputs"}
                           </Button>
+                          {showAdvancedInspector ? (
+                            <Card className="rounded-xl border-border/70 bg-background/45">
+                              <CardContent className="space-y-2 p-3">
+                                {advancedNodeArtifacts.map((artifact) => (
+                                  <div key={`artifact-hidden-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/60 p-2">
+                                    <p className="text-xs text-zinc-300">
+                                      {artifact.outputId} • {artifact.kind} (hidden)
+                                    </p>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="mt-1 rounded-lg"
+                                      onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                    >
+                                      Open JSON/meta
+                                    </Button>
+                                  </div>
+                                ))}
+                              </CardContent>
+                            </Card>
+                          ) : null}
                         </div>
-                        {selectedArtifactPreview.previewUrl ? (
-                          <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
-                        ) : null}
-                        {selectedArtifactPreview.jsonSnippet ? (
-                          <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">
-                            {selectedArtifactPreview.jsonSnippet}
-                          </pre>
-                        ) : null}
-                      </CardContent>
-                    </Card>
+                      ) : null}
+                    </>
                   )}
                 </TabsContent>
 
@@ -955,7 +1667,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </div>
         </div>
 
-        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#06080f]" ref={canvasPanelRef}>
+        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#06080f]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
           <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-xl border border-white/10 bg-black/45 px-3 py-2 backdrop-blur-sm">
             <p className="text-[11px] font-medium text-zinc-200">{projectName}</p>
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
@@ -980,7 +1692,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               className="h-8 w-8 rounded-lg"
               onClick={() => setShowMiniMap((value) => !value)}
             >
-              <Map className="h-4 w-4" />
+              <MapIcon className="h-4 w-4" />
             </Button>
           </div>
 
@@ -1023,33 +1735,55 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               <div className="mb-2">
                 <p className="text-xs text-zinc-500">Add Node</p>
               </div>
+              <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.015] p-2">
+                <p className="mb-1 text-xs text-zinc-500">Quick Add</p>
+                <div className="grid grid-cols-3 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => addNodeFromContextMenu("input.image")}
+                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
+                  >
+                    Input
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addNodeFromContextMenu("model.groundingdino")}
+                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
+                  >
+                    DINO
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addNodeFromContextMenu("model.sam2")}
+                    className="rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-400/20"
+                  >
+                    SAM2
+                  </button>
+                </div>
+              </div>
 
               <ScrollArea className="max-h-[24rem] pr-2">
-                <div className="space-y-3">
+                <div className="space-y-2">
                   {contextMenuGroups.map((group) => (
-                    <div key={`ctx-${group.category}`} className="rounded-xl border border-white/10 bg-white/[0.015] p-2">
-                      <p className="mb-1.5 text-xs text-zinc-500">{categoryLabelMap[group.category]}</p>
-                      <div className="space-y-1">
-                        {group.specs.map((spec) => {
-                          const RowIcon = getContextRowIcon(spec.type);
-                          const shortcut = shortcutByNodeType[spec.type];
-                          return (
-                            <button
-                              key={`ctx-node-${spec.type}`}
-                              type="button"
-                              onClick={() => addNodeFromContextMenu(spec.type)}
-                              className="group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-2 text-left text-sm text-zinc-200 transition hover:border-white/10 hover:bg-white/5"
-                            >
-                              <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-200">
-                                <RowIcon className="h-4 w-4" />
-                              </span>
-                              <span className="flex-1 leading-none">{spec.title}</span>
-                              {shortcut ? <span className="text-xs text-zinc-500">{shortcut}</span> : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <button
+                      key={`ctx-${group.category}`}
+                      type="button"
+                      onClick={() => {
+                        setActiveMenuCategory(group.category);
+                        setMenuSearch("");
+                      }}
+                      className={`flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition ${
+                        activeMenuCategory === group.category
+                          ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                          : "border-white/10 bg-white/[0.015] text-zinc-300 hover:bg-white/[0.05]"
+                      }`}
+                    >
+                      <span className="text-sm">{categoryLabelMap[group.category]}</span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="text-[10px] text-zinc-500">{group.specs.length}</span>
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </span>
+                    </button>
                   ))}
                 </div>
               </ScrollArea>
@@ -1058,6 +1792,52 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 <span>↕ Navigate</span>
                 <span>↵ Select</span>
               </div>
+
+              {activeMenuGroup ? (
+                <div className="absolute left-full top-0 ml-2 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs text-zinc-400">{categoryLabelMap[activeMenuGroup.category]}</p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveMenuCategory(null)}
+                      className="rounded-md border border-white/10 px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:bg-white/[0.06]"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <Input
+                    value={menuSearch}
+                    onChange={(event) => setMenuSearch(event.target.value)}
+                    className="mb-2 h-8 rounded-lg border-white/10 bg-black/35 text-xs"
+                    placeholder={`Search ${activeMenuGroup.category.toLowerCase()}...`}
+                  />
+                  <ScrollArea className="max-h-[25rem] pr-2">
+                    <div className="space-y-1">
+                      {filteredActiveMenuSpecs.map((spec) => {
+                        const RowIcon = getContextRowIcon(spec.type);
+                        const shortcut = shortcutByNodeType[spec.type];
+                        return (
+                          <button
+                            key={`ctx-node-${spec.type}`}
+                            type="button"
+                            onClick={() => addNodeFromContextMenu(spec.type)}
+                            className="group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-2 text-left text-sm text-zinc-200 transition hover:border-white/10 hover:bg-white/5"
+                          >
+                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-200">
+                              <RowIcon className="h-4 w-4" />
+                            </span>
+                            <span className="flex-1 leading-none">{spec.title}</span>
+                            {shortcut ? <span className="text-xs text-zinc-500">{shortcut}</span> : null}
+                          </button>
+                        );
+                      })}
+                      {filteredActiveMenuSpecs.length === 0 ? (
+                        <p className="px-2 py-6 text-center text-xs text-zinc-500">No nodes found.</p>
+                      ) : null}
+                    </div>
+                  </ScrollArea>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

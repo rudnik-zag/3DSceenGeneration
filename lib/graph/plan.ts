@@ -1,4 +1,5 @@
 import { GraphDocument, GraphEdge, GraphNode, WorkflowNodeType, ExecutionPlan } from "@/types/workflow";
+import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 
 function byId<T extends { id: string }>(items: T[]) {
   return new Map(items.map((item) => [item.id, item]));
@@ -64,9 +65,28 @@ function collectAncestors(nodeId: string, incoming: Map<string, string[]>, sink:
   }
 }
 
+function resolveBindingFromEdge(edge: GraphEdge, nodesById: Map<string, GraphNode>) {
+  const sourceNode = nodesById.get(edge.source);
+  const targetNode = nodesById.get(edge.target);
+  if (!sourceNode || !targetNode) return null;
+
+  const sourceSpec = nodeSpecRegistry[sourceNode.type as WorkflowNodeType];
+  const targetSpec = nodeSpecRegistry[targetNode.type as WorkflowNodeType];
+  if (!sourceSpec || !targetSpec) return null;
+
+  const sourceOutputId = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+  const inputPortId = edge.targetHandle ?? targetSpec.inputPorts[0]?.id;
+  if (!sourceOutputId || !inputPortId) return null;
+
+  return {
+    inputPortId,
+    sourceNodeId: edge.source,
+    sourceOutputId
+  };
+}
+
 export function buildExecutionPlan(document: GraphDocument, startNodeId?: string): ExecutionPlan {
   const nodesById = byId(document.nodes);
-  const outgoing = buildOutgoing(document.edges);
   const incoming = buildIncoming(document.edges);
 
   let targetNodes: Set<string>;
@@ -74,14 +94,15 @@ export function buildExecutionPlan(document: GraphDocument, startNodeId?: string
     if (!nodesById.has(startNodeId)) {
       throw new Error(`startNodeId ${startNodeId} not found`);
     }
-    const downstream = collectDownstream(startNodeId, outgoing);
     targetNodes = new Set<string>();
-    for (const nodeId of downstream) {
-      collectAncestors(nodeId, incoming, targetNodes);
-    }
+    collectAncestors(startNodeId, incoming, targetNodes);
   } else {
     targetNodes = new Set(document.nodes.map((n) => n.id));
   }
+
+  const outgoing = buildOutgoing(
+    document.edges.filter((edge) => targetNodes.has(edge.source) && targetNodes.has(edge.target))
+  );
 
   const indegree = new Map<string, number>();
   for (const nodeId of targetNodes) {
@@ -128,6 +149,10 @@ export function buildExecutionPlan(document: GraphDocument, startNodeId?: string
   }
 
   const tasks = ordered.map((node) => ({
+    inputBindings: document.edges
+      .filter((edge) => edge.target === node.id && targetNodes.has(edge.source))
+      .map((edge) => resolveBindingFromEdge(edge, nodesById))
+      .filter((binding): binding is NonNullable<typeof binding> => Boolean(binding)),
     nodeId: node.id,
     nodeType: node.type as WorkflowNodeType,
     params: node.data.params ?? {},

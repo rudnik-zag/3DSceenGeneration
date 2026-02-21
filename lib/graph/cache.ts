@@ -24,8 +24,13 @@ export function hashString(raw: string) {
 export function makeCacheKey(
   nodeType: WorkflowNodeType,
   params: Record<string, unknown>,
-  orderedInputArtifactHashes: string[]
+  orderedInputArtifactHashes: string[],
+  mode?: string
 ) {
-  const raw = [nodeType, stableStringify(params), orderedInputArtifactHashes.join("|")].join("::");
+  const raw = [nodeType, stableStringify(params), orderedInputArtifactHashes.join("|"), mode ?? "default"].join("::");
   return hashString(raw);
+}
+
+export function makeOutputCacheKey(baseCacheKey: string, outputId: string) {
+  return hashString(`${baseCacheKey}::${outputId}`);
 }

@@ -44,12 +44,22 @@ export async function POST() {
           },
           {
             id: "n2",
-            type: "out.export_scene",
-            position: { x: 320, y: 0 },
-            data: { label: "Export", params: { format: "mesh_glb" }, status: "idle" }
+            type: "model.groundingdino",
+            position: { x: 320, y: -40 },
+            data: { label: "GroundingDINO", params: { prompt: "person, shoes", threshold: 0.35 }, status: "idle" }
+          },
+          {
+            id: "n3",
+            type: "model.sam2",
+            position: { x: 680, y: -30 },
+            data: { label: "SAM2", params: { threshold: 0.5 }, status: "idle" }
           }
         ],
-        edges: [{ id: "e1", source: "n1", target: "n2", sourceHandle: "image", targetHandle: "mesh" }],
+        edges: [
+          { id: "e1", source: "n1", target: "n2", sourceHandle: "image", targetHandle: "image" },
+          { id: "e2", source: "n1", target: "n3", sourceHandle: "image", targetHandle: "image" },
+          { id: "e3", source: "n2", target: "n3", sourceHandle: "boxes", targetHandle: "boxes" }
+        ],
         viewport: { x: 0, y: 0, zoom: 0.9 }
       }
     }

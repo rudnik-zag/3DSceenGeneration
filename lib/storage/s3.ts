@@ -7,6 +7,8 @@ import {
   S3Client
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { promises as fs } from "fs";
+import path from "path";
 
 import { env } from "@/lib/env";
 
@@ -36,6 +38,59 @@ function getClient() {
 }
 
 let bucketReady = false;
+const LOCAL_STORAGE_ROOT = path.join(process.cwd(), ".local-storage");
+
+function toSafeStoragePath(key: string) {
+  const normalized = key.replace(/^\/+/, "").replace(/\.\./g, "_");
+  const filePath = path.join(LOCAL_STORAGE_ROOT, normalized);
+  return {
+    filePath,
+    metaPath: `${filePath}.meta.json`
+  };
+}
+
+function normalizeBody(body: Buffer | Uint8Array | string) {
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === "string") return Buffer.from(body);
+  return Buffer.from(body);
+}
+
+async function writeLocalObject(params: {
+  key: string;
+  body: Buffer | Uint8Array | string;
+  contentType: string;
+}) {
+  const { filePath, metaPath } = toSafeStoragePath(params.key);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, normalizeBody(params.body));
+  await fs.writeFile(metaPath, JSON.stringify({ contentType: params.contentType }, null, 2), "utf8");
+}
+
+async function readLocalObject(key: string) {
+  const { filePath } = toSafeStoragePath(key);
+  return fs.readFile(filePath);
+}
+
+async function localObjectExists(key: string) {
+  try {
+    const { filePath } = toSafeStoragePath(key);
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readLocalContentType(key: string) {
+  try {
+    const { metaPath } = toSafeStoragePath(key);
+    const raw = await fs.readFile(metaPath, "utf8");
+    const parsed = JSON.parse(raw) as { contentType?: string };
+    return typeof parsed.contentType === "string" ? parsed.contentType : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function ensureBucket() {
   if (bucketReady) {
@@ -58,17 +113,22 @@ export async function putObjectToStorage(params: {
   body: Buffer | Uint8Array | string;
   contentType: string;
 }) {
-  await ensureBucket();
+  try {
+    await ensureBucket();
 
-  const client = getClient();
-  await client.send(
-    new PutObjectCommand({
-      Bucket: env.S3_BUCKET,
-      Key: params.key,
-      Body: params.body,
-      ContentType: params.contentType
-    })
-  );
+    const client = getClient();
+    await client.send(
+      new PutObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: params.key,
+        Body: params.body,
+        ContentType: params.contentType
+      })
+    );
+  } catch (error) {
+    console.warn(`[storage] Falling back to local write for key "${params.key}"`, error);
+    await writeLocalObject(params);
+  }
 }
 
 export async function getSignedDownloadUrl(key: string, expiresIn = 60 * 60) {
@@ -92,6 +152,9 @@ export async function safeGetSignedDownloadUrl(
     return await getSignedDownloadUrl(key, expiresIn);
   } catch (error) {
     console.error(`[storage] Failed to sign download URL for key "${key}"`, error);
+    if (await localObjectExists(key)) {
+      return `/api/storage/object?key=${encodeURIComponent(key)}`;
+    }
     return null;
   }
 }
@@ -108,7 +171,7 @@ export async function storageObjectExists(key: string): Promise<boolean> {
     );
     return true;
   } catch {
-    return false;
+    return localObjectExists(key);
   }
 }
 
@@ -130,24 +193,58 @@ export async function getSignedUploadUrl(
   );
 }
 
+export async function safeGetSignedUploadUrl(
+  key: string,
+  contentType: string,
+  expiresIn = 60 * 15
+): Promise<string | null> {
+  try {
+    return await getSignedUploadUrl(key, contentType, expiresIn);
+  } catch (error) {
+    console.error(`[storage] Failed to sign upload URL for key "${key}"`, error);
+    return null;
+  }
+}
+
 export async function getObjectBuffer(key: string) {
-  await ensureBucket();
-  const client = getClient();
+  try {
+    await ensureBucket();
+    const client = getClient();
 
-  const output = await client.send(
-    new GetObjectCommand({
-      Bucket: env.S3_BUCKET,
-      Key: key
-    })
-  );
+    const output = await client.send(
+      new GetObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: key
+      })
+    );
 
-  if (!output.Body) {
-    throw new Error(`Storage key ${key} has no body`);
+    if (!output.Body) {
+      throw new Error(`Storage key ${key} has no body`);
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of output.Body as AsyncIterable<Buffer>) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  } catch (error) {
+    console.warn(`[storage] Falling back to local read for key "${key}"`, error);
+    return readLocalObject(key);
   }
+}
 
-  const chunks: Buffer[] = [];
-  for await (const chunk of output.Body as AsyncIterable<Buffer>) {
-    chunks.push(chunk);
+export async function getStorageObjectContentType(key: string): Promise<string | null> {
+  try {
+    await ensureBucket();
+    const client = getClient();
+    const output = await client.send(
+      new HeadObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: key
+      })
+    );
+    return output.ContentType ?? null;
+  } catch {
+    return readLocalContentType(key);
   }
-  return Buffer.concat(chunks);
 }

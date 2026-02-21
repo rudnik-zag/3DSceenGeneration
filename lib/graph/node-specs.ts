@@ -3,9 +3,22 @@ import { z } from "zod";
 import { NodeSpecRegistry, WorkflowNodeType } from "@/types/workflow";
 
 const textInput = z.object({ value: z.string().default("") });
-const imageInput = z.object({ storageKey: z.string().optional(), filename: z.string().default("image.png") });
+const imageInput = z.object({
+  sourceMode: z.enum(["upload", "generate"]).default("upload"),
+  generatorModel: z.string().default(""),
+  prompt: z.string().default(""),
+  storageKey: z.string().optional(),
+  filename: z.string().default("image.png")
+});
 const cameraPathInput = z.object({ json: z.string().default("[]") });
 const thresholdParams = z.object({ threshold: z.number().min(0).max(1).default(0.35) });
+const groundingDinoParams = z.object({
+  prompt: z.string().default("person, object"),
+  threshold: z.number().min(0).max(1).default(0.35)
+});
+const sam2Params = z.object({
+  threshold: z.number().min(0).max(1).default(0.5)
+});
 const modelPrompt = z.object({ prompt: z.string().default("") });
 const depthParams = z.object({ model: z.string().default("fast-depth") });
 const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
@@ -29,10 +42,17 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "image", label: "Image", payload: "Image" }],
     paramSchema: imageInput,
     paramFields: [
+      { key: "sourceMode", label: "Source Mode", input: "select", options: ["upload", "generate"] },
+      { key: "generatorModel", label: "Generator Model", input: "select", options: ["Z-Image-Turbo"] },
+      { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Cinematic lighting, detailed scene..." },
       { key: "filename", label: "Filename", input: "text" },
       { key: "storageKey", label: "Storage Key", input: "text", placeholder: "projects/..." }
     ],
-    defaultParams: { filename: "image.png", storageKey: "" }
+    defaultParams: { sourceMode: "upload", generatorModel: "Z-Image-Turbo", prompt: "", filename: "image.png", storageKey: "" },
+    ui: {
+      previewOutputIds: ["image"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("input.text", {
     type: "input.text",
@@ -64,14 +84,23 @@ export const nodeSpecEntries = [
     title: "GroundingDINO",
     icon: "Scan",
     description: "Open-vocabulary detection.",
-    inputPorts: [
-      { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "text", label: "Prompt", payload: "Text" }
+    inputPorts: [{ id: "image", label: "Image", payload: "Image", required: true }],
+    outputPorts: [
+      { id: "boxes", label: "Boxes JSON", payload: "BoxesJson", hidden: true, advancedOnly: true },
+      { id: "overlay", label: "Overlay", payload: "OverlayImage" }
     ],
-    outputPorts: [{ id: "boxes", label: "Boxes", payload: "Boxes" }],
-    paramSchema: thresholdParams,
-    paramFields: [{ key: "threshold", label: "Threshold", input: "number" }],
-    defaultParams: { threshold: 0.35 }
+    paramSchema: groundingDinoParams,
+    paramFields: [
+      { key: "prompt", label: "Detect Prompt", input: "textarea", placeholder: "person, chair, table" },
+      { key: "threshold", label: "Threshold", input: "number" }
+    ],
+    defaultParams: { prompt: "person, object", threshold: 0.35 },
+    ui: {
+      previewOutputIds: ["overlay"],
+      hiddenOutputIds: ["boxes"],
+      advancedOutputIds: ["boxes"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("model.sam2", {
     type: "model.sam2",
@@ -81,12 +110,22 @@ export const nodeSpecEntries = [
     description: "Segmentation masks from prompts.",
     inputPorts: [
       { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "boxes", label: "Boxes", payload: "Boxes" }
+      { id: "boxes", label: "Boxes JSON", payload: "BoxesJson", advancedOnly: true }
     ],
-    outputPorts: [{ id: "mask", label: "Mask", payload: "Mask" }],
-    paramSchema: thresholdParams,
+    outputPorts: [
+      { id: "mask", label: "Mask", payload: "MaskImage" },
+      { id: "overlay", label: "Overlay", payload: "OverlayImage" },
+      { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
+    ],
+    paramSchema: sam2Params,
     paramFields: [{ key: "threshold", label: "Threshold", input: "number" }],
-    defaultParams: { threshold: 0.5 }
+    defaultParams: { threshold: 0.5 },
+    ui: {
+      previewOutputIds: ["mask", "overlay"],
+      hiddenOutputIds: ["meta"],
+      advancedOutputIds: ["meta"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("model.sam3d_objects", {
     type: "model.sam3d_objects",

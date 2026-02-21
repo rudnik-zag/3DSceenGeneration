@@ -11,7 +11,9 @@ __pycache__/
 build/
 develop-eggs/
 node_modules/
+prisma/
 my_test_image/
+.local-storage/
 output/
 weights/
 .next/
@@ -19,7 +21,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/

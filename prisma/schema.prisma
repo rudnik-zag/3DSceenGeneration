@@ -41,9 +41,26 @@ model Project {
   graphs       Graph[]
   runs         Run[]
   artifacts    Artifact[]
+  uploadAssets UploadAsset[]
   cacheEntries CacheEntry[]
 
   @@index([userId])
+}
+
+model UploadAsset {
+  id        String   @id @default(cuid())
+  projectId String
+  nodeId    String?
+  category  String   @default("input.image")
+  fileName  String
+  mimeType  String
+  byteSize  Int
+  storageKey String  @unique
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([projectId, category])
 }
 
 model Graph {

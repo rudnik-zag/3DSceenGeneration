@@ -6,6 +6,10 @@ export type PayloadKind =
   | "Image"
   | "Mask"
   | "Boxes"
+  | "BoxesJson"
+  | "MaskImage"
+  | "OverlayImage"
+  | "JsonMeta"
   | "Text"
   | "Json"
   | "Depth"
@@ -40,6 +44,8 @@ export interface PortSpec {
   label: string;
   payload: PayloadKind;
   required?: boolean;
+  hidden?: boolean;
+  advancedOnly?: boolean;
 }
 
 export interface ParamField {
@@ -61,6 +67,12 @@ export interface NodeSpec {
   paramSchema: z.ZodTypeAny;
   paramFields: ParamField[];
   defaultParams: Record<string, unknown>;
+  ui?: {
+    previewOutputIds?: string[];
+    hiddenOutputIds?: string[];
+    advancedOutputIds?: string[];
+    nodeRunEnabled?: boolean;
+  };
 }
 
 export type NodeSpecRegistry = Record<WorkflowNodeType, NodeSpec>;
@@ -72,6 +84,26 @@ export interface GraphNodeData {
   latestArtifactId?: string;
   latestArtifactKind?: string;
   uiScale?: NodeUiScale;
+  runProgress?: number;
+  isCacheHit?: boolean;
+  lastRunAt?: string;
+  runtimeMode?: string;
+  runtimeWarning?: string | null;
+  previewUrl?: string | null;
+  outputArtifacts?: Record<
+    string,
+    {
+      id: string;
+      kind: string;
+      hidden?: boolean;
+      url?: string | null;
+      previewUrl?: string | null;
+      createdAt?: string;
+    }
+  >;
+  onRunNode?: (nodeId: string) => void;
+  onUploadImage?: (nodeId: string, file: File) => void;
+  onUpdateParam?: (nodeId: string, key: string, value: string | number | boolean) => void;
 }
 
 export interface GraphNode {
@@ -106,6 +138,11 @@ export interface ExecutionTask {
   nodeType: WorkflowNodeType;
   params: Record<string, unknown>;
   dependsOn: string[];
+  inputBindings: Array<{
+    inputPortId: string;
+    sourceNodeId: string;
+    sourceOutputId: string;
+  }>;
 }
 
 export interface ExecutionPlan {

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 
 import { CanvasEditor } from "@/components/canvas/canvas-editor";
 import { prisma } from "@/lib/db";
+import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
 import { GraphDocument } from "@/types/workflow";
 
 export default async function CanvasPage({
@@ -41,34 +42,52 @@ export default async function CanvasPage({
       id: true,
       nodeId: true,
       kind: true,
-      createdAt: true
+      createdAt: true,
+      meta: true,
+      storageKey: true,
+      previewStorageKey: true
     }
   });
 
-  const dedup = new Map<string, { id: string; nodeId: string; kind: string }>();
-  for (const artifact of artifacts) {
-    if (!dedup.has(artifact.nodeId)) {
-      dedup.set(artifact.nodeId, {
+  const nodeArtifacts = await Promise.all(
+    artifacts.map(async (artifact) => {
+      const meta =
+        artifact.meta && typeof artifact.meta === "object" && !Array.isArray(artifact.meta)
+          ? (artifact.meta as Record<string, unknown>)
+          : {};
+      const outputKey = typeof meta.outputKey === "string" ? meta.outputKey : "default";
+      const hidden = Boolean(meta.hidden);
+      const url = await safeGetSignedDownloadUrl(artifact.storageKey);
+      const previewUrl = artifact.previewStorageKey
+        ? await safeGetSignedDownloadUrl(artifact.previewStorageKey)
+        : null;
+      return {
         id: artifact.id,
         nodeId: artifact.nodeId,
-        kind: artifact.kind
-      });
-    }
-  }
+        kind: artifact.kind,
+        outputKey,
+        hidden,
+        url,
+        previewUrl,
+        meta,
+        createdAt: artifact.createdAt.toISOString()
+      };
+    })
+  );
 
   return (
     <CanvasEditor
       projectId={projectId}
       projectName={project.name}
-      initialGraph={latest.graphJson as GraphDocument}
+      initialGraph={latest.graphJson as unknown as GraphDocument}
       versions={versions.map((v) => ({
         id: v.id,
         name: v.name,
         version: v.version,
         createdAt: v.createdAt.toISOString(),
-        graphJson: v.graphJson as GraphDocument
+        graphJson: v.graphJson as unknown as GraphDocument
       }))}
-      nodeArtifacts={[...dedup.values()]}
+      nodeArtifacts={nodeArtifacts}
     />
   );
 }

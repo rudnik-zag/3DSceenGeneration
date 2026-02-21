@@ -13,6 +13,45 @@ from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
 
+DEFAULT_GROUNDING_DINO_CLASSES = [
+    # People & animals
+    "person", "man", "woman", "child", "baby",
+    "dog", "cat", "bird", "horse", "cow", "sheep",
+    
+    # Vehicles
+    "car", "truck", "bus", "van", "motorcycle", "bicycle",
+    "train", "airplane", "boat", "ship",
+
+    # Buildings & structures
+    "house", "building", "skyscraper", "garage",
+    "bridge", "tower", "fence", "wall", "gate",
+    "window", "door", "roof", "balcony",
+
+    # Outdoor environment
+    "tree", "bush", "grass", "flower", "plant",
+    "rock", "stone", "mountain", "hill",
+    "road", "street", "sidewalk", "path",
+    "bench", "lamp", "street lamp", "traffic light",
+    "sign", "traffic sign", "pole",
+
+    # Urban objects
+    "trash", "trash can", "garbage bin", "container",
+    "box", "crate", "barrel", "cart",
+    "chair", "table", "sofa", "couch",
+    "umbrella",
+
+    # Indoor common objects
+    "bed", "desk", "cabinet", "shelf", "bookshelf",
+    "television", "monitor", "laptop", "keyboard",
+    "mouse", "phone", "clock",
+    "picture", "painting", "mirror",
+    "lamp", "light",
+
+    # Scene-level large objects
+    "sky", "cloud", "sun",
+    "water", "river", "lake",
+    "ground", "floor", "ceiling"
+]
 
 def plot_boxes_to_image(image_pil, tgt):
     H, W = tgt["size"]

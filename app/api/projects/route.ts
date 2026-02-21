@@ -34,30 +34,9 @@ export async function POST(req: NextRequest) {
   });
 
   const initialGraph = {
-    nodes: [
-      {
-        id: "input-image",
-        type: "input.image",
-        position: { x: 0, y: 0 },
-        data: { label: "Input Image", params: { filename: "image.png", storageKey: "" }, status: "idle" }
-      },
-      {
-        id: "export-scene",
-        type: "out.export_scene",
-        position: { x: 320, y: 0 },
-        data: { label: "Export Scene", params: { format: "mesh_glb" }, status: "idle" }
-      }
-    ],
-    edges: [
-      {
-        id: "edge-input-export",
-        source: "input-image",
-        sourceHandle: "image",
-        target: "export-scene",
-        targetHandle: "mesh"
-      }
-    ],
-    viewport: { x: 0, y: 0, zoom: 0.9 }
+    nodes: [],
+    edges: [],
+    viewport: { x: 0, y: 0, zoom: 1 }
   };
 
   const graph = await prisma.graph.create({

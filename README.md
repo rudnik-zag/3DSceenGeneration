@@ -31,6 +31,7 @@ Production-ready full-stack app for building ML/geometry workflows on an infinit
 - `/app/p/[projectId]/runs` run status/logs/artifacts
 - `/app/p/[projectId]/viewer?artifactId=...` 3D viewer
 - `/api/*` projects, graph versions, runs, artifacts, uploads, demo open
+  - Node run endpoint: `POST /api/projects/[projectId]/nodes/[nodeId]/run`
 
 ## Graph JSON Format
 `GraphDocument`:
@@ -54,28 +55,64 @@ Production-ready full-stack app for building ML/geometry workflows on an infinit
 ```
 Saved as JSONB in `Graph.graphJson` with immutable versions in `Graph.version`.
 
+## Project Image Uploads
+- `input.image` node supports click-upload and drag/drop directly on the node.
+- UI preview is resized client-side for stable node size.
+- Original file is uploaded in background to S3/MinIO.
+- Upload metadata is persisted in PostgreSQL table `UploadAsset` (project scoped), with storage path grouped by project name:
+  - `projects/{projectId}/{projectSlug}/images/{timestamp}_{filename}`
+
 ## Caching Model
 Per-node cache key:
 ```txt
-hash(nodeType + stable(params) + ordered inputArtifactHashes)
+hash(nodeType + stable(params) + ordered inputArtifactHashes + mode)
+```
+Per-output cache key:
+```txt
+hash(nodeCacheBaseKey + outputPortId)
 ```
 Implementation:
 - `lib/graph/cache.ts` (`makeCacheKey`)
-- Worker checks `CacheEntry.cacheKey` before execution.
-- Cache hit reuses existing `Artifact` and marks node as cache-hit in run logs.
+- Worker checks `CacheEntry.cacheKey` per output port before execution.
+- Cache hit reuses all output artifacts and marks node as cache-hit in run logs.
 
 ## Execution Engine and Extensibility
 Current engine:
 - Queue job payload: `{ projectId, graphId, runId, startNodeId? }`
-- Worker compiles graph to DAG, runs tasks in topological order.
+- Worker compiles graph to DAG with typed `inputBindings` (target port <- source handle).
+- `startNodeId` executes only that node + required upstream dependencies.
 - Updates run progress/logs/status during execution.
 - Stores artifacts in MinIO using key pattern:
   - `projects/{projectId}/runs/{runId}/nodes/{nodeId}/artifact_{artifactId}.ext`
 
 Pluggable model execution:
-- `MockModelRunner` in `lib/execution/mock-runner.ts` is the current implementation.
+- Contract: `executeNode(nodeType, params, inputArtifacts) -> outputs[]` in `lib/execution/contracts.ts`.
+- `MockModelRunner` in `lib/execution/mock-runner.ts` dispatches by node type.
+- GroundingDINO and SAM2 executors are split in:
+  - `lib/execution/executors/groundingdino.ts`
+  - `lib/execution/executors/sam2.ts`
 - Replace/extend with real executors that call Python/FastAPI/local binaries.
 - Keep API contract: return artifact buffer + mime/kind/meta + optional preview.
+
+## GroundingDINO + SAM2 Behavior
+- `model.groundingdino`
+  - Input: required `Image`
+  - Outputs:
+    - `boxes` JSON (hidden/advanced)
+    - `overlay` image preview
+  - Params: `prompt`, `threshold`
+- `model.sam2`
+  - Inputs: required `Image`, optional `boxes` JSON
+  - Outputs:
+    - `mask` image preview
+    - `overlay` image
+    - `meta` JSON (hidden/advanced)
+  - Mode rules:
+    - If `boxes` is connected -> guided mode.
+    - If no `boxes` -> full segmentation mode.
+    - If both direct image and boxes image-source disagree by hash, warning is set:
+      - `Boxes input does not match image input. Using GroundingDINO source image.`
+    - Guided mode always prefers GroundingDINO source image from boxes metadata.
 
 ## 3D Viewer Notes
 Implemented:
