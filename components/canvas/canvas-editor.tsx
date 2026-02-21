@@ -647,14 +647,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   );
 
   const onPaneClick = useCallback(
-    (_event: React.MouseEvent) => {
+    (event: React.MouseEvent) => {
       if (suppressNextPaneClickRef.current) {
+        return;
+      }
+      if (event.detail >= 2) {
+        setPendingConnect(null);
+        openPaneMenuAtScreenPoint(event.clientX, event.clientY);
         return;
       }
       setPaneMenu(null);
       setPendingConnect(null);
     },
-    []
+    [openPaneMenuAtScreenPoint]
   );
 
   const onCanvasDoubleClick = useCallback(
@@ -1853,6 +1858,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             panOnScroll
             panOnDrag
             selectionOnDrag
+            zoomOnDoubleClick={false}
             minZoom={0.2}
             maxZoom={1.8}
             snapToGrid={snapToGrid}

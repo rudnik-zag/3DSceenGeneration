@@ -1,6 +1,6 @@
 "use client";
 
-import type { ComponentType } from "react";
+import { useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
 import { Handle, NodeProps, Position } from "reactflow";
 import {
   AlertTriangle,
@@ -13,11 +13,13 @@ import {
   Play,
   Sparkles,
   Type as TypeIcon,
+  X,
   UploadCloud,
   WandSparkles
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { cn } from "@/lib/utils";
 import { GraphNodeData, WorkflowNodeType } from "@/types/workflow";
@@ -82,6 +84,7 @@ function pickPromptText(data: GraphNodeData) {
 }
 
 export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
@@ -127,6 +130,14 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
+  const hasOpenablePreview = Boolean(data.previewUrl);
+
+  const openPreviewModal = (event: ReactMouseEvent) => {
+    if (!hasOpenablePreview) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPreviewModalOpen(true);
+  };
 
   return (
     <div
@@ -307,7 +318,13 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <div className="h-full w-full animate-pulse bg-white/10" />
             ) : data.previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={data.previewUrl} alt={`${spec.title} preview`} className="h-full w-full object-contain" />
+              <img
+                src={data.previewUrl}
+                alt={`${spec.title} preview`}
+                className="nodrag h-full w-full cursor-zoom-in object-contain"
+                onDoubleClick={openPreviewModal}
+                title="Double-click to open full size"
+              />
             ) : (
               <div className="grid h-full w-full place-items-center bg-black/35">
                 <p className="px-3 text-center text-[10px] text-zinc-400">
@@ -386,7 +403,13 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           ) : data.previewUrl ? (
             <div className="overflow-hidden rounded-lg border border-white/10 bg-black/40">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={data.previewUrl} alt={`${spec.title} output`} className="aspect-video h-full w-full object-cover" />
+              <img
+                src={data.previewUrl}
+                alt={`${spec.title} output`}
+                className="nodrag aspect-video h-full w-full cursor-zoom-in object-cover"
+                onDoubleClick={openPreviewModal}
+                title="Double-click to open full size"
+              />
             </div>
           ) : data.latestArtifactKind ? (
             <div className="space-y-1">
@@ -434,7 +457,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               position={Position.Right}
               style={{ top, width: 9, height: 9, background: "#8dc6a2", border: "1px solid #1f2937", right: -4.5 }}
             />
-            <span
+          <span
               className={cn(
                 "pointer-events-none absolute -right-1 translate-x-full rounded-md border border-white/10 bg-black/75 px-1.5 py-0.5 text-[10px] text-zinc-400",
                 port.hidden && "opacity-70"
@@ -446,6 +469,28 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           </div>
         );
       })}
+
+      <Dialog open={previewModalOpen} onOpenChange={setPreviewModalOpen}>
+        <DialogContent className="w-[96vw] max-w-[1300px] border-white/15 bg-black/90 p-3 text-zinc-100">
+          <div className="mb-2 flex items-center justify-between">
+            <DialogTitle className="text-sm font-medium text-zinc-100">{spec.title} Preview</DialogTitle>
+            <DialogClose asChild>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/15 bg-white/5 text-zinc-200 transition hover:bg-white/10"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </DialogClose>
+          </div>
+          <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
+            {data.previewUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={data.previewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
