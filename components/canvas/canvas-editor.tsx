@@ -305,6 +305,54 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, [activeMenuGroup, menuSearch]);
 
   useEffect(() => {
+    setNodes((prev) => {
+      const byId = new Map(prev.map((node) => [node.id, node]));
+      const hasBoxesConfigByNode = new Set<string>();
+      const hasImageByNode = new Set<string>();
+
+      for (const edge of edges) {
+        const targetNode = byId.get(edge.target);
+        if (!targetNode) continue;
+        const targetType = targetNode.type as WorkflowNodeType;
+        const targetSpec = nodeSpecRegistry[targetType];
+        const inferredTargetHandle = edge.targetHandle ?? targetSpec.inputPorts[0]?.id;
+
+        if (inferredTargetHandle === "boxes" || inferredTargetHandle === "boxesConfig") {
+          hasBoxesConfigByNode.add(edge.target);
+        }
+        if (inferredTargetHandle === "image") {
+          hasImageByNode.add(edge.target);
+        }
+      }
+
+      let changed = false;
+      const next = prev.map((node) => {
+        if (node.type !== "model.sam2") {
+          return node;
+        }
+        const nextHasBoxes = hasBoxesConfigByNode.has(node.id);
+        const nextHasImage = hasImageByNode.has(node.id);
+        if (
+          node.data.hasBoxesConfigConnection === nextHasBoxes &&
+          node.data.hasImageConnection === nextHasImage
+        ) {
+          return node;
+        }
+        changed = true;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            hasBoxesConfigConnection: nextHasBoxes,
+            hasImageConnection: nextHasImage
+          }
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [edges, setNodes]);
+
+  useEffect(() => {
     return () => {
       if (runPollRef.current) {
         clearInterval(runPollRef.current);
@@ -1287,7 +1335,37 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         clearInterval(runPollRef.current!);
         runPollRef.current = null;
         const title = data.run.status === "success" ? "Run finished" : data.run.status === "canceled" ? "Run canceled" : "Run failed";
-        toast({ title, description: `Run ${runId.slice(0, 8)}` });
+        const logLines = String(data.run.logs ?? "")
+          .split("\n")
+          .map((line: string) => line.trim())
+          .filter(Boolean);
+        const descriptionBase = `Run ${runId.slice(0, 8)}`;
+        let description = descriptionBase;
+
+        if (data.run.status === "success") {
+          const executedLine = [...logLines].reverse().find((line) => line.includes(" executed "));
+          if (executedLine) {
+            const nodeMatch = executedLine.match(/\]\s+([^\s]+)\s+executed/);
+            const outputsMatch = executedLine.match(/outputs=([^\s]+)/);
+            const warningsMatch = executedLine.match(/warnings=(.+)$/);
+            const nodeText = nodeMatch?.[1] ?? "node";
+            const outputsText = outputsMatch?.[1] ?? "outputs";
+            description = `${nodeText} -> ${outputsText}`;
+            if (warningsMatch?.[1]) {
+              description = `${description} | ${warningsMatch[1]}`;
+            }
+          }
+        } else if (data.run.status === "error") {
+          const errorLine = [...logLines].reverse().find((line) => line.includes("ERROR:"));
+          if (errorLine) {
+            const shortError = errorLine.replace(/^.*ERROR:\s*/, "").trim();
+            if (shortError.length > 0) {
+              description = `${descriptionBase} | ${shortError}`;
+            }
+          }
+        }
+
+        toast({ title, description });
       }
     }, 1600);
   };
@@ -1507,6 +1585,12 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     []
   );
 
+  useEffect(() => {
+    if (!groundingDinoJsonArtifact?.id) return;
+    if (inspectedJsonArtifactId === groundingDinoJsonArtifact.id) return;
+    void inspectArtifactJson(groundingDinoJsonArtifact.id);
+  }, [groundingDinoJsonArtifact?.id, inspectArtifactJson, inspectedJsonArtifactId]);
+
   return (
     <div className="h-full">
       <div className="flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
@@ -1699,8 +1783,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                     <Input
                                       type={field.input === "number" ? "number" : "text"}
                                       value={String(value ?? "")}
+                                      min={field.input === "number" ? field.min : undefined}
+                                      max={field.input === "number" ? field.max : undefined}
+                                      step={field.input === "number" ? field.step ?? "any" : undefined}
                                       onChange={(e) =>
-                                        updateSelectedNodeParam(field.key, field.input === "number" ? Number(e.target.value || 0) : e.target.value)
+                                        updateSelectedNodeParam(
+                                          field.key,
+                                          field.input === "number"
+                                            ? Number.isFinite(Number(e.target.value))
+                                              ? Number(e.target.value)
+                                              : 0
+                                            : e.target.value
+                                        )
                                       }
                                       placeholder={field.placeholder}
                                       className="rounded-xl"
@@ -1731,18 +1825,29 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <div className="mb-2 flex items-center justify-between gap-2">
                                 <p className="text-xs font-medium text-zinc-300">GroundingDINO JSON</p>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="rounded-lg"
-                                  onClick={() => void inspectArtifactJson(groundingDinoJsonArtifact.id)}
-                                  disabled={inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id}
-                                >
-                                  {inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id
-                                    ? "Loading..."
-                                    : "Inspect JSON"}
-                                </Button>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="rounded-lg"
+                                    onClick={() => void inspectArtifactJson(groundingDinoJsonArtifact.id)}
+                                    disabled={inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id}
+                                  >
+                                    {inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id
+                                      ? "Loading..."
+                                      : "Reload JSON"}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="rounded-lg"
+                                    onClick={() => window.open(`/api/artifacts/${groundingDinoJsonArtifact.id}`, "_blank")}
+                                  >
+                                    Open file
+                                  </Button>
+                                </div>
                               </div>
+                              <p className="mb-2 text-[11px] text-zinc-500">Detection boxes/config generated by GroundingDINO.</p>
                               {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
                                 <p className="text-xs text-rose-300">{inspectedJsonError}</p>
                               ) : null}

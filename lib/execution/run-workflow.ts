@@ -1,4 +1,6 @@
 import { ArtifactKind, Prisma, RunStatus } from "@prisma/client";
+import { promises as fs } from "fs";
+import path from "path";
 
 import { prisma } from "@/lib/db";
 import { ResolvedArtifactInput } from "@/lib/execution/contracts";
@@ -31,6 +33,13 @@ function inferImageMimeTypeFromPath(value: string) {
   if (lowered.endsWith(".webp")) return "image/webp";
   if (lowered.endsWith(".svg")) return "image/svg+xml";
   return "image/jpeg";
+}
+
+function inferArtifactKindFromMime(mimeType: string): ArtifactKind {
+  if (mimeType.includes("png") || mimeType.includes("jpeg") || mimeType.includes("jpg") || mimeType.includes("webp") || mimeType.includes("svg")) {
+    return "image";
+  }
+  return "json";
 }
 
 function appendLog(prev: string, line: string) {
@@ -121,11 +130,65 @@ function orderedInputHashes(nodeType: WorkflowNodeType, inputsByPort: Record<str
 }
 
 function parseBoxesMeta(artifact?: RuntimeArtifactRef | null) {
-  if (!artifact) return { sourceImageArtifactId: null as string | null, sourceImageHash: null as string | null };
+  if (!artifact) {
+    return {
+      sourceImageArtifactId: null as string | null,
+      sourceImageHash: null as string | null,
+      sourceImagePath: null as string | null,
+      sourceImageStorageKey: null as string | null
+    };
+  }
   const sourceImageArtifactId =
     typeof artifact.meta.sourceImageArtifactId === "string" ? artifact.meta.sourceImageArtifactId : null;
   const sourceImageHash = typeof artifact.meta.sourceImageHash === "string" ? artifact.meta.sourceImageHash : null;
-  return { sourceImageArtifactId, sourceImageHash };
+  const sourceImagePath =
+    typeof artifact.meta.sourceImagePath === "string"
+      ? artifact.meta.sourceImagePath
+      : typeof artifact.meta.image_path === "string"
+        ? artifact.meta.image_path
+        : null;
+  const sourceImageStorageKey =
+    typeof artifact.meta.sourceImageStorageKey === "string" ? artifact.meta.sourceImageStorageKey : null;
+  return { sourceImageArtifactId, sourceImageHash, sourceImagePath, sourceImageStorageKey };
+}
+
+async function parseBoxesPayload(artifact: RuntimeArtifactRef | null) {
+  if (!artifact || artifact.kind !== "json") return null;
+  try {
+    const raw = await getObjectBuffer(artifact.storageKey);
+    const parsed = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function createRuntimeArtifactFromLocalPath(params: {
+  nodeId: string;
+  outputId: string;
+  filePath: string;
+  fallbackArtifactIdPrefix: string;
+}) {
+  const buffer = await fs.readFile(params.filePath);
+  const hash = stableHashForOutput(buffer);
+  const mimeType = inferImageMimeTypeFromPath(params.filePath);
+  const kind = inferArtifactKindFromMime(mimeType);
+  return {
+    artifactId: `${params.fallbackArtifactIdPrefix}-${hash.slice(0, 10)}`,
+    nodeId: params.nodeId,
+    outputId: params.outputId,
+    kind,
+    hash,
+    mimeType,
+    storageKey: params.filePath,
+    byteSize: buffer.length,
+    meta: {
+      outputKey: params.outputId,
+      sourcePath: params.filePath
+    },
+    createdAt: new Date(),
+    previewStorageKey: null
+  } as RuntimeArtifactRef;
 }
 
 export async function executeWorkflowRun(input: RunWorkflowInput) {
@@ -222,38 +285,111 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       let runtimeMode: string | undefined;
       const runtimeWarnings: string[] = [];
       if (task.nodeType === "model.sam2") {
-        const directImage = inputsByPort.image?.[0];
-        const boxesInput = inputsByPort.boxes?.[0];
+        const directImage = inputsByPort.image?.[0] ?? null;
+        const boxesInput = inputsByPort.boxes?.[0] ?? inputsByPort.boxesConfig?.[0] ?? null;
+        const modeParam =
+          typeof task.params.mode === "string" && ["guided", "full", "auto"].includes(task.params.mode)
+            ? task.params.mode
+            : "auto";
+        runtimeMode = modeParam === "auto" ? (boxesInput ? "guided" : "full") : modeParam;
+
+        if (runtimeMode === "guided" && !boxesInput) {
+          throw new Error("Requires GroundingDINO config JSON input.");
+        }
+
+        let effectiveImage = directImage;
+        let sourceImageHash: string | null = null;
         if (boxesInput) {
-          runtimeMode = "guided";
-          const { sourceImageArtifactId, sourceImageHash } = parseBoxesMeta(boxesInput);
-          let sourcedImage: RuntimeArtifactRef | null = null;
-          if (sourceImageArtifactId) {
-            sourcedImage =
-              producedByArtifactId.get(sourceImageArtifactId) ??
-              (await findArtifactById(input.projectId, sourceImageArtifactId));
-            if (sourcedImage) {
-              producedByArtifactId.set(sourcedImage.artifactId, sourcedImage);
+          const boxesMeta = parseBoxesMeta(boxesInput);
+          sourceImageHash = boxesMeta.sourceImageHash;
+
+          if (!effectiveImage && boxesMeta.sourceImageStorageKey) {
+            try {
+              const sourceBuffer = await getObjectBuffer(boxesMeta.sourceImageStorageKey);
+              const sourceHash = stableHashForOutput(sourceBuffer);
+              effectiveImage = {
+                artifactId: `source-storage-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+                nodeId: task.nodeId,
+                outputId: "image",
+                kind: "image",
+                hash: sourceHash,
+                mimeType: inferImageMimeTypeFromPath(boxesMeta.sourceImageStorageKey),
+                storageKey: boxesMeta.sourceImageStorageKey,
+                byteSize: sourceBuffer.length,
+                meta: {
+                  outputKey: "image",
+                  sourceStorageKey: boxesMeta.sourceImageStorageKey
+                },
+                createdAt: new Date(),
+                previewStorageKey: null
+              };
+            } catch {
+              // Continue with other fallback paths.
             }
           }
 
-          if (directImage && sourceImageHash && directImage.hash !== sourceImageHash) {
-            runtimeWarnings.push("Boxes input does not match image input. Using GroundingDINO source image.");
+          if (!effectiveImage && boxesMeta.sourceImageArtifactId) {
+            const sourcedImage =
+              producedByArtifactId.get(boxesMeta.sourceImageArtifactId) ??
+              (await findArtifactById(input.projectId, boxesMeta.sourceImageArtifactId));
+            if (sourcedImage) {
+              producedByArtifactId.set(sourcedImage.artifactId, sourcedImage);
+              effectiveImage = sourcedImage;
+            }
           }
 
-          const effectiveImage = sourcedImage ?? directImage;
+          if (!effectiveImage && boxesMeta.sourceImagePath) {
+            try {
+              await fs.access(boxesMeta.sourceImagePath);
+              effectiveImage = await createRuntimeArtifactFromLocalPath({
+                nodeId: task.nodeId,
+                outputId: "image",
+                filePath: boxesMeta.sourceImagePath,
+                fallbackArtifactIdPrefix: "source-path"
+              });
+            } catch {
+              // Continue with JSON payload fallback.
+            }
+          }
+
           if (!effectiveImage) {
-            throw new Error(`Node ${task.nodeId} could not resolve image for SAM2 guided mode`);
+            const boxesPayload = await parseBoxesPayload(boxesInput);
+            const imagePath =
+              boxesPayload && typeof boxesPayload.image_path === "string"
+                ? boxesPayload.image_path
+                : boxesPayload && typeof boxesPayload.sourceImagePath === "string"
+                  ? boxesPayload.sourceImagePath
+                  : boxesPayload && typeof boxesPayload.source_image_path === "string"
+                    ? boxesPayload.source_image_path
+                    : null;
+
+            if (imagePath) {
+              try {
+                await fs.access(imagePath);
+                effectiveImage = await createRuntimeArtifactFromLocalPath({
+                  nodeId: task.nodeId,
+                  outputId: "image",
+                  filePath: imagePath,
+                  fallbackArtifactIdPrefix: "source-json-path"
+                });
+              } catch {
+                // Keep failing flow below.
+              }
+            }
           }
-          inputsByPort.image = [effectiveImage];
+
           inputsByPort.boxes = [boxesInput];
-        } else {
-          runtimeMode = "full";
-          if (!directImage) {
-            throw new Error(`Node ${task.nodeId} requires image input`);
-          }
-          inputsByPort.image = [directImage];
+          inputsByPort.boxesConfig = [boxesInput];
         }
+
+        if (directImage && sourceImageHash && directImage.hash !== sourceImageHash) {
+          runtimeWarnings.push("Boxes input image hash differs from direct image input. Using direct image input.");
+        }
+
+        if (!effectiveImage) {
+          throw new Error("No input image provided and config JSON does not contain an image path.");
+        }
+        inputsByPort.image = [effectiveImage];
       }
 
       for (const requiredPort of requiredInputPorts(task.nodeType)) {
@@ -363,7 +499,16 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         inputs: inputsByPort,
         mode: runtimeMode,
         warnings: runtimeWarnings,
-        loadInputBuffer: async (artifact) => getObjectBuffer(artifact.storageKey)
+        loadInputBuffer: async (artifact) => {
+          if (path.isAbsolute(artifact.storageKey)) {
+            try {
+              return await fs.readFile(artifact.storageKey);
+            } catch {
+              // Fall back to storage key lookup.
+            }
+          }
+          return getObjectBuffer(artifact.storageKey);
+        }
       });
 
       const outputs = result.outputs.filter((output) => spec.outputPorts.some((port) => port.id === output.outputId));

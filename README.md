@@ -82,8 +82,42 @@ S3_FORCE_PATH_STYLE=true
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-## Concrete Run Instructions (Recommended)
-This is the standard setup: infra in Docker, app+worker on host.
+## One-command Local Stack (Recommended)
+Use the process manager script:
+
+```bash
+bash scripts/dev-stack.sh start
+```
+
+Useful commands:
+```bash
+bash scripts/dev-stack.sh status
+bash scripts/dev-stack.sh logs
+bash scripts/dev-stack.sh restart
+bash scripts/dev-stack.sh stop
+bash scripts/dev-stack.sh down
+```
+
+Script env options:
+```bash
+CONDA_ENV_NAME=general_env
+USE_DOCKER_INFRA=1
+STOP_DOCKER_INFRA=1
+COREPACK_HOME_DIR=/tmp/corepack
+```
+
+Examples:
+```bash
+USE_DOCKER_INFRA=0 bash scripts/dev-stack.sh start
+STOP_DOCKER_INFRA=0 bash scripts/dev-stack.sh stop
+```
+
+Open:
+- App: `http://localhost:3000`
+- MinIO console: `http://localhost:9001` (`minioadmin` / `minioadmin`)
+
+## Concrete Run Instructions (Manual)
+This is the manual setup: infra in Docker, app+worker on host.
 
 ### 1) Start background infra
 ```bash
@@ -134,6 +168,33 @@ Expected:
 
 If Conda/env/weights are missing, executor can fail and run will show error logs.
 
+## SAM2 Node Runtime (Guided + Full Modes)
+- SAM2 now supports:
+  - `Guided (DINO config)` mode (uses GroundingDINO boxes JSON)
+  - `Full auto segmentation` mode
+- Image resolution order at execution:
+  1. Direct SAM2 `Image` input
+  2. Image path from connected boxes JSON (`image_path` / `sourceImagePath`)
+  3. Error if neither exists
+- Server-side config list endpoint for node dropdown:
+  - `GET /api/sam2/configs`
+- New env settings:
+```env
+SAM2_REPO_ROOT=/absolute/path/to/models/sam2
+SAM2_CHECKPOINT=/absolute/path/to/models/sam2/checkpoints/sam2.1_hiera_large.pt
+SAM2_TOOLS_DIR=/absolute/path/to/models/sam2/tools
+LOCAL_STORAGE_ROOT=.local-storage
+SAM2_EXECUTION_MODE=mock
+SAM2_ALLOW_MOCK_FALLBACK=true
+SAM2_USE_CONDA=true
+SAM2_CONDA_COMMAND=conda
+SAM2_CONDA_ENV=sam2
+```
+- Real execution command builder uses:
+  - `conda run -n sam2 python ...` by default
+  - `tools/image_auto_mask_export_v2.py` for guided mode
+  - `tools/image_auto_mask_export.py` for full mode
+
 ## Common Troubleshooting
 ### `curl: (1) Received HTTP/0.9 when not allowed` on MinIO health URL
 Port `9000` is serving something that is not valid MinIO HTTP API for your app.
@@ -176,6 +237,11 @@ Check `.env` endpoint and protocol (`http` vs `https`) and that MinIO is running
 - `pnpm db:migrate` run migrations
 - `pnpm db:seed` seed demo data
 - `pnpm build` production build
+- `bash scripts/dev-stack.sh start` start infra + app + worker
+- `bash scripts/dev-stack.sh stop` stop app + worker + infra
+- `bash scripts/dev-stack.sh restart` restart full stack
+- `bash scripts/dev-stack.sh status` show process status
+- `bash scripts/dev-stack.sh logs` tail app/worker logs
 
 ## Notes
 - If S3/MinIO is unavailable, uploads/artifacts continue through local fallback at `.local-storage/`.

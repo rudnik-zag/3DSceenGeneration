@@ -17,7 +17,13 @@ const groundingDinoParams = z.object({
   threshold: z.number().min(0).max(1).default(0.35)
 });
 const sam2Params = z.object({
-  threshold: z.number().min(0).max(1).default(0.5)
+  mode: z.enum(["auto", "guided", "full"]).default("auto"),
+  sam2Cfg: z.string().default("sam2.1_hiera_l.yaml"),
+  pointsPerSide: z.number().int().min(4).max(256).default(64),
+  predIouThresh: z.number().min(0).max(1).default(0.7),
+  stabilityScoreThresh: z.number().min(0).max(1).default(0.9),
+  cropNLayers: z.number().int().min(0).max(8).default(1),
+  overlayAlpha: z.number().min(0).max(1).default(0.6)
 });
 const modelPrompt = z.object({ prompt: z.string().default("") });
 const depthParams = z.object({ model: z.string().default("fast-depth") });
@@ -114,8 +120,8 @@ export const nodeSpecEntries = [
     icon: "Layers",
     description: "Segmentation masks from prompts.",
     inputPorts: [
-      { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "boxes", label: "Boxes JSON", payload: "BoxesJson", advancedOnly: true }
+      { id: "image", label: "Image", payload: "Image" },
+      { id: "boxes", label: "BoxesConfig JSON", payload: "BoxesJson", advancedOnly: true }
     ],
     outputPorts: [
       { id: "mask", label: "Mask", payload: "MaskImage" },
@@ -123,10 +129,24 @@ export const nodeSpecEntries = [
       { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
     ],
     paramSchema: sam2Params,
-    paramFields: [{ key: "threshold", label: "Threshold", input: "number" }],
-    defaultParams: { threshold: 0.5 },
+    paramFields: [
+      { key: "pointsPerSide", label: "Points Per Side", input: "number", min: 4, max: 256, step: 1 },
+      { key: "predIouThresh", label: "Pred IoU Thresh", input: "number", min: 0, max: 1, step: 0.01 },
+      { key: "stabilityScoreThresh", label: "Stability Score Thresh", input: "number", min: 0, max: 1, step: 0.01 },
+      { key: "cropNLayers", label: "Crop N Layers", input: "number", min: 0, max: 8, step: 1 },
+      { key: "overlayAlpha", label: "Overlay Alpha", input: "number", min: 0, max: 1, step: 0.05 }
+    ],
+    defaultParams: {
+      mode: "auto",
+      sam2Cfg: "sam2.1_hiera_l.yaml",
+      pointsPerSide: 64,
+      predIouThresh: 0.7,
+      stabilityScoreThresh: 0.9,
+      cropNLayers: 1,
+      overlayAlpha: 0.6
+    },
     ui: {
-      previewOutputIds: ["mask", "overlay"],
+      previewOutputIds: ["overlay", "mask"],
       hiddenOutputIds: ["meta"],
       advancedOutputIds: ["meta"],
       nodeRunEnabled: true

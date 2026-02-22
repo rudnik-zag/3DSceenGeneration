@@ -54,6 +54,9 @@ export interface ParamField {
   input: "text" | "number" | "select" | "textarea" | "json" | "boolean";
   options?: string[];
   placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface NodeSpec {
@@ -89,6 +92,8 @@ export interface GraphNodeData {
   lastRunAt?: string;
   runtimeMode?: string;
   runtimeWarning?: string | null;
+  hasBoxesConfigConnection?: boolean;
+  hasImageConnection?: boolean;
   previewUrl?: string | null;
   outputArtifacts?: Record<
     string,

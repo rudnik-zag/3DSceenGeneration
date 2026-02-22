@@ -23,5 +23,12 @@ export const env = {
   S3_BUCKET: process.env.S3_BUCKET ?? "artifacts",
   S3_REGION: process.env.S3_REGION ?? "us-east-1",
   S3_FORCE_PATH_STYLE: process.env.S3_FORCE_PATH_STYLE === "true",
-  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+  SAM2_REPO_ROOT: process.env.SAM2_REPO_ROOT ?? "",
+  SAM2_CHECKPOINT: process.env.SAM2_CHECKPOINT ?? "",
+  SAM2_TOOLS_DIR: process.env.SAM2_TOOLS_DIR ?? "",
+  SAM2_USE_CONDA: process.env.SAM2_USE_CONDA ?? "true",
+  SAM2_CONDA_COMMAND: process.env.SAM2_CONDA_COMMAND ?? "conda",
+  SAM2_CONDA_ENV: process.env.SAM2_CONDA_ENV ?? "sam2",
+  LOCAL_STORAGE_ROOT: process.env.LOCAL_STORAGE_ROOT ?? ""
 };

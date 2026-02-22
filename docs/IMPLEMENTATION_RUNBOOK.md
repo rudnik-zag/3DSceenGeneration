@@ -28,6 +28,11 @@ This document is synced with the current repository behavior and `README.md`.
 - Node-run supports `startNodeId` (run selected node + dependencies).
 - `input.image` source handling:
   - Uses uploaded source directly (`storageKey`) instead of re-triggering fake processing.
+- SAM2 execution wiring now includes:
+  - two modes (`guided` / `full`)
+  - server-side command builder
+  - image fallback from boxes JSON path when image input is not connected
+  - env-driven SAM2 repo/tools/checkpoint configuration
 
 ### Canvas UX
 - Right-click/double-click context menu for add-node.
@@ -84,6 +89,15 @@ S3_BUCKET=artifacts
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=true
 NEXT_PUBLIC_APP_URL=http://localhost:3000
+SAM2_REPO_ROOT=/absolute/path/to/models/sam2
+SAM2_CHECKPOINT=/absolute/path/to/models/sam2/checkpoints/sam2.1_hiera_large.pt
+SAM2_TOOLS_DIR=/absolute/path/to/models/sam2/tools
+LOCAL_STORAGE_ROOT=.local-storage
+SAM2_EXECUTION_MODE=mock
+SAM2_ALLOW_MOCK_FALLBACK=true
+SAM2_USE_CONDA=true
+SAM2_CONDA_COMMAND=conda
+SAM2_CONDA_ENV=sam2
 ```
 
 If port `9000` is bad/occupied, run MinIO on `9100` and change:
@@ -211,4 +225,3 @@ Use corepack setup above.
   - DB entities (`Project`, `Graph`, `Run`, `Artifact`, `CacheEntry`, `UploadAsset`)
   - Storage prefix `projects/{projectId}/` in S3 and local fallback.
 - Storage module automatically throttles repeated fallback warnings.
-

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
 import { Handle, NodeProps, Position } from "reactflow";
 import {
   AlertTriangle,
@@ -83,12 +83,43 @@ function pickPromptText(data: GraphNodeData) {
   return "";
 }
 
+let sam2ConfigCache: string[] | null = null;
+let sam2ConfigInflight: Promise<string[]> | null = null;
+
+async function fetchSam2Configs() {
+  if (sam2ConfigCache) return sam2ConfigCache;
+  if (sam2ConfigInflight) return sam2ConfigInflight;
+  sam2ConfigInflight = fetch("/api/sam2/configs", { cache: "no-store" })
+    .then(async (res) => {
+      if (!res.ok) {
+        return ["sam2.1_hiera_l.yaml"];
+      }
+      const payload = (await res.json()) as { configs?: unknown };
+      if (!Array.isArray(payload.configs)) {
+        return ["sam2.1_hiera_l.yaml"];
+      }
+      const normalized = payload.configs
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .map((value) => value.trim());
+      return normalized.length > 0 ? normalized : ["sam2.1_hiera_l.yaml"];
+    })
+    .catch(() => ["sam2.1_hiera_l.yaml"])
+    .finally(() => {
+      sam2ConfigInflight = null;
+    });
+
+  sam2ConfigCache = await sam2ConfigInflight;
+  return sam2ConfigCache;
+}
+
 export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
+  const isSam2Node = nodeType === "model.sam2";
+  const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const isInputImageNode = nodeType === "input.image";
   const inputImageSourceMode =
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
@@ -131,6 +162,29 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
   const hasOpenablePreview = Boolean(data.previewUrl);
+  const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
+  const sam2ModeParam =
+    isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
+  const sam2ComputedMode =
+    sam2ModeParam === "full" ? "full" : sam2ModeParam === "guided" ? "guided" : hasSam2BoxesConfig ? "guided" : "full";
+  const sam2DisplayedMode =
+    sam2ModeParam === "full" ? "full" : hasSam2BoxesConfig ? "guided" : "full";
+  const sam2Cfg =
+    isSam2Node && typeof data.params?.sam2Cfg === "string" && data.params.sam2Cfg.trim().length > 0
+      ? data.params.sam2Cfg.trim()
+      : "sam2.1_hiera_l.yaml";
+
+  useEffect(() => {
+    if (!isSam2Node) return;
+    let mounted = true;
+    fetchSam2Configs().then((configs) => {
+      if (!mounted) return;
+      setSam2CfgOptions(configs);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [isSam2Node]);
 
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
@@ -194,9 +248,53 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
 
       {nodeType === "model.sam2" ? (
         <div className="mb-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-2 py-1 text-[10px] text-cyan-100">
-          {data.runtimeMode === "guided"
+          {(data.runtimeMode ?? sam2ComputedMode) === "guided"
             ? "Guided segmentation (from GroundingDINO)"
             : "Full segmentation"}
+        </div>
+      ) : null}
+
+      {isSam2Node ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">Mode</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sam2DisplayedMode}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (next === "guided" && !hasSam2BoxesConfig) return;
+                data.onUpdateParam?.(id, "mode", next === "guided" ? "guided" : "full");
+              }}
+            >
+              <option
+                value="guided"
+                disabled={!hasSam2BoxesConfig}
+                title={!hasSam2BoxesConfig ? "Requires GroundingDINO config JSON input." : undefined}
+              >
+                Guided (DINO config)
+              </option>
+              <option value="full">Full auto segmentation</option>
+            </select>
+            {!hasSam2BoxesConfig ? (
+              <p className="text-[10px] text-amber-300">Requires GroundingDINO config JSON input.</p>
+            ) : null}
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">SAM2 Config</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sam2Cfg}
+              onChange={(event) => data.onUpdateParam?.(id, "sam2Cfg", event.target.value)}
+            >
+              {sam2CfgOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       ) : null}
 

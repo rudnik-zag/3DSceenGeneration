@@ -4,7 +4,6 @@ import { promises as fs } from "fs";
 import path from "path";
 
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult } from "@/lib/execution/contracts";
-import { createJsonBuffer } from "@/lib/execution/mock-assets";
 
 function hashBuffer(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
@@ -85,12 +84,110 @@ interface ManifestPayload {
 interface BoxesPayload {
   text_prompt?: string;
   box_threshold?: number;
+  text_threshold?: number | null;
+  image_path?: string;
+  image_size?: { width?: number; height?: number } | null;
+  size?: number[];
   boxes?: Array<{
     label?: string;
     score?: number;
     bbox?: number[];
+    box_cxcywh_norm?: number[];
+    box_xyxy_norm?: number[];
+    box_xyxy?: number[];
+    box_xyxy_int?: number[];
+    box_xywh?: number[];
   }>;
   raw_json_path?: string;
+}
+
+function readNumberArray(value: unknown, length: number) {
+  if (!Array.isArray(value) || value.length !== length) return null;
+  const casted = value.map((item) => Number(item));
+  return casted.every((item) => Number.isFinite(item)) ? casted : null;
+}
+
+function parseImageSize(payload: unknown) {
+  if (!payload || typeof payload !== "object") return null;
+  const asRecord = payload as Record<string, unknown>;
+  const imageSize = asRecord.image_size;
+  if (imageSize && typeof imageSize === "object" && !Array.isArray(imageSize)) {
+    const width = Number((imageSize as Record<string, unknown>).width);
+    const height = Number((imageSize as Record<string, unknown>).height);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+  const size = asRecord.size;
+  if (Array.isArray(size) && size.length === 2) {
+    const height = Number(size[0]);
+    const width = Number(size[1]);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+  return null;
+}
+
+function normalizeBoxFromPayload(
+  item: Record<string, unknown>,
+  imageSize: { width: number; height: number } | null
+) {
+  const cxcywhNorm = readNumberArray(item.box_cxcywh_norm, 4);
+  if (cxcywhNorm) {
+    const [cx, cy, w, h] = cxcywhNorm;
+    return [cx - w / 2, cy - h / 2, w, h] as [number, number, number, number];
+  }
+
+  const xyxyNorm = readNumberArray(item.box_xyxy_norm, 4);
+  if (xyxyNorm) {
+    const [x1, y1, x2, y2] = xyxyNorm;
+    return [x1, y1, x2 - x1, y2 - y1] as [number, number, number, number];
+  }
+
+  const bbox = readNumberArray(item.bbox, 4);
+  if (bbox) {
+    const [a, b, c, d] = bbox;
+    if ([a, b, c, d].every((value) => value >= 0 && value <= 1)) {
+      return [a - c / 2, b - d / 2, c, d] as [number, number, number, number];
+    }
+    return [a, b, c, d] as [number, number, number, number];
+  }
+
+  const xyxyInt = readNumberArray(item.box_xyxy_int, 4);
+  if (xyxyInt && imageSize) {
+    const [x1, y1, x2, y2] = xyxyInt;
+    return [
+      x1 / imageSize.width,
+      y1 / imageSize.height,
+      (x2 - x1) / imageSize.width,
+      (y2 - y1) / imageSize.height
+    ] as [number, number, number, number];
+  }
+
+  const xyxy = readNumberArray(item.box_xyxy, 4);
+  if (xyxy && imageSize) {
+    const [x1, y1, x2, y2] = xyxy;
+    return [
+      x1 / imageSize.width,
+      y1 / imageSize.height,
+      (x2 - x1) / imageSize.width,
+      (y2 - y1) / imageSize.height
+    ] as [number, number, number, number];
+  }
+
+  const xywh = readNumberArray(item.box_xywh, 4);
+  if (xywh && imageSize) {
+    const [x, y, w, h] = xywh;
+    return [x / imageSize.width, y / imageSize.height, w / imageSize.width, h / imageSize.height] as [
+      number,
+      number,
+      number,
+      number
+    ];
+  }
+
+  return null;
 }
 
 async function loadManifest(outputDir: string, processStdout: string): Promise<ManifestPayload> {
@@ -114,16 +211,16 @@ async function loadManifest(outputDir: string, processStdout: string): Promise<M
   return {};
 }
 
-function normalizeBoxesForApp(rawBoxes: BoxesPayload["boxes"]) {
+function normalizeBoxesForApp(rawBoxes: BoxesPayload["boxes"], imageSize: { width: number; height: number } | null) {
   const normalized: Array<{ label: string; score: number; bbox: [number, number, number, number] }> = [];
   for (const item of rawBoxes ?? []) {
-    if (!item || !Array.isArray(item.bbox) || item.bbox.length !== 4) continue;
-    const bbox = item.bbox.map((value) => Number(value));
-    if (bbox.some((value) => !Number.isFinite(value))) continue;
+    if (!item || typeof item !== "object") continue;
+    const bbox = normalizeBoxFromPayload(item as Record<string, unknown>, imageSize);
+    if (!bbox) continue;
     normalized.push({
       label: typeof item.label === "string" ? item.label : "object",
       score: Number.isFinite(item.score) ? Number(item.score) : 0.5,
-      bbox: [bbox[0], bbox[1], bbox[2], bbox[3]]
+      bbox
     });
   }
   return normalized;
@@ -152,7 +249,6 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
       : 0.25;
   const prompt = typeof ctx.params.prompt === "string" ? ctx.params.prompt.trim() : "";
   const tokenSpans = typeof ctx.params.tokenSpans === "string" ? ctx.params.tokenSpans.trim() : "";
-  const now = new Date().toISOString();
 
   const outputDir = path.join(
     process.cwd(),
@@ -214,30 +310,42 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
   const boxesJsonRaw = await fs.readFile(boxesJsonPath, "utf8").catch((error) => {
     throw new Error(`GroundingDINO boxes JSON not found at ${boxesJsonPath}: ${(error as Error).message}`);
   });
-  const parsedBoxesJson = safeJsonParse<BoxesPayload>(boxesJsonRaw);
-  if (!parsedBoxesJson) {
+  const parsedWebJson = safeJsonParse<BoxesPayload>(boxesJsonRaw);
+  if (!parsedWebJson) {
     throw new Error(`GroundingDINO boxes JSON is invalid: ${boxesJsonPath}`);
   }
 
-  const normalizedBoxes = normalizeBoxesForApp(parsedBoxesJson.boxes);
-  const boxesPayload = {
-    model: "groundingdino-python",
-    runner: "conda",
-    condaEnv,
-    textPrompt:
-      parsedBoxesJson.text_prompt && parsedBoxesJson.text_prompt.trim().length > 0
-        ? parsedBoxesJson.text_prompt
-        : prompt,
-    threshold,
-    sourceImageArtifactId: sourceImage.artifactId,
-    sourceImageHash: sourceImage.hash,
-    boxes: normalizedBoxes,
-    boxesCount: normalizedBoxes.length,
-    outputDir,
-    rawJsonPath: parsedBoxesJson.raw_json_path ?? manifest.raw_json_path ?? null,
-    createdAt: now
-  };
-  const boxesBuffer = createJsonBuffer(boxesPayload);
+  const preferredConfigPath =
+    manifest.raw_json_path ??
+    parsedWebJson.raw_json_path ??
+    path.join(outputDir, "detections_full.json");
+
+  let configJsonPath = boxesJsonPath;
+  let configJsonRaw = boxesJsonRaw;
+  let parsedConfigJson: BoxesPayload = parsedWebJson;
+
+  try {
+    const rawJsonRaw = await fs.readFile(preferredConfigPath, "utf8");
+    const parsedRawJson = safeJsonParse<BoxesPayload>(rawJsonRaw);
+    if (parsedRawJson) {
+      configJsonPath = preferredConfigPath;
+      configJsonRaw = rawJsonRaw;
+      parsedConfigJson = parsedRawJson;
+    }
+  } catch {
+    // Keep web json fallback.
+  }
+
+  const imageSize = parseImageSize(parsedConfigJson) ?? parseImageSize(parsedWebJson);
+  const normalizedBoxes = normalizeBoxesForApp(parsedConfigJson.boxes ?? parsedWebJson.boxes, imageSize);
+  const resolvedPrompt =
+    parsedConfigJson.text_prompt && parsedConfigJson.text_prompt.trim().length > 0
+      ? parsedConfigJson.text_prompt
+      : parsedWebJson.text_prompt && parsedWebJson.text_prompt.trim().length > 0
+        ? parsedWebJson.text_prompt
+        : prompt;
+
+  const boxesBuffer = Buffer.from(configJsonRaw, "utf8");
 
   const outputs: ExecutorOutputArtifact[] = [
     {
@@ -252,9 +360,15 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
         hidden: true,
         sourceImageArtifactId: sourceImage.artifactId,
         sourceImageHash: sourceImage.hash,
+        sourceImageStorageKey: sourceImage.storageKey,
+        sourceImagePath: inputPath,
+        image_path: inputPath,
+        rawJsonPath: preferredConfigPath,
+        boxesConfigPath: configJsonPath,
         boxesCount: normalizedBoxes.length,
-        prompt: boxesPayload.textPrompt,
-        threshold
+        prompt: resolvedPrompt,
+        threshold,
+        configFormat: configJsonPath.endsWith("detections_full.json") ? "detections_full" : "detections_web"
       }
     },
     {
@@ -272,7 +386,7 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
         outputKey: "overlay",
         sourceImageArtifactId: sourceImage.artifactId,
         sourceImageHash: sourceImage.hash,
-        prompt: boxesPayload.textPrompt,
+        prompt: resolvedPrompt,
         threshold,
         boxesCount: normalizedBoxes.length
       }

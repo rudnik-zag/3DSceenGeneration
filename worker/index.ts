@@ -1,8 +1,11 @@
+import { loadEnvConfig } from "@next/env";
 import { Worker } from "bullmq";
 
 import { executeWorkflowRun } from "@/lib/execution/run-workflow";
 import { redisConnection } from "@/lib/queue/connection";
 import { RUN_WORKFLOW_QUEUE } from "@/lib/queue/queues";
+
+loadEnvConfig(process.cwd());
 
 async function main() {
   const worker = new Worker(
@@ -17,7 +20,9 @@ async function main() {
   );
 
   worker.on("ready", () => {
-    console.log(`[worker] ready for queue ${RUN_WORKFLOW_QUEUE}`);
+    console.log(
+      `[worker] ready for queue ${RUN_WORKFLOW_QUEUE} (SAM2_EXECUTION_MODE=${process.env.SAM2_EXECUTION_MODE ?? "mock"}, SAM2_CONDA_ENV=${process.env.SAM2_CONDA_ENV ?? "sam2"})`
+    );
   });
 
   worker.on("completed", (job) => {

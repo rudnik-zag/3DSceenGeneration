@@ -17,6 +17,15 @@ services:
       S3_REGION: us-east-1
       S3_FORCE_PATH_STYLE: "true"
       NEXT_PUBLIC_APP_URL: http://localhost:3000
+      SAM2_REPO_ROOT: /app/models/sam2
+      SAM2_CHECKPOINT: /app/models/sam2/checkpoints/sam2.1_hiera_large.pt
+      SAM2_TOOLS_DIR: /app/models/sam2/tools
+      LOCAL_STORAGE_ROOT: /app/.local-storage
+      SAM2_EXECUTION_MODE: mock
+      SAM2_ALLOW_MOCK_FALLBACK: "true"
+      SAM2_USE_CONDA: "true"
+      SAM2_CONDA_COMMAND: conda
+      SAM2_CONDA_ENV: sam2
     ports:
       - "3000:3000"
     depends_on:
@@ -43,6 +52,15 @@ services:
       S3_REGION: us-east-1
       S3_FORCE_PATH_STYLE: "true"
       NEXT_PUBLIC_APP_URL: http://localhost:3000
+      SAM2_REPO_ROOT: /app/models/sam2
+      SAM2_CHECKPOINT: /app/models/sam2/checkpoints/sam2.1_hiera_large.pt
+      SAM2_TOOLS_DIR: /app/models/sam2/tools
+      LOCAL_STORAGE_ROOT: /app/.local-storage
+      SAM2_EXECUTION_MODE: mock
+      SAM2_ALLOW_MOCK_FALLBACK: "true"
+      SAM2_USE_CONDA: "true"
+      SAM2_CONDA_COMMAND: conda
+      SAM2_CONDA_ENV: sam2
     depends_on:
       - postgres
       - redis
