@@ -14,6 +14,7 @@ node_modules/
 prisma/
 checkpoints/
 my_test_image/
+my_data_test/
 images/
 videos/
 sam2/assets/
@@ -22,6 +23,7 @@ my_test_imgs/
 output/
 outputs/
 weights/
+.run/
 .next/
 dist/
 downloads/
