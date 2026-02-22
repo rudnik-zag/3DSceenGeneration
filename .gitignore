@@ -12,9 +12,15 @@ build/
 develop-eggs/
 node_modules/
 prisma/
+checkpoints/
 my_test_image/
+images/
+videos/
+sam2/assets/
+my_test_imgs/
 .local-storage/
 output/
+outputs/
 weights/
 .next/
 dist/

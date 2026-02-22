@@ -248,6 +248,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     previewUrl: null,
     jsonSnippet: null
   });
+  const [inspectedJsonArtifactId, setInspectedJsonArtifactId] = useState<string | null>(null);
+  const [inspectedJsonContent, setInspectedJsonContent] = useState<string | null>(null);
+  const [inspectedJsonError, setInspectedJsonError] = useState<string | null>(null);
+  const [inspectedJsonLoading, setInspectedJsonLoading] = useState(false);
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
   const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
   const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
@@ -418,6 +422,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
   useEffect(() => {
     setShowAdvancedInspector(false);
+  }, [selectedNode?.id]);
+
+  useEffect(() => {
+    setInspectedJsonArtifactId(null);
+    setInspectedJsonContent(null);
+    setInspectedJsonError(null);
+    setInspectedJsonLoading(false);
   }, [selectedNode?.id]);
 
   useEffect(() => {
@@ -1436,11 +1447,65 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     () => selectedNodeArtifacts.filter((artifact) => artifact.hidden),
     [selectedNodeArtifacts]
   );
+  const groundingDinoJsonArtifact = useMemo(() => {
+    if (!selectedNode || selectedNode.type !== "model.groundingdino") return null;
+    return selectedNodeArtifacts.find((artifact) => artifact.kind === "json") ?? null;
+  }, [selectedNode, selectedNodeArtifacts]);
   const viewerArtifactId =
     selectedNode?.data.latestArtifactId ?? nodes.find((node) => Boolean(node.data.latestArtifactId))?.data.latestArtifactId ?? null;
   const viewerHref = viewerArtifactId
     ? `/app/p/${projectId}/viewer?artifactId=${viewerArtifactId}`
     : `/app/p/${projectId}/viewer`;
+
+  const inspectArtifactJson = useCallback(
+    async (artifactId: string) => {
+      setInspectedJsonArtifactId(artifactId);
+      setInspectedJsonLoading(true);
+      setInspectedJsonError(null);
+      setInspectedJsonContent(null);
+
+      try {
+        const metaRes = await fetch(`/api/artifacts/${artifactId}`, { cache: "no-store" });
+        if (!metaRes.ok) {
+          const errBody = await metaRes.json().catch(() => null);
+          throw new Error(
+            errBody && typeof errBody.error === "string"
+              ? errBody.error
+              : "Failed to load artifact metadata"
+          );
+        }
+
+        const payload = await metaRes.json();
+        const artifactUrl =
+          payload && typeof payload.url === "string" ? payload.url : null;
+
+        if (!artifactUrl) {
+          throw new Error("Artifact URL missing");
+        }
+
+        const fileRes = await fetch(artifactUrl, { cache: "no-store" });
+        if (!fileRes.ok) {
+          throw new Error(`Failed to load artifact JSON (${fileRes.status})`);
+        }
+
+        const rawText = await fileRes.text();
+        let formatted = rawText;
+        try {
+          const parsed = JSON.parse(rawText);
+          formatted = JSON.stringify(parsed, null, 2);
+        } catch {
+          // Keep raw text when not valid JSON.
+        }
+        setInspectedJsonContent(formatted);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to inspect JSON";
+        setInspectedJsonError(message);
+      } finally {
+        setInspectedJsonLoading(false);
+      }
+    },
+    []
+  );
 
   return (
     <div className="h-full">
@@ -1662,6 +1727,32 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               </div>
                             </div>
                           ) : null}
+                          {groundingDinoJsonArtifact ? (
+                            <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
+                              <div className="mb-2 flex items-center justify-between gap-2">
+                                <p className="text-xs font-medium text-zinc-300">GroundingDINO JSON</p>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-lg"
+                                  onClick={() => void inspectArtifactJson(groundingDinoJsonArtifact.id)}
+                                  disabled={inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id}
+                                >
+                                  {inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id
+                                    ? "Loading..."
+                                    : "Inspect JSON"}
+                                </Button>
+                              </div>
+                              {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
+                                <p className="text-xs text-rose-300">{inspectedJsonError}</p>
+                              ) : null}
+                              {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonContent ? (
+                                <pre className="max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
+                                  {inspectedJsonContent}
+                                </pre>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       </ScrollArea>
                     </>
@@ -1733,14 +1824,37 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                     <p className="text-xs text-zinc-300">
                                       {artifact.outputId} • {artifact.kind} (hidden)
                                     </p>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      className="mt-1 rounded-lg"
-                                      onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
-                                    >
-                                      Open JSON/meta
-                                    </Button>
+                                    <div className="mt-1 flex gap-2">
+                                      {artifact.kind === "json" ? (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="rounded-lg"
+                                          onClick={() => void inspectArtifactJson(artifact.id)}
+                                          disabled={inspectedJsonLoading && inspectedJsonArtifactId === artifact.id}
+                                        >
+                                          {inspectedJsonLoading && inspectedJsonArtifactId === artifact.id
+                                            ? "Loading..."
+                                            : "Inspect JSON"}
+                                        </Button>
+                                      ) : null}
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="rounded-lg"
+                                        onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                      >
+                                        Open JSON/meta
+                                      </Button>
+                                    </div>
+                                    {inspectedJsonArtifactId === artifact.id && inspectedJsonError ? (
+                                      <p className="mt-2 text-xs text-rose-300">{inspectedJsonError}</p>
+                                    ) : null}
+                                    {inspectedJsonArtifactId === artifact.id && inspectedJsonContent ? (
+                                      <pre className="mt-2 max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
+                                        {inspectedJsonContent}
+                                      </pre>
+                                    ) : null}
                                   </div>
                                 ))}
                               </CardContent>
