@@ -46,13 +46,13 @@ export async function POST() {
             id: "n2",
             type: "model.groundingdino",
             position: { x: 320, y: -40 },
-            data: { label: "GroundingDINO", params: { prompt: "person, shoes", threshold: 0.35 }, status: "idle" }
+            data: { label: "ObjectDetection", params: { prompt: "person, shoes", threshold: 0.35 }, status: "idle" }
           },
           {
             id: "n3",
             type: "model.sam2",
             position: { x: 680, y: -30 },
-            data: { label: "SAM2", params: { mode: "auto", sam2Cfg: "sam2.1_hiera_l.yaml" }, status: "idle" }
+            data: { label: "SegmentScene", params: { mode: "auto", sam2Cfg: "sam2.1_hiera_l.yaml" }, status: "idle" }
           },
           {
             id: "n4",

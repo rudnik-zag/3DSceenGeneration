@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db";
 import { getOrCreateDefaultUser } from "@/lib/default-user";
+import { buildProjectUploadsPrefix, resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { deleteStoragePrefix } from "@/lib/storage/s3";
 
 export async function GET(
@@ -46,7 +47,13 @@ export async function DELETE(
       id: projectId,
       userId: user.id
     },
-    select: { id: true, name: true }
+    select: {
+      id: true,
+      name: true,
+      runs: {
+        select: { id: true }
+      }
+    }
   });
 
   if (!project) {
@@ -61,7 +68,16 @@ export async function DELETE(
     await tx.project.delete({ where: { id: projectId } });
   });
 
+  const projectSlug = resolveProjectStorageSlug({
+    projectName: project.name,
+    projectId: project.id
+  });
+
   await deleteStoragePrefix(`projects/${projectId}/`);
+  for (const run of project.runs) {
+    await deleteStoragePrefix(`projects/${projectSlug}/runs/${run.id}/`);
+  }
+  await deleteStoragePrefix(`${buildProjectUploadsPrefix({ projectSlug })}/${project.id}/`);
 
   return NextResponse.json({ ok: true, deletedProjectId: projectId, deletedProjectName: project.name });
 }

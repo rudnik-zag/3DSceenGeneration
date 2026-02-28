@@ -329,7 +329,7 @@ async function buildSam2Command(params: {
       : path.join(getSam2RepoRoot(), "sam2", "configs", "sam2.1", path.basename(resolvedCfg.absolutePath));
 
   if (mode === "guided" && !boxesConfigPath) {
-    throw new Error("Requires GroundingDINO config JSON input.");
+    throw new Error("Requires ObjectDetection config JSON input.");
   }
 
   const scriptPath = path.join(toolsDir, "inference_for_webapp.py");
@@ -412,7 +412,7 @@ async function collectRealOutputs(params: {
     .filter((name) => name.toLowerCase().endsWith(".png"))
     .sort((a, b) => a.localeCompare(b));
   if (maskCandidates.length === 0) {
-    throw new Error(`SAM2 produced no masks in ${masksDir}`);
+    throw new Error(`SegmentScene produced no masks in ${masksDir}`);
   }
 
   const maskPath = path.join(masksDir, maskCandidates[maskCandidates.length - 1]);
@@ -616,7 +616,7 @@ async function buildMockOutputs(params: {
   const boxes = parseBoxes(params.boxesPayload);
   const overlayBuffer = Buffer.from(
     buildDetectionOverlaySvg({
-      title: `SAM2 • ${params.mode === "guided" ? "Guided segmentation" : "Full segmentation"}`,
+      title: `SegmentScene • ${params.mode === "guided" ? "Guided segmentation" : "Full segmentation"}`,
       boxes: boxes.length > 0 ? boxes : [{ label: "segment", score: 0.8, bbox: [0.18, 0.17, 0.5, 0.46] }]
     }),
     "utf8"
@@ -772,13 +772,13 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
   const warnings = [...(ctx.warnings ?? [])];
 
   if (mode === "guided" && !boxesInput) {
-    throw new Error("Requires GroundingDINO config JSON input.");
+    throw new Error("Requires ObjectDetection config JSON input.");
   }
 
   const nodeOutputRoot = path.join(
     getLocalStorageRoot(),
     "projects",
-    ctx.projectId,
+    ctx.projectSlug || ctx.projectId,
     "runs",
     ctx.runId,
     "nodes",
@@ -847,7 +847,7 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
         throw error;
       }
       warnings.push(
-        `SAM2 real execution failed. Using mock fallback. ${(error as Error).message}`
+        `SegmentScene real execution failed. Using mock fallback. ${(error as Error).message}`
       );
     }
   } else {
@@ -873,7 +873,7 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
   }
 
   const mockModeWarning =
-    "SAM2 mock mode active. Set SAM2_EXECUTION_MODE=real to run Python SAM2 export.";
+    "SegmentScene mock mode active. Set SAM2_EXECUTION_MODE=real to run Python SegmentScene export.";
   if (!warnings.includes(mockModeWarning)) {
     warnings.push(mockModeWarning);
   }

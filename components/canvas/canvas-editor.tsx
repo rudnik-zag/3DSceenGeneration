@@ -54,7 +54,12 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
-import { nodeGroups, nodeSpecRegistry } from "@/lib/graph/node-specs";
+import {
+  mergeNodeParamsWithDefaults,
+  nodeGroups,
+  nodeSpecRegistry
+} from "@/lib/graph/node-specs";
+import { applySceneGenerationPreset } from "@/lib/graph/scene-generation-presets";
 import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
@@ -160,6 +165,7 @@ function getContextRowIcon(type: WorkflowNodeType) {
 function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
   const nodeType = base.type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
+  const mergedParams = mergeNodeParamsWithDefaults(nodeType, base.data.params);
   const matched = artifacts
     .filter((a) => a.nodeId === base.id)
     .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
@@ -206,6 +212,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
     position: base.position,
     data: {
       ...base.data,
+      label: typeof base.data.label === "string" && base.data.label.trim().length > 0 ? base.data.label : spec.title,
+      params: mergedParams,
       status: base.data.status ?? "idle",
       latestArtifactId: previewArtifact?.id,
       latestArtifactKind: previewArtifact?.kind,
@@ -861,6 +869,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   };
 
   const openNodeMenuAtViewportCenter = useCallback(() => {
+    if (paneMenu) {
+      setPaneMenu(null);
+      return;
+    }
     const rect = canvasPanelRef.current?.getBoundingClientRect();
     if (!rect) {
       openPaneMenuAtScreenPoint(92, 72, { x: 80, y: 80 });
@@ -872,7 +884,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       y: rect.top + rect.height / 2
     });
     openPaneMenuAtScreenPoint(rect.left + 92, rect.top + 72, { x: flow.x, y: flow.y });
-  }, [openPaneMenuAtScreenPoint, reactFlow]);
+  }, [openPaneMenuAtScreenPoint, paneMenu, reactFlow]);
 
   const insertImagePromptTemplate = useCallback(() => {
     const rect = canvasPanelRef.current?.getBoundingClientRect();
@@ -962,14 +974,34 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       setNodes((prev) =>
         prev.map((node) => {
           if (node.id !== nodeId) return node;
+          const nodeType = node.type as WorkflowNodeType;
+          const nextParams = {
+            ...node.data.params,
+            [key]: value
+          } as Record<string, unknown>;
+
+          if (nodeType === "model.sam3d_objects") {
+            if (key === "configPreset" && typeof value === "string") {
+              const applied = applySceneGenerationPreset(nextParams, value as "Default" | "HighQuality" | "FastPreview" | "Custom");
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  params: applied
+                }
+              };
+            }
+
+            if (key !== "configPreset" && nextParams.configPreset !== "Custom") {
+              nextParams.configPreset = "Custom";
+            }
+          }
+
           return {
             ...node,
             data: {
               ...node.data,
-              params: {
-                ...node.data.params,
-                [key]: value
-              }
+              params: nextParams
             }
           };
         })
@@ -1669,10 +1701,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                   Input Image
                 </Button>
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.groundingdino")}>
-                  GroundingDINO
+                  ObjectDetection
                 </Button>
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
-                  SAM2
+                  SegmentScene
                 </Button>
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam3d_objects")}>
                   SceneGen
@@ -1731,7 +1763,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           <p className="text-xs text-cyan-300">
                             Mode:{" "}
                             {selectedNode.data.runtimeMode === "guided"
-                              ? "Guided segmentation (from GroundingDINO)"
+                              ? "Guided segmentation (from ObjectDetection)"
                               : "Full segmentation"}
                           </p>
                         ) : null}
@@ -1867,7 +1899,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           {groundingDinoJsonArtifact ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <div className="mb-2 flex items-center justify-between gap-2">
-                                <p className="text-xs font-medium text-zinc-300">GroundingDINO JSON</p>
+                                <p className="text-xs font-medium text-zinc-300">ObjectDetection JSON</p>
                                 <div className="flex items-center gap-2">
                                   <Button
                                     size="sm"
@@ -1890,7 +1922,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                   </Button>
                                 </div>
                               </div>
-                              <p className="mb-2 text-[11px] text-zinc-500">Detection boxes/config generated by GroundingDINO.</p>
+                              <p className="mb-2 text-[11px] text-zinc-500">Detection boxes/config generated by ObjectDetection.</p>
                               {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
                                 <p className="text-xs text-rose-300">{inspectedJsonError}</p>
                               ) : null}
@@ -2082,7 +2114,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
           </div>
 
-          <div className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm">
+          <div
+            data-no-connect-menu="true"
+            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm"
+          >
             <Button size="icon" variant="outline" className="h-10 w-10 rounded-full" onClick={openNodeMenuAtViewportCenter}>
               <Plus className="h-4 w-4" />
             </Button>
@@ -2142,6 +2177,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           {paneMenu ? (
             <div
               ref={paneMenuRef}
+              data-no-connect-menu="true"
               className="absolute z-30 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md"
               style={{ left: paneMenu.x, top: paneMenu.y }}
             >
@@ -2163,14 +2199,14 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                     onClick={() => addNodeFromContextMenu("model.groundingdino")}
                     className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
                   >
-                    DINO
+                    Detect
                   </button>
                   <button
                     type="button"
                     onClick={() => addNodeFromContextMenu("model.sam2")}
                     className="rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-400/20"
                   >
-                    SAM2
+                    Segment
                   </button>
                   <button
                     type="button"

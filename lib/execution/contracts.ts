@@ -31,6 +31,7 @@ export interface ExecutorOutputArtifact {
 
 export interface NodeExecutionContext {
   projectId: string;
+  projectSlug: string;
   runId: string;
   nodeId: string;
   nodeType: WorkflowNodeType;

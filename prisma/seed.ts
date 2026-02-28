@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { createHash } from "crypto";
 
+import { slugifyProjectName } from "../lib/storage/project-path";
 import { putObjectToStorage } from "../lib/storage/s3";
 
 const prisma = new PrismaClient();
@@ -17,13 +18,13 @@ const demoGraph = {
       id: "n2",
       type: "model.groundingdino",
       position: { x: 320, y: -40 },
-      data: { label: "GroundingDINO", params: { prompt: "person, object", threshold: 0.35 }, status: "idle" }
+      data: { label: "ObjectDetection", params: { prompt: "person, object", threshold: 0.35 }, status: "idle" }
     },
     {
       id: "n3",
       type: "model.sam2",
       position: { x: 700, y: -20 },
-      data: { label: "SAM2", params: { threshold: 0.5 }, status: "idle" }
+      data: { label: "SegmentScene", params: { threshold: 0.5 }, status: "idle" }
     }
   ],
   edges: [
@@ -107,7 +108,8 @@ async function main() {
     "utf8"
   );
   const hash = createHash("sha256").update(maskSvg).digest("hex");
-  const storageKey = `projects/${project.id}/runs/${run.id}/nodes/n3/artifact_${seededArtifact.id}.svg`;
+  const projectSlug = slugifyProjectName(project.name);
+  const storageKey = `projects/${projectSlug}/runs/${run.id}/nodes/n3/artifact_${seededArtifact.id}.svg`;
 
   try {
     await putObjectToStorage({

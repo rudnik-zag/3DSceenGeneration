@@ -3,7 +3,6 @@
 import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
 import { Handle, NodeProps, Position } from "reactflow";
 import {
-  AlertTriangle,
   Boxes,
   Camera,
   Clock3,
@@ -20,6 +19,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { getSceneGenerationPresetNames } from "@/lib/graph/scene-generation-presets";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { cn } from "@/lib/utils";
 import { GraphNodeData, WorkflowNodeType } from "@/types/workflow";
@@ -63,8 +63,8 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
 const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "GPT-5.2",
   "input.image": "Reference",
-  "model.groundingdino": "GroundingDINO",
-  "model.sam2": "SAM2",
+  "model.groundingdino": "ObjectDetection",
+  "model.sam2": "SegmentScene",
   "model.sam3d_objects": "SceneGen",
   "model.qwen_vl": "Qwen-VL",
   "model.qwen_image_edit": "Flux 2",
@@ -207,6 +207,12 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     isSceneGenerationNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
       ? data.params.config.trim()
       : "hf";
+  const scenePreset =
+    isSceneGenerationNode &&
+    typeof data.params?.configPreset === "string" &&
+    getSceneGenerationPresetNames().includes(data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
+      ? (data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
+      : "Default";
   const sceneFormat =
     isSceneGenerationNode &&
     typeof data.params?.format === "string" &&
@@ -301,7 +307,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       {nodeType === "model.sam2" ? (
         <div className="mb-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-2 py-1 text-[10px] text-cyan-100">
           {(data.runtimeMode ?? sam2ComputedMode) === "guided"
-            ? "Guided segmentation (from GroundingDINO)"
+            ? "Guided segmentation (from ObjectDetection)"
             : "Full segmentation"}
         </div>
       ) : null}
@@ -322,19 +328,16 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <option
                 value="guided"
                 disabled={!hasSam2BoxesConfig}
-                title={!hasSam2BoxesConfig ? "Requires GroundingDINO config JSON input." : undefined}
+                title={!hasSam2BoxesConfig ? "Requires ObjectDetection config JSON input." : undefined}
               >
                 Guided (DINO config)
               </option>
               <option value="full">Full auto segmentation</option>
             </select>
-            {!hasSam2BoxesConfig ? (
-              <p className="text-[10px] text-amber-300">Requires GroundingDINO config JSON input.</p>
-            ) : null}
           </div>
 
           <div className="space-y-1">
-            <p className="text-[10px] text-zinc-400">SAM2 Config</p>
+            <p className="text-[10px] text-zinc-400">SegmentScene Config</p>
             <select
               className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
               value={sam2Cfg}
@@ -352,6 +355,20 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
 
       {isSceneGenerationNode ? (
         <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">Config Preset</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={scenePreset}
+              onChange={(event) => data.onUpdateParam?.(id, "configPreset", event.target.value)}
+            >
+              {getSceneGenerationPresetNames().map((preset) => (
+                <option key={preset} value={preset}>
+                  {preset}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Output Format</p>
             <select
@@ -377,13 +394,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               ))}
             </select>
           </div>
-        </div>
-      ) : null}
-
-      {data.runtimeWarning ? (
-        <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200">
-          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-          <span>{data.runtimeWarning}</span>
         </div>
       ) : null}
 

@@ -76,7 +76,7 @@ export function buildMaskSvg(params: {
   <rect width="${width}" height="${height}" fill="#0B1220" />
   ${params.mode === "guided" ? guided : full}
   <text x="20" y="30" fill="#C8D2E8" font-family="Inter, sans-serif" font-size="14">
-    SAM2 ${params.mode === "guided" ? "Guided segmentation" : "Full segmentation"}
+    SegmentScene ${params.mode === "guided" ? "Guided segmentation" : "Full segmentation"}
   </text>
 </svg>`;
 }

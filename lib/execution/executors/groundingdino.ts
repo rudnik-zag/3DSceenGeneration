@@ -257,7 +257,7 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
   const outputDir = path.join(
     getLocalStorageRoot(),
     "projects",
-    ctx.projectId,
+    ctx.projectSlug || ctx.projectId,
     "runs",
     ctx.runId,
     "nodes",

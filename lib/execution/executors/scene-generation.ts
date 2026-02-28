@@ -149,7 +149,7 @@ async function materializeImageInput(
 
 async function parseSam2ConfigInput(ctx: NodeExecutionContext, input: ResolvedArtifactInput | null) {
   if (!input) {
-    throw new Error("SceneGeneration requires SAM2 config JSON input.");
+    throw new Error("SceneGeneration requires SegmentScene config JSON input.");
   }
   const raw = await ctx.loadInputBuffer(input);
   const parsed = safeJsonParse<Record<string, unknown>>(raw.toString("utf8"));
@@ -415,7 +415,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
   const nodeOutputRoot = path.join(
     getLocalStorageRoot(),
     "projects",
-    ctx.projectId,
+    ctx.projectSlug || ctx.projectId,
     "runs",
     ctx.runId,
     "nodes",
