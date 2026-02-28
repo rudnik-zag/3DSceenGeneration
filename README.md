@@ -22,6 +22,7 @@ Full-stack workflow platform for AI/geometry pipelines:
 - Node execution queue with BullMQ worker and run progress/logs.
 - Caching: `hash(nodeType + params + orderedInputHashes + mode)`.
 - GroundingDINO + SAM2 node flow with guided/full segmentation rules.
+- SceneGeneration node (SAM3D Objects) for mesh GLB or Gaussian PLY export.
 - Image upload directly in `input.image` node (drag/drop + preview).
 - Node creation via canvas context menu (right-click or double-click).
 - Edge-drop UX: drag connection to empty canvas -> add-node menu opens and auto-connects.
@@ -172,6 +173,8 @@ If Conda/env/weights are missing, executor can fail and run will show error logs
 - SAM2 now supports:
   - `Guided (DINO config)` mode (uses GroundingDINO boxes JSON)
   - `Full auto segmentation` mode
+- SAM2 produces a single downstream output handle: `config` (JSON).
+  - This config JSON includes source image path/hash/storageKey, masksDir, mask paths/count, overlay preview path, selected cfg/checkpoint, and warnings.
 - Image resolution order at execution:
   1. Direct SAM2 `Image` input
   2. Image path from connected boxes JSON (`image_path` / `sourceImagePath`)
@@ -194,6 +197,33 @@ SAM2_CONDA_ENV=sam2
   - `conda run -n sam2 python ...` by default
   - `tools/image_auto_mask_export_v2.py` for guided mode
   - `tools/image_auto_mask_export.py` for full mode
+
+## SceneGeneration (SAM3D Objects) Runtime
+- Node type: `model.sam3d_objects` (label: `SceneGeneration`)
+- Inputs:
+  - `config` JSON (from SAM2 `config` output)
+  - `masksDir` JSON legacy input is still accepted for older graphs
+- Outputs:
+  - `scene` as `mesh_glb` or `point_ply`
+  - hidden `meta` JSON
+- Config endpoint:
+  - `GET /api/sam3d/configs` (reads checkpoint tags from `models/sam-3d-objects/checkpoints/*/pipeline.yaml`)
+- Runtime env:
+```env
+SAM3D_REPO_ROOT=/absolute/path/to/models/sam-3d-objects
+SAM3D_WEB_SCRIPT=inference_for_webapp.py
+SAM3D_EXECUTION_MODE=mock
+SAM3D_ALLOW_MOCK_FALLBACK=true
+SAM3D_USE_CONDA=true
+SAM3D_CONDA_COMMAND=conda
+SAM3D_CONDA_ENV=sam3d-objects
+```
+- Real command shape:
+  - `conda run -n sam3d-objects python models/sam-3d-objects/inference_for_webapp.py --mode mesh|gaussian --image ... --masks_dir ... --output ... --config hf --max_objects ... --enable_mesh ... --export_mesh_glb ... --enable_mesh_scene ... --mesh_postprocess ... --texture_baking ... --decode_mesh ... --stage1_steps ... --stage2_steps ... --fallback_stage1_steps ... --fallback_stage2_steps ... --autocast ... --autocast_prefer_bf16 ... --store_on_cpu ...`
+- Local storage layout for model outputs:
+  - GroundingDINO: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/groundingdino/`
+  - SAM2: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/sam2/`
+  - SceneGeneration: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/scene_generation/`
 
 ## Common Troubleshooting
 ### `curl: (1) Received HTTP/0.9 when not allowed` on MinIO health URL
@@ -238,10 +268,13 @@ Check `.env` endpoint and protocol (`http` vs `https`) and that MinIO is running
 - `pnpm db:seed` seed demo data
 - `pnpm build` production build
 - `bash scripts/dev-stack.sh start` start infra + app + worker
-- `bash scripts/dev-stack.sh stop` stop app + worker + infra
+- `bash scripts/dev-stack.sh stop` stop app + worker + infra, and free app/minio ports
 - `bash scripts/dev-stack.sh restart` restart full stack
 - `bash scripts/dev-stack.sh status` show process status
 - `bash scripts/dev-stack.sh logs` tail app/worker logs
+- Optional envs for stop behavior:
+  - `APP_PORT` (default `3000`)
+  - `EXTRA_STOP_PORTS` (space-separated additional ports to free)
 
 ## Notes
 - If S3/MinIO is unavailable, uploads/artifacts continue through local fallback at `.local-storage/`.

@@ -129,6 +129,21 @@ function orderedInputHashes(nodeType: WorkflowNodeType, inputsByPort: Record<str
   return ordered;
 }
 
+function formatInputSummary(inputsByPort: Record<string, RuntimeArtifactRef[]>) {
+  const ports = Object.keys(inputsByPort).sort((a, b) => a.localeCompare(b));
+  if (ports.length === 0) return "none";
+  return ports
+    .map((port) => {
+      const entries = inputsByPort[port] ?? [];
+      if (entries.length === 0) return `${port}=[]`;
+      const value = entries
+        .map((entry) => `${entry.nodeId}:${entry.outputId}:${entry.kind}:${entry.artifactId.slice(0, 8)}`)
+        .join(",");
+      return `${port}=[${value}]`;
+    })
+    .join(" ");
+}
+
 function parseBoxesMeta(artifact?: RuntimeArtifactRef | null) {
   if (!artifact) {
     return {
@@ -398,6 +413,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         }
       }
 
+      const inputSummary = formatInputSummary(inputsByPort);
+      console.log(`[worker] node=${task.nodeId} inputs ${inputSummary}`);
+
       if (task.nodeType === "input.image") {
         const storageKey = typeof task.params.storageKey === "string" ? task.params.storageKey : "";
         if (storageKey) {
@@ -426,6 +444,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           };
           producedByOutput.set(mapKey(task.nodeId, "image"), sourceArtifact);
           producedByArtifactId.set(sourceArtifact.artifactId, sourceArtifact);
+          console.log(
+            `[worker] node=${task.nodeId} outputs image:image:${storageKey}`
+          );
 
           const progress = Math.round(((i + 1) / total) * 100);
           await updateRun(input.runId, {
@@ -464,9 +485,14 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       }
 
       if (allOutputsCached && outputCacheHits.size > 0 && !shouldBypassCache) {
+        const cacheOutputs: string[] = [];
         for (const [outputId, artifact] of outputCacheHits.entries()) {
           producedByOutput.set(mapKey(task.nodeId, outputId), artifact);
           producedByArtifactId.set(artifact.artifactId, artifact);
+          cacheOutputs.push(`${outputId}:${artifact.kind}:${artifact.storageKey}`);
+        }
+        if (cacheOutputs.length > 0) {
+          console.log(`[worker] node=${task.nodeId} outputs(cache-hit) ${cacheOutputs.join(" | ")}`);
         }
         const progress = Math.round(((i + 1) / total) * 100);
         await updateRun(input.runId, {
@@ -475,7 +501,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             currentRun?.logs ?? "",
             `[${now}] ${task.nodeId} cache-hit mode=${runtimeMode ?? "default"} outputs=${[
               ...outputCacheHits.keys()
-            ].join(",")}`
+            ].join(",")} inputs=${inputSummary} stored=${cacheOutputs.join(" | ")}`
           )
         });
         continue;
@@ -516,6 +542,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         throw new Error(`Node ${task.nodeId} produced no outputs`);
       }
 
+      const storedOutputs: string[] = [];
       for (const output of outputs) {
         const outputPort = spec.outputPorts.find((port) => port.id === output.outputId);
         const outputHidden = Boolean(output.hidden ?? outputPort?.hidden);
@@ -582,6 +609,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
         });
         const mapped = mapArtifact(artifact);
+        storedOutputs.push(`${output.outputId}:${output.kind}:${key}`);
         producedByOutput.set(mapKey(task.nodeId, output.outputId), mapped);
         producedByArtifactId.set(mapped.artifactId, mapped);
 
@@ -598,6 +626,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
         });
       }
+      if (storedOutputs.length > 0) {
+        console.log(`[worker] node=${task.nodeId} outputs ${storedOutputs.join(" | ")}`);
+      }
 
       const progress = Math.round(((i + 1) / total) * 100);
       const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
@@ -607,7 +638,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           latestRun?.logs ?? "",
           `[${now}] ${task.nodeId} executed mode=${result.mode ?? runtimeMode ?? "default"} outputs=${outputs
             .map((output) => output.outputId)
-            .join(",")}${(result.warnings ?? runtimeWarnings).length ? ` warnings=${(result.warnings ?? runtimeWarnings).join(" | ")}` : ""}`
+            .join(",")} inputs=${inputSummary} stored=${storedOutputs.join(" | ")}${(result.warnings ?? runtimeWarnings).length ? ` warnings=${(result.warnings ?? runtimeWarnings).join(" | ")}` : ""}`
         )
       });
     }

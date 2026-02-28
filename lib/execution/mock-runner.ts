@@ -5,6 +5,7 @@ import { ArtifactKind } from "@prisma/client";
 import { NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "@/lib/execution/contracts";
 import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdino";
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
+import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
 import {
   createGeneratedImageSvgBuffer,
   createJsonBuffer,
@@ -44,6 +45,8 @@ export class MockModelRunner implements NodeExecutor {
         return executeGroundingDinoNode(ctx);
       case "model.sam2":
         return executeSam2Node(ctx);
+      case "model.sam3d_objects":
+        return executeSceneGenerationNode(ctx);
       case "input.image": {
         const sourceMode = ctx.params.sourceMode === "generate" ? "generate" : "upload";
         if (sourceMode === "generate") {
@@ -111,10 +114,6 @@ export class MockModelRunner implements NodeExecutor {
       case "input.cameraPath":
         return {
           outputs: [jsonOutput("path", { type: "camera_path", value: ctx.params.json ?? "[]", createdAt: now })]
-        };
-      case "model.sam3d_objects":
-        return {
-          outputs: [jsonOutput("json", { objects: [{ id: "obj_1", confidence: 0.82 }], createdAt: now })]
         };
       case "model.qwen_vl":
         return {

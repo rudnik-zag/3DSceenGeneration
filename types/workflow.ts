@@ -5,6 +5,7 @@ export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 export type PayloadKind =
   | "Image"
   | "Mask"
+  | "MaskDir"
   | "Boxes"
   | "BoxesJson"
   | "MaskImage"

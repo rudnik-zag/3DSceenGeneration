@@ -200,7 +200,10 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
         : null;
 
   return {
-    ...base,
+    // Keep only stable graph fields to avoid reusing persisted runtime node dimensions/styles.
+    id: base.id,
+    type: base.type,
+    position: base.position,
     data: {
       ...base.data,
       status: base.data.status ?? "idle",
@@ -269,7 +272,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
 
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
-  const hasSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
+  const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
+  const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
   const orderedCategories = useMemo<ContextMenuCategory[]>(() => ["Inputs", "Models", "Geometry", "Outputs"], []);
   const contextMenuGroups = useMemo(
     () =>
@@ -452,21 +456,32 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (isTyping) return;
 
       if (event.key !== "Delete" && event.key !== "Backspace") return;
-      const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
-      if (selectedIds.length === 0) return;
+      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
       event.preventDefault();
-      const nodeSet = new Set(selectedIds);
-      setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
-      setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-      toast({
-        title: "Node deleted",
-        description: selectedIds.length > 1 ? `${selectedIds.length} nodes removed` : `${selectedIds[0]} removed`
-      });
+      if (selectedNodeIds.length > 0) {
+        const nodeSet = new Set(selectedNodeIds);
+        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+      }
+      if (selectedEdgeIds.length > 0) {
+        const edgeSet = new Set(selectedEdgeIds);
+        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+      }
+      const parts: string[] = [];
+      if (selectedNodeIds.length > 0) {
+        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+      }
+      if (selectedEdgeIds.length > 0) {
+        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+      }
+      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
     };
 
     window.addEventListener("keydown", onDeleteShortcut);
     return () => window.removeEventListener("keydown", onDeleteShortcut);
-  }, [nodes, setEdges, setNodes]);
+  }, [edges, nodes, setEdges, setNodes]);
 
   useEffect(() => {
     setShowAdvancedInspector(false);
@@ -669,10 +684,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     [setEdges, setNodes]
   );
 
+  const deleteEdgesByIds = useCallback(
+    (edgeIds: string[]) => {
+      if (edgeIds.length === 0) return;
+      const edgeSet = new Set(edgeIds);
+      setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+      toast({
+        title: "Connection removed",
+        description: edgeIds.length > 1 ? `${edgeIds.length} connections removed` : "1 connection removed"
+      });
+    },
+    [setEdges]
+  );
+
   const deleteSelectedNodes = useCallback(() => {
     const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
     deleteNodesByIds(selectedIds);
   }, [deleteNodesByIds, nodes]);
+
+  const deleteSelectedEdges = useCallback(() => {
+    const selectedIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+    deleteEdgesByIds(selectedIds);
+  }, [deleteEdgesByIds, edges]);
 
   const openPaneMenuAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
@@ -1178,6 +1211,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     logs: string,
     status: string,
     runProgress: number,
+    targetNodeId: string | null,
     artifactPairs: Array<{
       nodeId: string;
       id: string;
@@ -1217,6 +1251,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     setNodes((prev) => {
       const hasRunningOrQueued = status === "running" || status === "queued";
       return prev.map((node) => {
+        if (targetNodeId && node.id !== targetNodeId) {
+          return node;
+        }
+
         const nodeType = node.type as WorkflowNodeType;
         const spec = nodeSpecRegistry[nodeType];
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
@@ -1290,7 +1328,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     });
   };
 
-  const pollRun = (runId: string) => {
+  const pollRun = (runId: string, targetNodeId: string | null) => {
     if (runPollRef.current) {
       clearInterval(runPollRef.current);
     }
@@ -1305,6 +1343,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         data.run.logs ?? "",
         data.run.status,
         Number(data.run.progress ?? 0),
+        targetNodeId,
         (data.run.artifacts ?? []).map(
           (a: {
             nodeId: string;
@@ -1387,44 +1426,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         return;
       }
 
-      const incoming = new Map<string, string[]>();
-      edges.forEach((edge) => {
-        const list = incoming.get(edge.target) ?? [];
-        list.push(edge.source);
-        incoming.set(edge.target, list);
-      });
-
-      const targets = new Set<string>();
-      const stack = [startNodeId];
-      while (stack.length > 0) {
-        const current = stack.pop()!;
-        if (targets.has(current)) continue;
-        targets.add(current);
-        (incoming.get(current) ?? []).forEach((source) => stack.push(source));
-      }
-
       setNodes((prev) =>
         prev.map((node) => ({
           ...node,
           data: {
             ...node.data,
-            status:
-              targets.has(node.id) && node.type !== "input.image"
-                ? "running"
-                : node.data.status,
-            runProgress:
-              targets.has(node.id) && node.type !== "input.image"
-                ? 0
-                : node.data.runProgress ?? 0,
-            runtimeWarning:
-              targets.has(node.id) && node.type !== "input.image"
-                ? null
-                : node.data.runtimeWarning
+            status: node.id === startNodeId && node.type !== "input.image" ? "running" : node.data.status,
+            runProgress: node.id === startNodeId && node.type !== "input.image" ? 0 : node.data.runProgress ?? 0,
+            runtimeWarning: node.id === startNodeId && node.type !== "input.image" ? null : node.data.runtimeWarning
           }
         }))
       );
     },
-    [edges, setNodes]
+    [setNodes]
   );
 
   const startRun = async (startNodeId?: string) => {
@@ -1444,7 +1458,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const data = await res.json();
       setActiveRunId(data.run.id);
       toast({ title: "Run started", description: `Run ${data.run.id.slice(0, 8)} queued` });
-      pollRun(data.run.id);
+      pollRun(data.run.id, startNodeId ?? null);
     } catch (error) {
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
     }
@@ -1621,9 +1635,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             variant="outline"
             className="rounded-xl"
             onClick={deleteSelectedNodes}
-            disabled={!hasSelection}
+            disabled={!hasNodeSelection}
           >
             <Trash2 className="mr-1 h-4 w-4" /> Delete node
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="rounded-xl"
+            onClick={deleteSelectedEdges}
+            disabled={!hasEdgeSelection}
+          >
+            <Trash2 className="mr-1 h-4 w-4" /> Disconnect
           </Button>
           <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
@@ -1641,7 +1664,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <DropdownMenuContent align="start" className="w-[360px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
               <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">Node Palette</p>
               <p className="mb-2 text-xs text-zinc-500">Right-click on canvas to add at cursor, or add at viewport center below.</p>
-              <div className="mb-2 grid grid-cols-3 gap-1">
+              <div className="mb-2 grid grid-cols-4 gap-1">
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("input.image")}>
                   Input Image
                 </Button>
@@ -1650,6 +1673,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 </Button>
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
                   SAM2
+                </Button>
+                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam3d_objects")}>
+                  SceneGen
                 </Button>
               </div>
               <ScrollArea className="h-[62vh] pr-2">
@@ -1755,6 +1781,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                 return null;
                               }
                               const value = selectedNode.data.params[field.key];
+                              const boolValue =
+                                value === true ||
+                                value === "true" ||
+                                value === 1 ||
+                                value === "1";
                               const key = `${selectedNode.id}-${field.key}`;
                               return (
                                 <div key={key} className="space-y-1.5">
@@ -1779,6 +1810,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                         ))}
                                       </SelectContent>
                                     </Select>
+                                  ) : field.input === "boolean" ? (
+                                    <Button
+                                      type="button"
+                                      variant={boolValue ? "default" : "outline"}
+                                      className="h-9 w-full justify-start rounded-xl"
+                                      onClick={() => updateSelectedNodeParam(field.key, !boolValue)}
+                                    >
+                                      {boolValue ? "Enabled" : "Disabled"}
+                                    </Button>
                                   ) : (
                                     <Input
                                       type={field.input === "number" ? "number" : "text"}
@@ -1804,7 +1844,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               );
                             })
                           )}
-                          {(selectedNode.type === "model.groundingdino" || selectedNode.type === "model.sam2") && selectedNodeArtifacts.length > 0 ? (
+                          {(selectedNode.type === "model.groundingdino" ||
+                            selectedNode.type === "model.sam2" ||
+                            selectedNode.type === "model.sam3d_objects") &&
+                          selectedNodeArtifacts.length > 0 ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
                               <div className="space-y-1">
@@ -2071,6 +2114,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onConnect={onConnect}
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
+            onEdgeDoubleClick={(_, edge) => deleteEdgesByIds([edge.id])}
             onPaneContextMenu={onPaneContextMenu}
             onPaneClick={onPaneClick}
             fitView
@@ -2106,7 +2150,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </div>
               <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.015] p-2">
                 <p className="mb-1 text-xs text-zinc-500">Quick Add</p>
-                <div className="grid grid-cols-3 gap-1">
+                <div className="grid grid-cols-4 gap-1">
                   <button
                     type="button"
                     onClick={() => addNodeFromContextMenu("input.image")}
@@ -2127,6 +2171,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                     className="rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-400/20"
                   >
                     SAM2
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addNodeFromContextMenu("model.sam3d_objects")}
+                    className="rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200 transition hover:bg-cyan-400/20"
+                  >
+                    SceneGen
                   </button>
                 </div>
               </div>

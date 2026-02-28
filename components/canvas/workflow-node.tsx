@@ -47,7 +47,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
   "input.cameraPath": Camera,
   "model.groundingdino": Boxes,
   "model.sam2": Layers,
-  "model.sam3d_objects": Layers,
+  "model.sam3d_objects": Boxes,
   "model.qwen_vl": Sparkles,
   "model.qwen_image_edit": WandSparkles,
   "model.texturing": WandSparkles,
@@ -65,7 +65,7 @@ const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.image": "Reference",
   "model.groundingdino": "GroundingDINO",
   "model.sam2": "SAM2",
-  "model.sam3d_objects": "SAM3D",
+  "model.sam3d_objects": "SceneGen",
   "model.qwen_vl": "Qwen-VL",
   "model.qwen_image_edit": "Flux 2",
   "model.texturing": "Texturing",
@@ -85,6 +85,8 @@ function pickPromptText(data: GraphNodeData) {
 
 let sam2ConfigCache: string[] | null = null;
 let sam2ConfigInflight: Promise<string[]> | null = null;
+let sam3dConfigCache: string[] | null = null;
+let sam3dConfigInflight: Promise<string[]> | null = null;
 
 async function fetchSam2Configs() {
   if (sam2ConfigCache) return sam2ConfigCache;
@@ -112,6 +114,32 @@ async function fetchSam2Configs() {
   return sam2ConfigCache;
 }
 
+async function fetchSam3dConfigs() {
+  if (sam3dConfigCache) return sam3dConfigCache;
+  if (sam3dConfigInflight) return sam3dConfigInflight;
+  sam3dConfigInflight = fetch("/api/sam3d/configs", { cache: "no-store" })
+    .then(async (res) => {
+      if (!res.ok) {
+        return ["hf"];
+      }
+      const payload = (await res.json()) as { configs?: unknown };
+      if (!Array.isArray(payload.configs)) {
+        return ["hf"];
+      }
+      const normalized = payload.configs
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .map((value) => value.trim());
+      return normalized.length > 0 ? normalized : ["hf"];
+    })
+    .catch(() => ["hf"])
+    .finally(() => {
+      sam3dConfigInflight = null;
+    });
+
+  sam3dConfigCache = await sam3dConfigInflight;
+  return sam3dConfigCache;
+}
+
 export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const nodeType = type as WorkflowNodeType;
@@ -119,7 +147,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
   const isSam2Node = nodeType === "model.sam2";
+  const isSceneGenerationNode = nodeType === "model.sam3d_objects";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
+  const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
   const inputImageSourceMode =
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
@@ -133,7 +163,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       : "";
   const isImageGenerationNode = isInputImageNode && inputImageSourceMode === "generate";
   const isTextNode = nodeType === "input.text" || (spec.category === "Models" && "prompt" in (data.params ?? {}));
-  const isImageNode = nodeType === "input.image" || data.latestArtifactKind === "image";
+  const isImageNode = nodeType === "input.image" || nodeType === "model.sam2" || data.latestArtifactKind === "image";
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
@@ -173,6 +203,16 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     isSam2Node && typeof data.params?.sam2Cfg === "string" && data.params.sam2Cfg.trim().length > 0
       ? data.params.sam2Cfg.trim()
       : "sam2.1_hiera_l.yaml";
+  const sceneConfig =
+    isSceneGenerationNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
+      ? data.params.config.trim()
+      : "hf";
+  const sceneFormat =
+    isSceneGenerationNode &&
+    typeof data.params?.format === "string" &&
+    (data.params.format === "mesh_glb" || data.params.format === "point_ply")
+      ? data.params.format
+      : "mesh_glb";
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -185,6 +225,18 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       mounted = false;
     };
   }, [isSam2Node]);
+
+  useEffect(() => {
+    if (!isSceneGenerationNode) return;
+    let mounted = true;
+    fetchSam3dConfigs().then((configs) => {
+      if (!mounted) return;
+      setSam3dCfgOptions(configs);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [isSceneGenerationNode]);
 
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
@@ -201,7 +253,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         selected && "border-primary/60 shadow-[0_0_0_2px_rgba(74,222,128,0.35),0_24px_50px_rgba(0,0,0,0.55)]"
       )}
     >
-      {spec.inputPorts.map((port, idx) => {
+      {(isSceneGenerationNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
         return (
           <div key={`${port.id}-${idx}`}>
@@ -289,6 +341,36 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               onChange={(event) => data.onUpdateParam?.(id, "sam2Cfg", event.target.value)}
             >
               {sam2CfgOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : null}
+
+      {isSceneGenerationNode ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">Output Format</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sceneFormat}
+              onChange={(event) => data.onUpdateParam?.(id, "format", event.target.value)}
+            >
+              <option value="mesh_glb">mesh_glb</option>
+              <option value="point_ply">point_ply</option>
+            </select>
+          </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">Config</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sceneConfig}
+              onChange={(event) => data.onUpdateParam?.(id, "config", event.target.value)}
+            >
+              {sam3dCfgOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>
@@ -545,7 +627,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         {data.latestArtifactId ? <span>#{data.latestArtifactId.slice(0, 8)}</span> : null}
       </div>
 
-      {spec.outputPorts.map((port, idx) => {
+      {(isSam2Node ? spec.outputPorts.filter((port) => port.id === "config") : spec.outputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
         return (
           <div key={`${port.id}-${idx}`}>

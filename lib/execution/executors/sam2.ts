@@ -6,7 +6,7 @@ import path from "path";
 import { env } from "@/lib/env";
 import { NodeExecutionContext, NodeExecutionResult, ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { createJsonBuffer } from "@/lib/execution/mock-assets";
-import { buildDetectionOverlaySvg, buildMaskSvg, NormalizedBox } from "@/lib/execution/executors/svg";
+import { buildDetectionOverlaySvg, NormalizedBox } from "@/lib/execution/executors/svg";
 import { getDefaultSam2Config, resolveSam2ConfigPath } from "@/lib/sam2/configs";
 
 type Sam2Mode = "guided" | "full";
@@ -397,6 +397,9 @@ async function collectRealOutputs(params: {
   outputDir: string;
   command: Sam2Command;
   resolvedImagePath: string;
+  sourceImageArtifactId: string | null;
+  sourceImageHash: string | null;
+  sourceImageStorageKey: string | null;
   boxesPayload: Record<string, unknown> | null;
   warnings: string[];
 }) {
@@ -424,44 +427,145 @@ async function collectRealOutputs(params: {
   const overlayBuffer = overlayPath ? await fs.readFile(overlayPath) : maskBuffer;
   const overlayMimeType = overlayPath ? mimeFromPath(overlayPath) : "image/png";
   const overlayExt = overlayPath ? path.extname(overlayPath).replace(".", "") : "png";
+  const sourceImageBuffer = await fs.readFile(params.resolvedImagePath).catch(() => null);
+  const sourceImageMime = mimeFromPath(params.resolvedImagePath);
+  const sourceImageExt = path.extname(params.resolvedImagePath).replace(".", "") || "jpg";
+  const maskPaths = maskCandidates.map((name) => path.join(masksDir, name));
 
-  const metaPayload = {
+  const overlayForPreviewBuffer = overlayBuffer ?? maskBuffer;
+  const overlayForPreviewMime = overlayBuffer ? overlayMimeType : "image/png";
+  const overlayForPreviewExt = overlayBuffer ? overlayExt : "png";
+  const selectedCfg = params.command.args[params.command.args.indexOf("--sam2_cfg") + 1] ?? null;
+  const checkpoint = params.command.args[params.command.args.indexOf("--sam2_checkpoint") + 1] ?? null;
+  const boxesCount =
+    params.boxesPayload && Array.isArray(params.boxesPayload.boxes)
+      ? params.boxesPayload.boxes.length
+      : null;
+
+  const configPayload = {
     model: "sam2-python",
     mode: params.mode,
     command: [params.command.command, ...params.command.args].join(" "),
     script: path.basename(params.command.scriptPath),
     outputDir: params.outputDir,
+    sourceImagePath: params.resolvedImagePath,
+    sourceImageMime,
+    sourceImageExt,
+    sourceImageArtifactId: params.sourceImageArtifactId,
+    sourceImageHash: params.sourceImageHash,
+    sourceImageStorageKey: params.sourceImageStorageKey,
     masksDir,
+    maskPaths,
     masksCount: maskCandidates.length,
-    resolvedImagePath: params.resolvedImagePath,
-    selectedCfg: params.command.args[params.command.args.indexOf("--sam2_cfg") + 1] ?? null,
-    checkpoint: params.command.args[params.command.args.indexOf("--sam2_checkpoint") + 1] ?? null,
-    boxesCount:
-      params.boxesPayload && Array.isArray(params.boxesPayload.boxes)
-        ? params.boxesPayload.boxes.length
-        : null,
+    maskPreviewPath: maskPath,
+    overlayPath: overlayPath ?? maskPath,
+    overlayMimeType: overlayForPreviewMime,
+    overlayExt: overlayForPreviewExt,
+    selectedCfg,
+    checkpoint,
+    boxesCount,
     warnings: params.warnings,
     createdAt: new Date().toISOString()
   };
-
+  const configBuffer = createJsonBuffer(configPayload);
+  const legacyMasksDirPayload = {
+    mode: params.mode,
+    masksDir,
+    maskPaths,
+    masksCount: maskCandidates.length,
+    sourceImagePath: params.resolvedImagePath,
+    sourceImageArtifactId: params.sourceImageArtifactId,
+    sourceImageHash: params.sourceImageHash,
+    sourceImageStorageKey: params.sourceImageStorageKey,
+    createdAt: new Date().toISOString()
+  };
   const outputs: NodeExecutionResult["outputs"] = [
     {
-      outputId: "mask",
-      kind: "mask",
-      mimeType: "image/png",
-      extension: "png",
-      buffer: maskBuffer,
+      outputId: "config",
+      kind: "json",
+      mimeType: "application/json",
+      extension: "json",
+      buffer: configBuffer,
       preview: {
-        extension: "png",
-        mimeType: "image/png",
-        buffer: maskBuffer
+        extension: overlayForPreviewExt,
+        mimeType: overlayForPreviewMime,
+        buffer: overlayForPreviewBuffer
       },
       meta: {
-        outputKey: "mask",
+        outputKey: "config",
         mode: params.mode,
+        selectedCfg,
+        checkpoint,
+        masksDir,
         masksCount: maskCandidates.length,
-        sourcePath: maskPath,
-        contentHash: hashBuffer(maskBuffer)
+        sourceImagePath: params.resolvedImagePath,
+        sourceImageArtifactId: params.sourceImageArtifactId,
+        sourceImageHash: params.sourceImageHash,
+        sourceImageStorageKey: params.sourceImageStorageKey,
+        contentHash: hashBuffer(configBuffer)
+      }
+    },
+    ...(sourceImageBuffer
+      ? [
+          {
+            outputId: "image",
+            kind: "image" as const,
+            mimeType: sourceImageMime,
+            extension: sourceImageExt,
+            hidden: true,
+            buffer: sourceImageBuffer,
+            preview: {
+              extension: sourceImageExt,
+              mimeType: sourceImageMime,
+              buffer: sourceImageBuffer
+            },
+            meta: {
+              outputKey: "image",
+              hidden: true,
+              mode: params.mode,
+              sourcePath: params.resolvedImagePath,
+              sourceImageArtifactId: params.sourceImageArtifactId,
+              sourceImageHash: params.sourceImageHash,
+              sourceImageStorageKey: params.sourceImageStorageKey,
+              contentHash: hashBuffer(sourceImageBuffer)
+            }
+          }
+        ]
+      : []),
+    {
+      outputId: "masksDir",
+      kind: "json",
+      mimeType: "application/json",
+      extension: "json",
+      hidden: true,
+      buffer: createJsonBuffer(legacyMasksDirPayload),
+      meta: {
+        outputKey: "masksDir",
+        hidden: true,
+        mode: params.mode,
+        masksDir,
+        masksCount: maskCandidates.length
+      }
+    },
+    {
+      outputId: "overlay",
+      kind: "image",
+      mimeType: overlayForPreviewMime,
+      extension: overlayForPreviewExt,
+      hidden: true,
+      buffer: overlayForPreviewBuffer,
+      preview: {
+        extension: overlayForPreviewExt,
+        mimeType: overlayForPreviewMime,
+        buffer: overlayForPreviewBuffer
+      },
+      meta: {
+        outputKey: "overlay",
+        hidden: true,
+        mode: params.mode,
+        sourcePath: overlayPath ?? maskPath,
+        fallbackFromMask: overlayPath ? false : true,
+        contentHash: hashBuffer(overlayForPreviewBuffer)
       }
     },
     {
@@ -470,7 +574,10 @@ async function collectRealOutputs(params: {
       mimeType: "application/json",
       extension: "json",
       hidden: true,
-      buffer: createJsonBuffer(metaPayload),
+      buffer: createJsonBuffer({
+        ...configPayload,
+        kind: "meta"
+      }),
       meta: {
         outputKey: "meta",
         hidden: true,
@@ -490,26 +597,6 @@ async function collectRealOutputs(params: {
         // Keep working even if write fails.
       });
     }
-
-    outputs.push({
-      outputId: "overlay",
-      kind: "image",
-      mimeType: overlayMimeType,
-      extension: overlayExt,
-      buffer: overlayBuffer,
-      preview: {
-        extension: overlayExt,
-        mimeType: overlayMimeType,
-        buffer: overlayBuffer
-      },
-      meta: {
-        outputKey: "overlay",
-        mode: params.mode,
-        sourcePath: overlayPath ?? maskPath,
-        fallbackFromMask: overlayPath ? false : true,
-        contentHash: hashBuffer(overlayBuffer)
-      }
-    });
   }
 
   return outputs;
@@ -517,19 +604,16 @@ async function collectRealOutputs(params: {
 
 async function buildMockOutputs(params: {
   mode: Sam2Mode;
+  ctx: NodeExecutionContext;
   imageInput: ResolvedArtifactInput | null;
+  resolvedImagePath: string;
+  sourceImageArtifactId: string | null;
+  sourceImageHash: string | null;
+  sourceImageStorageKey: string | null;
   boxesPayload: Record<string, unknown> | null;
   warnings: string[];
 }) {
   const boxes = parseBoxes(params.boxesPayload);
-  const maskBuffer = Buffer.from(
-    buildMaskSvg({
-      mode: params.mode,
-      boxes
-    }),
-    "utf8"
-  );
-
   const overlayBuffer = Buffer.from(
     buildDetectionOverlaySvg({
       title: `SAM2 • ${params.mode === "guided" ? "Guided segmentation" : "Full segmentation"}`,
@@ -538,32 +622,112 @@ async function buildMockOutputs(params: {
     "utf8"
   );
 
-  const metaPayload = {
+  let sourceImageMime = "image/svg+xml";
+  let sourceImageExt = "svg";
+  if (params.imageInput) {
+    sourceImageMime = params.imageInput.mimeType;
+    sourceImageExt = extensionFromMime(params.imageInput.mimeType);
+  }
+
+  const configPayload = {
     model: "sam2-mock",
     mode: params.mode,
     warnings: params.warnings,
-    sourceImageArtifactId: params.imageInput?.artifactId ?? null,
-    sourceImageHash: params.imageInput?.hash ?? null,
+    sourceImagePath: params.resolvedImagePath,
+    sourceImageMime,
+    sourceImageExt,
+    sourceImageArtifactId: params.sourceImageArtifactId,
+    sourceImageHash: params.sourceImageHash,
+    sourceImageStorageKey: params.sourceImageStorageKey,
+    masksDir: path.join(path.dirname(params.resolvedImagePath), params.mode === "guided" ? "masks_dino" : "masks"),
+    maskPaths: [] as string[],
+    masksCount: 1,
+    maskPreviewPath: null,
+    overlayPath: null,
+    overlayMimeType: "image/svg+xml",
+    overlayExt: "svg",
     boxesCount: boxes.length,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    mock: true
   };
+  const configBuffer = createJsonBuffer(configPayload);
+  const sourceImageBuffer = params.imageInput ? await params.ctx.loadInputBuffer(params.imageInput) : null;
 
   return [
     {
-      outputId: "mask",
-      kind: "mask" as const,
-      mimeType: "image/svg+xml",
-      extension: "svg",
-      buffer: maskBuffer,
+      outputId: "config",
+      kind: "json" as const,
+      mimeType: "application/json",
+      extension: "json",
+      buffer: configBuffer,
       preview: {
         extension: "svg",
         mimeType: "image/svg+xml",
-        buffer: maskBuffer
+        buffer: overlayBuffer
       },
       meta: {
-        outputKey: "mask",
+        outputKey: "config",
         mode: params.mode,
-        contentHash: hashBuffer(maskBuffer)
+        sourceImageArtifactId: params.sourceImageArtifactId,
+        sourceImageHash: params.sourceImageHash,
+        sourceImageStorageKey: params.sourceImageStorageKey,
+        sourceImagePath: params.resolvedImagePath,
+        masksDir: configPayload.masksDir,
+        masksCount: configPayload.masksCount,
+        contentHash: hashBuffer(configBuffer)
+      }
+    },
+    ...(sourceImageBuffer
+      ? [
+          {
+            outputId: "image",
+            kind: "image" as const,
+            mimeType: sourceImageMime,
+            extension: sourceImageExt,
+            hidden: true,
+            buffer: sourceImageBuffer,
+            preview: {
+              extension: sourceImageExt,
+              mimeType: sourceImageMime,
+              buffer: sourceImageBuffer
+            },
+            meta: {
+              outputKey: "image",
+              hidden: true,
+              mode: params.mode,
+              sourceImageArtifactId: params.sourceImageArtifactId,
+              sourceImageHash: params.sourceImageHash,
+              sourceImageStorageKey: params.sourceImageStorageKey,
+              sourceImagePath: params.resolvedImagePath,
+              contentHash: hashBuffer(sourceImageBuffer)
+            }
+          }
+        ]
+      : []),
+    {
+      outputId: "masksDir",
+      kind: "json" as const,
+      mimeType: "application/json",
+      extension: "json",
+      hidden: true,
+      buffer: createJsonBuffer({
+        mode: params.mode,
+        masksDir: configPayload.masksDir,
+        maskPaths: [] as string[],
+        masksCount: 1,
+        sourceImagePath: params.resolvedImagePath,
+        sourceImageArtifactId: params.sourceImageArtifactId,
+        sourceImageHash: params.sourceImageHash,
+        sourceImageStorageKey: params.sourceImageStorageKey,
+        createdAt: configPayload.createdAt,
+        mock: true
+      }),
+      meta: {
+        outputKey: "masksDir",
+        hidden: true,
+        mode: params.mode,
+        masksDir: configPayload.masksDir,
+        masksCount: 1
       }
     },
     {
@@ -571,6 +735,7 @@ async function buildMockOutputs(params: {
       kind: "image" as const,
       mimeType: "image/svg+xml",
       extension: "svg",
+      hidden: true,
       buffer: overlayBuffer,
       preview: {
         extension: "svg",
@@ -579,6 +744,7 @@ async function buildMockOutputs(params: {
       },
       meta: {
         outputKey: "overlay",
+        hidden: true,
         mode: params.mode,
         contentHash: hashBuffer(overlayBuffer)
       }
@@ -589,7 +755,7 @@ async function buildMockOutputs(params: {
       mimeType: "application/json",
       extension: "json",
       hidden: true,
-      buffer: createJsonBuffer(metaPayload),
+      buffer: createJsonBuffer({ ...configPayload, kind: "meta" }),
       meta: {
         outputKey: "meta",
         hidden: true,
@@ -631,6 +797,21 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
     boxesPayload: boxesMaterialized?.parsed ?? null,
     outputDir: nodeOutputRoot
   });
+  const sourceImageArtifactId =
+    imageInput?.artifactId ??
+    (boxesInput && typeof boxesInput.meta.sourceImageArtifactId === "string"
+      ? boxesInput.meta.sourceImageArtifactId
+      : null);
+  const sourceImageHash =
+    imageInput?.hash ??
+    (boxesInput && typeof boxesInput.meta.sourceImageHash === "string"
+      ? boxesInput.meta.sourceImageHash
+      : null);
+  const sourceImageStorageKey =
+    imageInput?.storageKey ??
+    (boxesInput && typeof boxesInput.meta.sourceImageStorageKey === "string"
+      ? boxesInput.meta.sourceImageStorageKey
+      : null);
 
   const runMode = (process.env.SAM2_EXECUTION_MODE ?? "mock").toLowerCase();
   if (runMode === "real") {
@@ -653,6 +834,9 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
         outputDir: nodeOutputRoot,
         command,
         resolvedImagePath,
+        sourceImageArtifactId,
+        sourceImageHash,
+        sourceImageStorageKey,
         boxesPayload: boxesMaterialized?.parsed ?? null,
         warnings
       });
@@ -695,8 +879,13 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
   }
 
   const mockOutputs = await buildMockOutputs({
+    ctx,
     mode,
     imageInput,
+    resolvedImagePath,
+    sourceImageArtifactId,
+    sourceImageHash,
+    sourceImageStorageKey,
     boxesPayload: boxesMaterialized?.parsed ?? null,
     warnings
   });
