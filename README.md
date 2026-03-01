@@ -211,7 +211,7 @@ SAM2_CONDA_ENV=sam2
 - Runtime env:
 ```env
 SAM3D_REPO_ROOT=/absolute/path/to/models/sam-3d-objects
-SAM3D_WEB_SCRIPT=inference_for_webapp.py
+SAM3D_WEB_SCRIPT=inference_for_webapp_per_object.py
 SAM3D_EXECUTION_MODE=mock
 SAM3D_ALLOW_MOCK_FALLBACK=true
 SAM3D_USE_CONDA=true
@@ -219,7 +219,7 @@ SAM3D_CONDA_COMMAND=conda
 SAM3D_CONDA_ENV=sam3d-objects
 ```
 - Real command shape:
-  - `conda run -n sam3d-objects python models/sam-3d-objects/inference_for_webapp.py --mode mesh|gaussian --image ... --masks_dir ... --output ... --config hf --max_objects ... --enable_mesh ... --export_mesh_glb ... --enable_mesh_scene ... --mesh_postprocess ... --texture_baking ... --decode_mesh ... --stage1_steps ... --stage2_steps ... --fallback_stage1_steps ... --fallback_stage2_steps ... --autocast ... --autocast_prefer_bf16 ... --store_on_cpu ...`
+  - `conda run -n sam3d-objects python models/sam-3d-objects/inference_for_webapp_per_object.py --mode mesh|gaussian --image ... --masks_dir ... --output ... --config hf`
 - Local storage layout for model outputs:
   - GroundingDINO: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/groundingdino/`
   - SAM2: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/sam2/`

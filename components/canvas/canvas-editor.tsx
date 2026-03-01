@@ -34,7 +34,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
-  Trash2,
   Type,
   WandSparkles,
   Zap,
@@ -47,7 +46,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -101,6 +107,12 @@ interface PendingConnectState {
   nodeId: string;
   handleId: string | null;
   handleType: "source" | "target";
+}
+
+interface NodeContextMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
 }
 
 type ContextMenuCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
@@ -204,6 +216,13 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       : runtimeMetaCandidate && typeof runtimeMetaCandidate.warning === "string"
         ? runtimeMetaCandidate.warning
         : null;
+  const inputNodeStorageKey =
+    nodeType === "input.image" && typeof mergedParams.storageKey === "string"
+      ? mergedParams.storageKey.trim()
+      : "";
+  const inputNodePreviewUrl = inputNodeStorageKey
+    ? `/api/storage/object?key=${encodeURIComponent(inputNodeStorageKey)}`
+    : null;
 
   return {
     // Keep only stable graph fields to avoid reusing persisted runtime node dimensions/styles.
@@ -217,7 +236,11 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       status: base.data.status ?? "idle",
       latestArtifactId: previewArtifact?.id,
       latestArtifactKind: previewArtifact?.kind,
-      previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? null,
+      previewUrl:
+        previewArtifact?.previewUrl ??
+        previewArtifact?.url ??
+        inputNodePreviewUrl ??
+        (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
       outputArtifacts,
       runtimeMode: typeof base.data.runtimeMode === "string" ? base.data.runtimeMode : runtimeMode,
       runtimeWarning: base.data.runtimeWarning ?? runtimeWarning,
@@ -248,7 +271,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNodeData>(wrappedNodes as Node<GraphNodeData>[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState(wrappedEdges);
   const [versions, setVersions] = useState(initialVersions);
-  const [snapToGrid, setSnapToGrid] = useState(true);
+  const snapToGrid = true;
   const [nodeScalePreset, setNodeScalePreset] = useState<NodeUiScale>("balanced");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -264,6 +287,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const [inspectedJsonError, setInspectedJsonError] = useState<string | null>(null);
   const [inspectedJsonLoading, setInspectedJsonLoading] = useState(false);
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
+  const [nodeMenu, setNodeMenu] = useState<NodeContextMenuState | null>(null);
   const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
   const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
@@ -274,6 +298,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
+  const nodeMenuRef = useRef<HTMLDivElement>(null);
   const suppressNextPaneClickRef = useRef(false);
   const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didHydrateDraftRef = useRef(false);
@@ -373,19 +398,24 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, []);
 
   useEffect(() => {
-    if (!paneMenu) return;
+    if (!paneMenu && !nodeMenu) return;
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
       if (target && paneMenuRef.current?.contains(target)) {
         return;
       }
+      if (target && nodeMenuRef.current?.contains(target)) {
+        return;
+      }
       setPaneMenu(null);
+      setNodeMenu(null);
     };
 
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPaneMenu(null);
+        setNodeMenu(null);
       }
     };
 
@@ -395,7 +425,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onEscape);
     };
-  }, [paneMenu]);
+  }, [nodeMenu, paneMenu]);
 
   useEffect(() => {
     if (!paneMenu) {
@@ -462,6 +492,34 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         target?.tagName === "TEXTAREA" ||
         target?.isContentEditable;
       if (isTyping) return;
+
+      const wantsDisconnectShortcut =
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "x";
+      if (wantsDisconnectShortcut) {
+        event.preventDefault();
+        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+        if (selectedEdgeIds.length > 0) {
+          const edgeSet = new Set(selectedEdgeIds);
+          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+          toast({
+            title: "Connections removed",
+            description: selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections removed` : "1 connection removed"
+          });
+          return;
+        }
+        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+        if (selectedNodeIds.length === 0) return;
+        const nodeSet = new Set(selectedNodeIds);
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+        const removedCount = edges.filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target)).length;
+        toast({
+          title: "Node disconnected",
+          description: removedCount > 0 ? `${removedCount} connections removed` : "No connected edges to remove"
+        });
+        return;
+      }
 
       if (event.key !== "Delete" && event.key !== "Backspace") return;
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
@@ -705,10 +763,21 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     [setEdges]
   );
 
-  const deleteSelectedNodes = useCallback(() => {
-    const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
-    deleteNodesByIds(selectedIds);
-  }, [deleteNodesByIds, nodes]);
+  const disconnectEdgesForNodeIds = useCallback(
+    (nodeIds: string[]) => {
+      if (nodeIds.length === 0) return;
+      const nodeSet = new Set(nodeIds);
+      const connectedEdgeIds = edges
+        .filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target))
+        .map((edge) => edge.id);
+      if (connectedEdgeIds.length === 0) {
+        toast({ title: "No connections", description: "Selected node has no connected edges." });
+        return;
+      }
+      deleteEdgesByIds(connectedEdgeIds);
+    },
+    [deleteEdgesByIds, edges]
+  );
 
   const deleteSelectedEdges = useCallback(() => {
     const selectedIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
@@ -740,6 +809,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent) => {
       event.preventDefault();
+      setNodeMenu(null);
       setPendingConnect(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
@@ -752,11 +822,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         return;
       }
       if (event.detail >= 2) {
+        setNodeMenu(null);
         setPendingConnect(null);
         openPaneMenuAtScreenPoint(event.clientX, event.clientY);
         return;
       }
       setPaneMenu(null);
+      setNodeMenu(null);
       setPendingConnect(null);
     },
     [openPaneMenuAtScreenPoint]
@@ -766,9 +838,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement;
       if (target.closest(".react-flow__node")) return;
+      setNodeMenu(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
+  );
+
+  const onNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: Node<GraphNodeData>) => {
+      event.preventDefault();
+      setPaneMenu(null);
+      setPendingConnect(null);
+      setNodes((prev) =>
+        prev.map((entry) => ({
+          ...entry,
+          selected: entry.id === node.id
+        }))
+      );
+
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      if (!rect) {
+        setNodeMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+        return;
+      }
+      const menuWidth = 220;
+      const menuHeight = 150;
+      const rawX = event.clientX - rect.left;
+      const rawY = event.clientY - rect.top;
+      const x = Math.max(10, Math.min(rawX, rect.width - menuWidth - 10));
+      const y = Math.max(10, Math.min(rawY, rect.height - menuHeight - 10));
+      setNodeMenu({ nodeId: node.id, x, y });
+    },
+    [setNodes]
   );
 
   const addNodeFromContextMenu = useCallback(
@@ -869,6 +970,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   };
 
   const openNodeMenuAtViewportCenter = useCallback(() => {
+    setNodeMenu(null);
     if (paneMenu) {
       setPaneMenu(null);
       return;
@@ -1662,24 +1764,76 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void saveGraph()} disabled={isSaving}>
             <Save className="mr-1 h-4 w-4" /> {isSaving ? "Saving..." : "Save"}
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-xl"
-            onClick={deleteSelectedNodes}
-            disabled={!hasNodeSelection}
-          >
-            <Trash2 className="mr-1 h-4 w-4" /> Delete node
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-xl"
-            onClick={deleteSelectedEdges}
-            disabled={!hasEdgeSelection}
-          >
-            <Trash2 className="mr-1 h-4 w-4" /> Disconnect
-          </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" className="rounded-xl">
+                <SlidersHorizontal className="mr-1 h-4 w-4" /> Edit
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
+              <DropdownMenuItem
+                disabled={!hasNodeSelection && !hasEdgeSelection}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                  const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+                  if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
+                  if (selectedNodeIds.length > 0) {
+                    const nodeSet = new Set(selectedNodeIds);
+                    setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+                    setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+                  }
+                  if (selectedEdgeIds.length > 0) {
+                    const edgeSet = new Set(selectedEdgeIds);
+                    setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+                  }
+                  const parts: string[] = [];
+                  if (selectedNodeIds.length > 0) {
+                    parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+                  }
+                  if (selectedEdgeIds.length > 0) {
+                    parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+                  }
+                  toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
+                }}
+              >
+                Delete selected
+                <span className="ml-auto text-[11px] text-zinc-500">Del</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!hasEdgeSelection}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  deleteSelectedEdges();
+                }}
+              >
+                Disconnect selected edges
+                <span className="ml-auto text-[11px] text-zinc-500">Ctrl+Shift+X</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!hasNodeSelection}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                  disconnectEdgesForNodeIds(selectedIds);
+                }}
+              >
+                Disconnect selected nodes
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">View</DropdownMenuLabel>
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setShowMiniMap((value) => !value);
+                }}
+              >
+                {showMiniMap ? "Hide minimap" : "Show minimap"}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
           </Button>
@@ -1781,13 +1935,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           Run is available only when source mode is <span className="text-zinc-200">generate</span>.
                         </div>
                       ) : null}
-                      <Button
-                        className="mb-3 w-full rounded-xl"
-                        variant="outline"
-                        onClick={() => deleteNodesByIds([selectedNode.id])}
-                      >
-                        <Trash2 className="mr-1 h-4 w-4" /> Delete this node
-                      </Button>
                       <ScrollArea className="h-[44vh] pr-2">
                         <div className="space-y-3">
                           {spec.paramFields.length === 0 ? (
@@ -2062,12 +2209,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </Button>
 
           <div className="ml-auto flex items-center gap-2">
-            <Badge variant={activeRunId ? "default" : "secondary"} className="rounded-full border border-white/10 bg-black/30">
-              {activeRunId ? "Running" : "Idle"}
-            </Badge>
-            <Button variant={snapToGrid ? "default" : "outline"} size="sm" className="rounded-xl" onClick={() => setSnapToGrid((v) => !v)}>
-              Snap {snapToGrid ? "On" : "Off"}
-            </Button>
             <Select value={nodeScalePreset} onValueChange={(value) => applyNodeScalePreset(value as NodeUiScale)}>
               <SelectTrigger className="h-9 w-[170px] rounded-xl">
                 <SelectValue placeholder="Node size" />
@@ -2150,6 +2291,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
             onEdgeDoubleClick={(_, edge) => deleteEdgesByIds([edge.id])}
+            onNodeContextMenu={onNodeContextMenu}
             onPaneContextMenu={onPaneContextMenu}
             onPaneClick={onPaneClick}
             fitView
@@ -2294,6 +2436,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                   </ScrollArea>
                 </div>
               ) : null}
+            </div>
+          ) : null}
+
+          {nodeMenu ? (
+            <div
+              ref={nodeMenuRef}
+              data-no-connect-menu="true"
+              className="absolute z-30 w-56 rounded-xl border border-white/10 bg-[#151515]/95 p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md"
+              style={{ left: nodeMenu.x, top: nodeMenu.y }}
+            >
+              <button
+                type="button"
+                className="w-full rounded-lg px-2.5 py-2 text-left text-sm text-zinc-200 transition hover:bg-white/10"
+                onClick={() => {
+                  deleteNodesByIds([nodeMenu.nodeId]);
+                  setNodeMenu(null);
+                }}
+              >
+                Delete node
+                <span className="float-right text-[11px] text-zinc-500">Del</span>
+              </button>
+              <button
+                type="button"
+                className="w-full rounded-lg px-2.5 py-2 text-left text-sm text-zinc-200 transition hover:bg-white/10"
+                onClick={() => {
+                  disconnectEdgesForNodeIds([nodeMenu.nodeId]);
+                  setNodeMenu(null);
+                }}
+              >
+                Disconnect node
+                <span className="float-right text-[11px] text-zinc-500">Ctrl+Shift+X</span>
+              </button>
             </div>
           ) : null}
         </div>

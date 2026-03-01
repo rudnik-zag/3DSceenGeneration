@@ -257,10 +257,11 @@ export async function safeGetSignedDownloadUrl(
   key: string,
   expiresIn = 60 * 60
 ): Promise<string | null> {
+  if (await localObjectExists(key)) {
+    return `/api/storage/object?key=${encodeURIComponent(key)}`;
+  }
+
   if (isS3TemporarilyDisabled()) {
-    if (await localObjectExists(key)) {
-      return `/api/storage/object?key=${encodeURIComponent(key)}`;
-    }
     return null;
   }
 
@@ -273,9 +274,6 @@ export async function safeGetSignedDownloadUrl(
       "warn",
       `[storage] S3 sign download failed; serving local fallback when available${describeStorageError(error)}`
     );
-    if (await localObjectExists(key)) {
-      return `/api/storage/object?key=${encodeURIComponent(key)}`;
-    }
     return null;
   }
 }

@@ -93,7 +93,7 @@ function getSam3dRepoRoot() {
 
 function resolveScriptPath(repoRoot: string) {
   const configured = process.env.SAM3D_WEB_SCRIPT?.trim();
-  if (!configured) return path.join(repoRoot, "inference_for_webapp.py");
+  if (!configured) return path.join(repoRoot, "inference_for_webapp_per_object.py");
   return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured);
 }
 

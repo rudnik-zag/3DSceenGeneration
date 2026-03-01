@@ -173,7 +173,7 @@ export const nodeSpecEntries = [
       overlayAlpha: 0.6
     },
     ui: {
-      previewOutputIds: ["config"],
+      previewOutputIds: ["overlay", "config"],
       hiddenOutputIds: ["image", "masksDir", "overlay", "meta"],
       advancedOutputIds: ["image", "masksDir", "overlay", "meta"],
       nodeRunEnabled: true
