@@ -348,7 +348,7 @@ async function buildSam2Command(params: {
       "--sam2_checkpoint",
       checkpointPath,
       "--overlay",
-      "overlay.jpg",
+      path.join("..", "overlays", "overlay.jpg"),
       "--overlay-alpha",
       String(clamp(Number(ctx.params.overlayAlpha ?? 0.6), 0, 1))
     );
@@ -379,7 +379,7 @@ async function buildSam2Command(params: {
       "--crop-n-layers",
       String(cropNLayers),
       "--overlay",
-      "overlay.jpg",
+      path.join("..", "overlays", "overlay.jpg"),
       "--overlay-alpha",
       String(overlayAlpha)
     );
@@ -419,11 +419,21 @@ async function collectRealOutputs(params: {
   const maskBuffer = await fs.readFile(maskPath);
 
   const imageEntries = entries.filter((name) => /\.(png|jpg|jpeg|webp)$/i.test(name));
-  const overlayCandidate =
+  const overlayEntries = await fs.readdir(overlaysDir).catch(() => []);
+  const overlayImageEntries = overlayEntries.filter((name) => /\.(png|jpg|jpeg|webp)$/i.test(name));
+  const overlayCandidateInOverlays =
+    overlayImageEntries.find((name) => /overlay|blend|composite/i.test(name)) ??
+    overlayImageEntries.find((name) => /^overlay\.(jpg|jpeg|png|webp)$/i.test(name)) ??
+    null;
+  const overlayCandidateInMasks =
     imageEntries.find((name) => /overlay|blend|composite/i.test(name)) ??
     imageEntries.find((name) => /^overlay\.(jpg|jpeg|png|webp)$/i.test(name)) ??
     null;
-  const overlayPath = overlayCandidate ? path.join(masksDir, overlayCandidate) : null;
+  const overlayPath = overlayCandidateInOverlays
+    ? path.join(overlaysDir, overlayCandidateInOverlays)
+    : overlayCandidateInMasks
+      ? path.join(masksDir, overlayCandidateInMasks)
+      : null;
   const overlayBuffer = overlayPath ? await fs.readFile(overlayPath) : maskBuffer;
   const overlayMimeType = overlayPath ? mimeFromPath(overlayPath) : "image/png";
   const overlayExt = overlayPath ? path.extname(overlayPath).replace(".", "") : "png";
@@ -588,7 +598,7 @@ async function collectRealOutputs(params: {
 
   if (overlayBuffer && overlayExt && overlayMimeType) {
     const copiedOverlayPath = path.join(overlaysDir, `overlay.${overlayExt}`);
-    if (overlayPath) {
+    if (overlayPath && path.resolve(overlayPath) !== path.resolve(copiedOverlayPath)) {
       await fs.copyFile(overlayPath, copiedOverlayPath).catch(() => {
         // Keep working even if copy fails.
       });

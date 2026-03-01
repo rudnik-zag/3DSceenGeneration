@@ -14,7 +14,8 @@ import {
   Type as TypeIcon,
   X,
   UploadCloud,
-  WandSparkles
+  WandSparkles,
+  ExternalLink
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -219,6 +220,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     (data.params.format === "mesh_glb" || data.params.format === "point_ply")
       ? data.params.format
       : "mesh_glb";
+  const sceneRunAllMasksInOneProcess =
+    isSceneGenerationNode ? data.params?.runAllMasksInOneProcess !== false : true;
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -394,6 +397,37 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               ))}
             </select>
           </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">Mask Execution</p>
+            <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-black/35 p-1">
+              <button
+                type="button"
+                onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", true)}
+                className={cn(
+                  "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                  sceneRunAllMasksInOneProcess
+                    ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+                    : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                )}
+                title="One process handles all masks."
+              >
+                All masks
+              </button>
+              <button
+                type="button"
+                onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
+                className={cn(
+                  "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                  !sceneRunAllMasksInOneProcess
+                    ? "border border-amber-400/40 bg-amber-500/15 text-amber-200"
+                    : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                )}
+                title="Run one process per mask to reduce OOM risk."
+              >
+                Per mask
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -466,7 +500,28 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         </div>
       ) : null}
 
-      {isImageNode ? (
+      {isSceneGenerationNode ? (
+        <div className="mb-2 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/15 to-cyan-500/10 p-2.5">
+          <div className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-2">
+            <p className="text-[11px] text-zinc-300">Output format: {sceneFormat}</p>
+            {data.latestArtifactId ? (
+              <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{data.latestArtifactId.slice(0, 8)}</p>
+            ) : (
+              <p className="mt-1 text-[10px] text-zinc-500">Run SceneGeneration to create scene assets.</p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="mt-2 inline-flex h-8 items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 text-[11px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => data.onOpenViewer?.({ artifactId: data.latestArtifactId, nodeId: id })}
+            disabled={!data.latestArtifactId}
+            title={data.latestArtifactId ? "Open scene in viewer" : "No scene artifact yet"}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Scene Viewer
+          </button>
+        </div>
+      ) : isImageNode ? (
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br p-2",

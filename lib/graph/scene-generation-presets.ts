@@ -4,6 +4,7 @@ export interface SceneGenerationParams extends Record<string, unknown> {
   configPreset: SceneGenerationConfigPreset;
   format: "mesh_glb" | "point_ply";
   config: string;
+  runAllMasksInOneProcess: boolean;
   maxObjects: number;
   enableMesh: boolean;
   exportMeshGlb: boolean;
@@ -24,6 +25,7 @@ export const sceneGenerationDefaultParams: SceneGenerationParams = {
   configPreset: "Default",
   format: "mesh_glb",
   config: "hf",
+  runAllMasksInOneProcess: true,
   maxObjects: 0,
   enableMesh: true,
   exportMeshGlb: true,
@@ -45,6 +47,7 @@ const SCENE_GENERATION_PRESETS: Record<
   Omit<SceneGenerationParams, "configPreset" | "format" | "config">
 > = {
   Default: {
+    runAllMasksInOneProcess: true,
     maxObjects: 0,
     enableMesh: true,
     exportMeshGlb: true,
@@ -61,6 +64,7 @@ const SCENE_GENERATION_PRESETS: Record<
     storeOnCpu: true
   },
   HighQuality: {
+    runAllMasksInOneProcess: true,
     maxObjects: 0,
     enableMesh: true,
     exportMeshGlb: true,
@@ -77,6 +81,7 @@ const SCENE_GENERATION_PRESETS: Record<
     storeOnCpu: false
   },
   FastPreview: {
+    runAllMasksInOneProcess: true,
     maxObjects: 8,
     enableMesh: true,
     exportMeshGlb: true,
@@ -126,6 +131,7 @@ function normalizeSceneGenerationParams(rawParams: Record<string, unknown> | nul
     configPreset: explicitPreset ?? (hasLegacyParams ? "Custom" : "Default"),
     format: raw.format === "point_ply" ? "point_ply" : "mesh_glb",
     config: typeof raw.config === "string" && raw.config.trim().length > 0 ? raw.config.trim() : sceneGenerationDefaultParams.config,
+    runAllMasksInOneProcess: asBoolean(raw.runAllMasksInOneProcess, sceneGenerationDefaultParams.runAllMasksInOneProcess),
     maxObjects: asFiniteInt(raw.maxObjects, sceneGenerationDefaultParams.maxObjects),
     enableMesh: asBoolean(raw.enableMesh, sceneGenerationDefaultParams.enableMesh),
     exportMeshGlb: asBoolean(raw.exportMeshGlb, sceneGenerationDefaultParams.exportMeshGlb),

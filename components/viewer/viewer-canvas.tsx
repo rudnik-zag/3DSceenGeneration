@@ -21,6 +21,7 @@ interface ViewerArtifact {
   url: string;
   mimeType: string;
   meta: Record<string, unknown> | null;
+  additionalSceneUrls?: string[] | null;
 }
 
 interface TreeNode {
@@ -282,6 +283,13 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
 
     return [...materials];
   }, [selectedNode]);
+  const additionalSceneUrls = useMemo(
+    () =>
+      Array.isArray(artifact.additionalSceneUrls)
+        ? artifact.additionalSceneUrls.filter((url) => typeof url === "string" && url.length > 0)
+        : [],
+    [artifact.additionalSceneUrls]
+  );
 
   const updateCameraClipping = () => {
     const camera = cameraRef.current;
@@ -549,11 +557,28 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
           ktx2.detectSupport(renderer);
           loader.setKTX2Loader(ktx2);
 
+          const rootGroup = new THREE.Group();
+          rootGroup.name = "SceneGroup";
+
           const gltf = await loader.loadAsync(artifact.url);
-          rootObjectRef.current = gltf.scene;
-          scene.add(gltf.scene);
+          gltf.scene.name = gltf.scene.name || "SceneMain";
+          rootGroup.add(gltf.scene);
+
+          for (let index = 0; index < additionalSceneUrls.length; index += 1) {
+            const url = additionalSceneUrls[index];
+            try {
+              const meshGltf = await loader.loadAsync(url);
+              meshGltf.scene.name = meshGltf.scene.name || `SceneObject_${index.toString().padStart(3, "0")}`;
+              rootGroup.add(meshGltf.scene);
+            } catch {
+              // Keep rendering main scene even if a per-object mesh fails to load.
+            }
+          }
+
+          rootObjectRef.current = rootGroup;
+          scene.add(rootGroup);
           updateTree();
-          fitObject(gltf.scene);
+          fitObject(rootGroup);
           setReady(true);
         } else if (artifact.kind === "point_ply") {
           const { geometry, message } = await loadPlyGeometry(artifact.url);
@@ -625,7 +650,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
         }
       }
     };
-  }, [artifact.id, artifact.kind, artifact.url]);
+  }, [additionalSceneUrls, artifact.id, artifact.kind, artifact.url]);
 
   useEffect(() => {
     const transform = transformRef.current;

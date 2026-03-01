@@ -6,6 +6,7 @@ import path from "path";
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { createJsonBuffer, createMinimalGlbBuffer, createPointCloudPlyBuffer } from "@/lib/execution/mock-assets";
 import { getDefaultSam3dConfig, resolveSam3dConfigName } from "@/lib/sam3d/configs";
+import { putObjectToStorage } from "@/lib/storage/s3";
 
 type SceneMode = "mesh" | "gaussian";
 
@@ -31,6 +32,7 @@ interface SceneCommand {
     autocast: boolean;
     autocastPreferBf16: boolean;
     storeOnCpu: boolean;
+    runAllMasksInOneProcess: boolean;
   };
 }
 
@@ -48,7 +50,8 @@ const SCENE_DEFAULT_SETTINGS = {
   fallbackStage2Steps: 15,
   autocast: false,
   autocastPreferBf16: false,
-  storeOnCpu: true
+  storeOnCpu: true,
+  runAllMasksInOneProcess: true
 };
 
 interface SceneManifest {
@@ -58,7 +61,55 @@ interface SceneManifest {
   masks_count?: number;
   image_path?: string;
   masks_dir?: string;
+  output_paths?: {
+    output_dir?: string;
+    scene?: string;
+    mesh_parts_dir?: string;
+    mesh_objects_dir?: string;
+  };
   created_at?: string;
+}
+
+function normalizeProcessLines(text: string) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function truncateLine(value: string, maxChars = 260) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars - 1)}…`;
+}
+
+function extractProcessWarnings(stdout: string, stderr: string) {
+  const warningTokens = ["[warn]", "warning", "skip transformed export", "skipping"];
+  const lines = [...normalizeProcessLines(stdout), ...normalizeProcessLines(stderr)];
+  const collected: string[] = [];
+
+  for (const line of lines) {
+    const lowered = line.toLowerCase();
+    if (!warningTokens.some((token) => lowered.includes(token))) continue;
+    const normalized = truncateLine(line);
+    if (!collected.includes(normalized)) {
+      collected.push(normalized);
+    }
+  }
+  return collected;
+}
+
+function getProcessTail(text: string, maxLines = 120, maxChars = 12000) {
+  const lines = normalizeProcessLines(text);
+  const sliced = lines.slice(-maxLines).join("\n");
+  if (sliced.length <= maxChars) return sliced;
+  return sliced.slice(sliced.length - maxChars);
+}
+
+function pushWarningUnique(target: string[], message: string) {
+  const normalized = message.trim();
+  if (!normalized) return;
+  if (target.includes(normalized)) return;
+  target.push(normalized);
 }
 
 function hashBuffer(buf: Buffer) {
@@ -97,6 +148,12 @@ function resolveScriptPath(repoRoot: string) {
   return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured);
 }
 
+function resolveSingleMaskScriptPath(repoRoot: string) {
+  const configured = process.env.SAM3D_WEB_SINGLE_MASK_SCRIPT?.trim();
+  if (!configured) return path.join(repoRoot, "inference_for_webapp_per_object_single_mask.py");
+  return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured);
+}
+
 function extensionFromMime(mimeType: string) {
   const lowered = mimeType.toLowerCase();
   if (lowered.includes("png")) return "png";
@@ -105,9 +162,29 @@ function extensionFromMime(mimeType: string) {
   return "jpg";
 }
 
+function asPositiveInt(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const rounded = Math.round(parsed);
+  if (rounded <= 0) return null;
+  return rounded;
+}
+
+function resolveSceneSettings(ctx: NodeExecutionContext) {
+  return {
+    ...SCENE_DEFAULT_SETTINGS,
+    maxObjects: asPositiveInt(ctx.params.maxObjects),
+    runAllMasksInOneProcess: ctx.params.runAllMasksInOneProcess !== false
+  };
+}
+
 async function runProcess(command: string, args: string[], cwd: string) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: process.env });
+    const env = { ...process.env };
+    if (!env.PYTORCH_CUDA_ALLOC_CONF) {
+      env.PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True";
+    }
+    const child = spawn(command, args, { cwd, env });
     let stdout = "";
     let stderr = "";
 
@@ -133,6 +210,12 @@ async function runProcess(command: string, args: string[], cwd: string) {
       }
     });
   });
+}
+
+function isCudaOomError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const lowered = message.toLowerCase();
+  return lowered.includes("cuda out of memory") || lowered.includes("outofmemoryerror");
 }
 
 async function materializeImageInput(
@@ -250,7 +333,7 @@ async function buildSceneCommand(params: {
   const scriptPath = resolveScriptPath(repoRoot);
   const base = buildPythonInvocation(scriptPath);
   const configName = await resolveSam3dConfigName(typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig());
-  const settings = { ...SCENE_DEFAULT_SETTINGS };
+  const settings = resolveSceneSettings(params.ctx);
 
   const args = [
     ...base.args,
@@ -264,6 +347,49 @@ async function buildSceneCommand(params: {
     params.outputDir,
     "--config",
     configName
+  ];
+
+  return {
+    command: base.command,
+    args,
+    cwd: repoRoot,
+    outputDir: params.outputDir,
+    mode: params.mode,
+    configName,
+    settings
+  } satisfies SceneCommand;
+}
+
+async function buildSingleMaskSceneCommand(params: {
+  ctx: NodeExecutionContext;
+  mode: SceneMode;
+  imagePath: string;
+  maskPath: string;
+  outputDir: string;
+  maskIndex: number;
+}) {
+  const repoRoot = getSam3dRepoRoot();
+  const scriptPath = resolveSingleMaskScriptPath(repoRoot);
+  const base = buildPythonInvocation(scriptPath);
+  const configName = await resolveSam3dConfigName(
+    typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig()
+  );
+  const settings = resolveSceneSettings(params.ctx);
+
+  const args = [
+    ...base.args,
+    "--mode",
+    params.mode,
+    "--image",
+    params.imagePath,
+    "--mask",
+    params.maskPath,
+    "--output",
+    params.outputDir,
+    "--config",
+    configName,
+    "--mask-index",
+    String(params.maskIndex)
   ];
 
   return {
@@ -298,21 +424,93 @@ async function loadManifest(outputDir: string, stdout: string): Promise<SceneMan
   return {};
 }
 
+async function countMaskFiles(masksDir: string) {
+  try {
+    const entries = await fs.readdir(masksDir);
+    return entries.filter((name) => name.toLowerCase().endsWith(".png")).length;
+  } catch {
+    return null;
+  }
+}
+
 async function collectRealOutputs(params: {
+  ctx: NodeExecutionContext;
   mode: SceneMode;
   command: SceneCommand;
   processStdout: string;
+  processStderr: string;
   warnings: string[];
   imagePath: string;
   masksDir: string;
 }) {
   const manifest = await loadManifest(params.command.outputDir, params.processStdout);
+  const processWarnings = extractProcessWarnings(params.processStdout, params.processStderr);
+  for (const warning of processWarnings) {
+    pushWarningUnique(params.warnings, warning);
+  }
+
+  const inputMaskCount = await countMaskFiles(params.masksDir);
+  const outputMaskCount = typeof manifest.masks_count === "number" ? manifest.masks_count : null;
+  if (
+    typeof inputMaskCount === "number" &&
+    typeof outputMaskCount === "number" &&
+    outputMaskCount < inputMaskCount
+  ) {
+    pushWarningUnique(
+      params.warnings,
+      `SceneGeneration processed ${outputMaskCount}/${inputMaskCount} masks; one or more objects were skipped during mesh generation.`
+    );
+  }
+
   const expected = resolveOutputKind(params.mode);
   const fallbackPath = path.join(params.command.outputDir, `scene.${expected.extension}`);
   const scenePath = manifest.scene_path ?? fallbackPath;
   const sceneBuffer = await fs.readFile(scenePath).catch((error) => {
     throw new Error(`SceneGeneration output not found at ${scenePath}: ${(error as Error).message}`);
   });
+  let meshObjectStorageKeys: string[] = [];
+  if (params.mode === "mesh") {
+    const meshObjectsDir =
+      manifest.output_paths?.mesh_objects_dir ??
+      path.join(params.command.outputDir, "mesh_objects_transformed");
+    try {
+      const files = await fs.readdir(meshObjectsDir);
+      const glbFiles = files
+        .filter((name) => name.toLowerCase().endsWith(".glb"))
+        .sort((a, b) => a.localeCompare(b));
+
+      if (glbFiles.length > 0) {
+        for (const fileName of glbFiles) {
+          const localPath = path.join(meshObjectsDir, fileName);
+          if (path.resolve(localPath) === path.resolve(scenePath)) {
+            continue;
+          }
+          const fileBuffer = await fs.readFile(localPath);
+          const storageKey = [
+            "projects",
+            params.ctx.projectSlug || params.ctx.projectId,
+            "runs",
+            params.ctx.runId,
+            "nodes",
+            params.ctx.nodeId,
+            "scene_generation",
+            "outputs",
+            "mesh_objects_transformed",
+            fileName
+          ].join("/");
+          await putObjectToStorage({
+            key: storageKey,
+            body: fileBuffer,
+            contentType: "model/gltf-binary"
+          });
+          meshObjectStorageKeys.push(storageKey);
+        }
+      }
+    } catch {
+      // Keep scene output even if per-object files are unavailable.
+      meshObjectStorageKeys = [];
+    }
+  }
 
   const metaPayload = {
     model: "sam3d-objects",
@@ -324,9 +522,14 @@ async function collectRealOutputs(params: {
     masksDir: params.masksDir,
     scenePath,
     sceneByteSize: sceneBuffer.length,
+    meshObjectStorageKeys,
     masksCount: manifest.masks_count ?? null,
+    inputMasksCount: inputMaskCount,
     settings: params.command.settings,
     warnings: params.warnings,
+    processWarnings,
+    processStdoutTail: getProcessTail(params.processStdout),
+    processStderrTail: getProcessTail(params.processStderr),
     createdAt: new Date().toISOString()
   };
 
@@ -343,6 +546,7 @@ async function collectRealOutputs(params: {
         config: params.command.configName,
         settings: params.command.settings,
         scenePath,
+        meshObjectStorageKeys,
         contentHash: hashBuffer(sceneBuffer)
       }
     },
@@ -362,6 +566,127 @@ async function collectRealOutputs(params: {
   ];
 
   return outputs;
+}
+
+async function executePerMaskReal(params: {
+  ctx: NodeExecutionContext;
+  mode: SceneMode;
+  imagePath: string;
+  masksDir: string;
+  outputDir: string;
+  warnings: string[];
+}) {
+  const maskEntries = await fs.readdir(params.masksDir);
+  const sortedMasks = maskEntries
+    .filter((name) => name.toLowerCase().endsWith(".png"))
+    .sort((a, b) => a.localeCompare(b));
+
+  if (sortedMasks.length === 0) {
+    throw new Error(`SceneGeneration found no masks in ${params.masksDir}`);
+  }
+
+  const settings = resolveSceneSettings(params.ctx);
+  const maxObjects = settings.maxObjects;
+  const masksToProcess = maxObjects ? sortedMasks.slice(0, maxObjects) : sortedMasks;
+  const aggregateStdout: string[] = [];
+  const aggregateStderr: string[] = [];
+  const perMaskRoot = path.join(params.outputDir, "per_mask");
+  const meshPartsDir = path.join(params.outputDir, "mesh_parts");
+  const meshObjectsDir = path.join(params.outputDir, "mesh_objects_transformed");
+  await fs.mkdir(perMaskRoot, { recursive: true });
+  await fs.mkdir(meshPartsDir, { recursive: true });
+  await fs.mkdir(meshObjectsDir, { recursive: true });
+
+  let keptCount = 0;
+  let firstScenePath: string | null = null;
+
+  for (let index = 0; index < masksToProcess.length; index += 1) {
+    const maskName = masksToProcess[index];
+    const maskPath = path.join(params.masksDir, maskName);
+    const maskOutDir = path.join(perMaskRoot, `mask_${index.toString().padStart(4, "0")}`);
+    await fs.mkdir(maskOutDir, { recursive: true });
+
+    const command = await buildSingleMaskSceneCommand({
+      ctx: params.ctx,
+      mode: params.mode,
+      imagePath: params.imagePath,
+      maskPath,
+      outputDir: maskOutDir,
+      maskIndex: index
+    });
+    const commandLine = formatCommandLine(command.command, command.args);
+    console.log(
+      `[scene-generation] runId=${params.ctx.runId} nodeId=${params.ctx.nodeId} mode=${params.mode} execution=real per-mask index=${index} cmd=${commandLine}`
+    );
+
+    try {
+      const processResult = await runProcess(command.command, command.args, command.cwd);
+      aggregateStdout.push(
+        `[per-mask ${index}] ${processResult.stdout.trim()}`.trim()
+      );
+      if (processResult.stderr.trim().length > 0) {
+        aggregateStderr.push(`[per-mask ${index}] ${processResult.stderr.trim()}`.trim());
+      }
+
+      const perMaskManifest = await loadManifest(maskOutDir, processResult.stdout);
+      const perMaskScenePath =
+        perMaskManifest.scene_path ?? path.join(maskOutDir, params.mode === "mesh" ? "scene.glb" : "scene.ply");
+
+      await fs.access(perMaskScenePath);
+      const copiedScenePath = path.join(
+        meshObjectsDir,
+        `object_${index.toString().padStart(3, "0")}_posed.glb`
+      );
+      await fs.copyFile(perMaskScenePath, copiedScenePath);
+      const sourceMeshPart = path.join(maskOutDir, "mesh_parts", `object_${index.toString().padStart(3, "0")}.glb`);
+      const targetMeshPart = path.join(meshPartsDir, `object_${index.toString().padStart(3, "0")}.glb`);
+      await fs.copyFile(sourceMeshPart, targetMeshPart).catch(() => {
+        // Some runs may not produce per-mask mesh part files.
+      });
+
+      if (!firstScenePath) {
+        firstScenePath = copiedScenePath;
+      }
+      keptCount += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushWarningUnique(
+        params.warnings,
+        `Per-mask subprocess failed for ${maskName}: ${truncateLine(message, 360)}`
+      );
+      aggregateStderr.push(`[per-mask ${index}] ERROR: ${message}`);
+    }
+  }
+
+  if (!firstScenePath || keptCount === 0) {
+    throw new Error("SceneGeneration per-mask mode produced no valid mesh objects.");
+  }
+
+  const composedManifest: SceneManifest = {
+    mode: params.mode,
+    config: typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig(),
+    scene_path: firstScenePath,
+    masks_count: keptCount,
+    image_path: params.imagePath,
+    masks_dir: params.masksDir,
+    output_paths: {
+      output_dir: params.outputDir,
+      scene: firstScenePath,
+      mesh_parts_dir: meshPartsDir,
+      mesh_objects_dir: meshObjectsDir
+    },
+    created_at: new Date().toISOString()
+  };
+  await fs.writeFile(
+    path.join(params.outputDir, "result_manifest.json"),
+    JSON.stringify(composedManifest, null, 2),
+    "utf8"
+  );
+
+  return {
+    stdout: aggregateStdout.join("\n"),
+    stderr: aggregateStderr.join("\n")
+  };
 }
 
 function buildMockOutputs(params: { mode: SceneMode; warnings: string[]; imagePath: string | null; masksDir: string | null }) {
@@ -440,25 +765,66 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
   }
 
   const runMode = (process.env.SAM3D_EXECUTION_MODE ?? "mock").toLowerCase();
+  const settings = resolveSceneSettings(ctx);
+  const usePerMaskSubprocess =
+    settings.runAllMasksInOneProcess === false && mode === "mesh";
   if (runMode === "real") {
-    const command = await buildSceneCommand({
-      ctx,
-      mode,
-      imagePath: resolvedImagePath,
-      masksDir: config.masksDir,
-      outputDir
-    });
-    const commandLine = formatCommandLine(command.command, command.args);
-    console.log(
-      `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real cmd=${commandLine}`
-    );
-
     try {
-      const processResult = await runProcess(command.command, command.args, command.cwd);
+      const command = await buildSceneCommand({
+        ctx,
+        mode,
+        imagePath: resolvedImagePath,
+        masksDir: config.masksDir,
+        outputDir
+      });
+      let processResult: { stdout: string; stderr: string };
+      if (usePerMaskSubprocess) {
+        console.log(
+          `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=per-mask-subprocess`
+        );
+        processResult = await executePerMaskReal({
+          ctx,
+          mode,
+          imagePath: resolvedImagePath,
+          masksDir: config.masksDir,
+          outputDir,
+          warnings
+        });
+      } else {
+        const commandLine = formatCommandLine(command.command, command.args);
+        console.log(
+          `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process cmd=${commandLine}`
+        );
+        try {
+          processResult = await runProcess(command.command, command.args, command.cwd);
+        } catch (error) {
+          if (mode !== "mesh" || !isCudaOomError(error)) {
+            throw error;
+          }
+
+          pushWarningUnique(
+            warnings,
+            "SceneGeneration hit CUDA OOM in single-process mode; retrying with per-mask subprocess strategy."
+          );
+          console.log(
+            `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process oom_detected=true retry=per-mask-subprocess`
+          );
+          processResult = await executePerMaskReal({
+            ctx,
+            mode,
+            imagePath: resolvedImagePath,
+            masksDir: config.masksDir,
+            outputDir,
+            warnings
+          });
+        }
+      }
       const outputs = await collectRealOutputs({
+        ctx,
         mode,
         command,
         processStdout: processResult.stdout,
+        processStderr: processResult.stderr,
         warnings,
         imagePath: resolvedImagePath,
         masksDir: config.masksDir
@@ -482,7 +848,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
       });
       const mockCommandLine = formatCommandLine(mockCommand.command, mockCommand.args);
       console.log(
-        `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock would_run=${mockCommandLine}`
+        `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock strategy=${usePerMaskSubprocess ? "per-mask-subprocess" : "single-process"} would_run=${mockCommandLine}`
       );
     } catch (error) {
       console.log(

@@ -34,6 +34,7 @@ interface ViewerArtifact {
   byteSize?: number | null;
   filename?: string | null;
   storageKey?: string | null;
+  additionalSceneUrls?: string[] | null;
 }
 
 function inferKindFromFilename(filename: string): ViewerArtifact["kind"] | null {

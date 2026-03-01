@@ -110,6 +110,7 @@ export interface GraphNodeData {
   onRunNode?: (nodeId: string) => void;
   onUploadImage?: (nodeId: string, file: File) => void;
   onUpdateParam?: (nodeId: string, key: string, value: string | number | boolean) => void;
+  onOpenViewer?: (payload?: { artifactId?: string; nodeId?: string }) => void;
 }
 
 export interface GraphNode {

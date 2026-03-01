@@ -296,6 +296,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const runNodeRef = useRef<(nodeId: string) => void>(() => {});
   const uploadNodeRef = useRef<(nodeId: string, file: File) => void>(() => {});
   const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
+  const openViewerRef = useRef<(payload?: { artifactId?: string; nodeId?: string }) => void>(() => {});
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
   const nodeMenuRef = useRef<HTMLDivElement>(null);
@@ -714,7 +715,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
           onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
           onUpdateParam: (currentNodeId: string, key: string, value: string | number | boolean) =>
-            updateNodeParamRef.current(currentNodeId, key, value)
+            updateNodeParamRef.current(currentNodeId, key, value),
+          onOpenViewer: (payload?: { artifactId?: string; nodeId?: string }) => openViewerRef.current(payload)
         }
       };
       setNodes((prev) => [...prev, newNode]);
@@ -1608,6 +1610,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   updateNodeParamRef.current = (nodeId: string, key: string, value: string | number | boolean) => {
     updateNodeParamById(nodeId, key, value);
   };
+  openViewerRef.current = (payload?: { artifactId?: string; nodeId?: string }) => {
+    const params = new URLSearchParams();
+    if (payload?.artifactId) {
+      params.set("artifactId", payload.artifactId);
+    }
+    if (payload?.nodeId) {
+      params.set("nodeId", payload.nodeId);
+    }
+    const query = params.toString();
+    const href = query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
+    window.open(href, "_blank");
+  };
 
   const stableNodeRunHandler = useCallback((nodeId: string) => {
     runNodeRef.current(nodeId);
@@ -1618,6 +1632,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const stableParamUpdateHandler = useCallback((nodeId: string, key: string, value: string | number | boolean) => {
     updateNodeParamRef.current(nodeId, key, value);
   }, []);
+  const stableOpenViewerHandler = useCallback((payload?: { artifactId?: string; nodeId?: string }) => {
+    openViewerRef.current(payload);
+  }, []);
 
   useEffect(() => {
     setNodes((prev) =>
@@ -1625,7 +1642,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         if (
           node.data.onRunNode === stableNodeRunHandler &&
           node.data.onUploadImage === stableImageUploadHandler &&
-          node.data.onUpdateParam === stableParamUpdateHandler
+          node.data.onUpdateParam === stableParamUpdateHandler &&
+          node.data.onOpenViewer === stableOpenViewerHandler
         ) {
           return node;
         }
@@ -1635,12 +1653,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             ...node.data,
             onRunNode: stableNodeRunHandler,
             onUploadImage: stableImageUploadHandler,
-            onUpdateParam: stableParamUpdateHandler
+            onUpdateParam: stableParamUpdateHandler,
+            onOpenViewer: stableOpenViewerHandler
           }
         };
       })
     );
-  }, [stableImageUploadHandler, stableNodeRunHandler, stableParamUpdateHandler, setNodes]);
+  }, [stableImageUploadHandler, stableNodeRunHandler, stableOpenViewerHandler, stableParamUpdateHandler, setNodes]);
 
   const cancelRun = async () => {
     if (!activeRunId) return;
