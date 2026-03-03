@@ -5,6 +5,7 @@ export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 export type PayloadKind =
   | "Image"
   | "Mask"
+  | "MaskDir"
   | "Boxes"
   | "BoxesJson"
   | "MaskImage"
@@ -109,6 +110,7 @@ export interface GraphNodeData {
   onRunNode?: (nodeId: string) => void;
   onUploadImage?: (nodeId: string, file: File) => void;
   onUpdateParam?: (nodeId: string, key: string, value: string | number | boolean) => void;
+  onOpenViewer?: (payload?: { artifactId?: string; nodeId?: string }) => void;
 }
 
 export interface GraphNode {

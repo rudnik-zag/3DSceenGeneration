@@ -32,6 +32,7 @@ eggs/
 lib64/
 parts/
 sdist/
+notes/
 var/
 wheels/
 share/python-wheels/

@@ -111,40 +111,47 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
   return (
     <div className="space-y-6">
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="rounded-2xl border-border/70 panel-blur sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="text-white">Create Project</DialogTitle>
-            <DialogDescription>Give your project a name and start from the canvas.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="project-name">Project name</Label>
-            <Input
-              id="project-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void createProject();
-                }
-              }}
-              className="h-10 rounded-xl border-border/70 bg-background/70"
-              placeholder="Project name"
-            />
-          </div>
-          <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button
-              variant="outline"
-              className="h-10 rounded-xl sm:min-w-[110px]"
-              onClick={() => setCreateOpen(false)}
-              disabled={loading}
-            >
-              Cancel
-            </Button>
-            <Button className="h-10 rounded-xl sm:min-w-[140px]" onClick={() => void createProject()} disabled={loading}>
-              {loading ? "Creating..." : "Create Project"}
-            </Button>
-          </DialogFooter>
+        <DialogContent className="rounded-2xl border-border/70 panel-blur sm:max-w-[520px]">
+          <form
+            className="space-y-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createProject();
+            }}
+          >
+            <DialogHeader className="space-y-1">
+              <DialogTitle className="text-white">Create Project</DialogTitle>
+              <DialogDescription>Give your project a name and start from the canvas.</DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-2.5">
+              <Label htmlFor="project-name" className="text-sm text-zinc-200">
+                Project name
+              </Label>
+              <Input
+                id="project-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="h-11 rounded-xl border-border/70 bg-background/70"
+                placeholder="Project name"
+              />
+            </div>
+
+            <DialogFooter className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-11 w-full rounded-xl"
+                onClick={() => setCreateOpen(false)}
+                disabled={loading}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" className="h-11 w-full rounded-xl" disabled={loading}>
+                {loading ? "Creating..." : "Create Project"}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  applySceneGenerationPreset,
+  getSceneGenerationPresetNames,
+  mergeSceneGenerationParams,
+  sceneGenerationDefaultParams
+} from "@/lib/graph/scene-generation-presets";
 import { NodeSpecRegistry, WorkflowNodeType } from "@/types/workflow";
 
 const textInput = z.object({ value: z.string().default("") });
@@ -24,6 +30,26 @@ const sam2Params = z.object({
   stabilityScoreThresh: z.number().min(0).max(1).default(0.9),
   cropNLayers: z.number().int().min(0).max(8).default(1),
   overlayAlpha: z.number().min(0).max(1).default(0.6)
+});
+const sceneGenerationParams = z.object({
+  configPreset: z.enum(["Default", "HighQuality", "FastPreview", "Custom"]).default("Default"),
+  format: z.enum(["mesh_glb", "point_ply"]).default("mesh_glb"),
+  config: z.string().default("hf"),
+  runAllMasksInOneProcess: z.boolean().default(true),
+  maxObjects: z.number().int().min(0).max(128).default(0),
+  enableMesh: z.boolean().default(true),
+  exportMeshGlb: z.boolean().default(true),
+  enableMeshScene: z.boolean().default(true),
+  meshPostprocess: z.boolean().default(false),
+  textureBaking: z.boolean().default(false),
+  decodeMesh: z.boolean().default(true),
+  stage1Steps: z.number().int().min(0).max(200).default(0),
+  stage2Steps: z.number().int().min(0).max(200).default(0),
+  fallbackStage1Steps: z.number().int().min(1).max(200).default(15),
+  fallbackStage2Steps: z.number().int().min(1).max(200).default(15),
+  autocast: z.boolean().default(false),
+  autocastPreferBf16: z.boolean().default(false),
+  storeOnCpu: z.boolean().default(true)
 });
 const modelPrompt = z.object({ prompt: z.string().default("") });
 const depthParams = z.object({ model: z.string().default("fast-depth") });
@@ -87,7 +113,7 @@ export const nodeSpecEntries = [
   makeSpec("model.groundingdino", {
     type: "model.groundingdino",
     category: "Models",
-    title: "GroundingDINO",
+    title: "ObjectDetection",
     icon: "Scan",
     description: "Open-vocabulary detection.",
     inputPorts: [{ id: "image", label: "Image", payload: "Image", required: true }],
@@ -116,7 +142,7 @@ export const nodeSpecEntries = [
   makeSpec("model.sam2", {
     type: "model.sam2",
     category: "Models",
-    title: "SAM2",
+    title: "SegmentScene",
     icon: "Layers",
     description: "Segmentation masks from prompts.",
     inputPorts: [
@@ -124,8 +150,10 @@ export const nodeSpecEntries = [
       { id: "boxes", label: "BoxesConfig JSON", payload: "BoxesJson", advancedOnly: true }
     ],
     outputPorts: [
-      { id: "mask", label: "Mask", payload: "MaskImage" },
-      { id: "overlay", label: "Overlay", payload: "OverlayImage" },
+      { id: "config", label: "Config", payload: "JsonMeta" },
+      { id: "image", label: "Input Image", payload: "Image", hidden: true, advancedOnly: true },
+      { id: "masksDir", label: "Masks Dir", payload: "MaskDir", hidden: true, advancedOnly: true },
+      { id: "overlay", label: "Overlay", payload: "OverlayImage", hidden: true, advancedOnly: true },
       { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
     ],
     paramSchema: sam2Params,
@@ -146,26 +174,54 @@ export const nodeSpecEntries = [
       overlayAlpha: 0.6
     },
     ui: {
-      previewOutputIds: ["overlay", "mask"],
-      hiddenOutputIds: ["meta"],
-      advancedOutputIds: ["meta"],
+      previewOutputIds: ["overlay", "config"],
+      hiddenOutputIds: ["image", "masksDir", "overlay", "meta"],
+      advancedOutputIds: ["image", "masksDir", "overlay", "meta"],
       nodeRunEnabled: true
     }
   }),
   makeSpec("model.sam3d_objects", {
     type: "model.sam3d_objects",
     category: "Models",
-    title: "SAM3D Objects",
+    title: "SceneGeneration",
     icon: "Box",
-    description: "3D object-aware segmentation.",
+    description: "Generate scene output from SegmentScene config (GLB mesh or Gaussian PLY).",
     inputPorts: [
-      { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "mask", label: "Mask", payload: "Mask" }
+      { id: "config", label: "SegmentScene Config", payload: "JsonMeta" },
+      { id: "masksDir", label: "Masks Dir (legacy)", payload: "MaskDir", hidden: true, advancedOnly: true }
     ],
-    outputPorts: [{ id: "json", label: "Objects", payload: "Json" }],
-    paramSchema: z.object({ mode: z.enum(["fast", "quality"]).default("fast") }),
-    paramFields: [{ key: "mode", label: "Mode", input: "select", options: ["fast", "quality"] }],
-    defaultParams: { mode: "fast" }
+    outputPorts: [
+      { id: "scene", label: "Scene", payload: "Scene" },
+      { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
+    ],
+    paramSchema: sceneGenerationParams,
+    paramFields: [
+      { key: "configPreset", label: "Config Preset", input: "select", options: getSceneGenerationPresetNames() },
+      { key: "format", label: "Output Format", input: "select", options: ["mesh_glb", "point_ply"] },
+      { key: "config", label: "Config", input: "select", options: ["hf"] },
+      { key: "runAllMasksInOneProcess", label: "Run All Masks In One Process", input: "boolean" },
+      { key: "maxObjects", label: "Max Objects", input: "number", min: 0, max: 128, step: 1 },
+      { key: "enableMesh", label: "Enable Mesh", input: "boolean" },
+      { key: "exportMeshGlb", label: "Export Mesh GLB", input: "boolean" },
+      { key: "enableMeshScene", label: "Enable Mesh Scene", input: "boolean" },
+      { key: "meshPostprocess", label: "Mesh Postprocess", input: "boolean" },
+      { key: "textureBaking", label: "Texture Baking", input: "boolean" },
+      { key: "decodeMesh", label: "Decode Mesh", input: "boolean" },
+      { key: "stage1Steps", label: "Stage1 Steps", input: "number", min: 0, max: 200, step: 1 },
+      { key: "stage2Steps", label: "Stage2 Steps", input: "number", min: 0, max: 200, step: 1 },
+      { key: "fallbackStage1Steps", label: "Fallback Stage1", input: "number", min: 1, max: 200, step: 1 },
+      { key: "fallbackStage2Steps", label: "Fallback Stage2", input: "number", min: 1, max: 200, step: 1 },
+      { key: "autocast", label: "Autocast", input: "boolean" },
+      { key: "autocastPreferBf16", label: "Prefer BF16", input: "boolean" },
+      { key: "storeOnCpu", label: "Store On CPU", input: "boolean" }
+    ],
+    defaultParams: sceneGenerationDefaultParams,
+    ui: {
+      previewOutputIds: ["scene"],
+      hiddenOutputIds: ["meta"],
+      advancedOutputIds: ["meta"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("model.qwen_vl", {
     type: "model.qwen_vl",
@@ -324,3 +380,25 @@ export const nodeGroups = Object.values(nodeSpecRegistry).reduce<Record<string, 
   },
   {}
 );
+
+export function mergeNodeParamsWithDefaults(nodeType: WorkflowNodeType, rawParams: unknown) {
+  const spec = nodeSpecRegistry[nodeType];
+  const paramsRecord = rawParams && typeof rawParams === "object" && !Array.isArray(rawParams)
+    ? (rawParams as Record<string, unknown>)
+    : {};
+
+  const merged = {
+    ...spec.defaultParams,
+    ...paramsRecord
+  } as Record<string, unknown>;
+
+  if (nodeType === "model.sam3d_objects") {
+    const normalizedScene = mergeSceneGenerationParams(merged);
+    if (normalizedScene.configPreset !== "Custom") {
+      return applySceneGenerationPreset(normalizedScene, normalizedScene.configPreset);
+    }
+    return normalizedScene;
+  }
+
+  return merged;
+}

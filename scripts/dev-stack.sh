@@ -17,6 +17,9 @@ MINIO_BIN="${MINIO_BIN:-minio}"
 MINIO_DATA_DIR="${MINIO_DATA_DIR:-$HOME/minio-data}"
 MINIO_ADDRESS="${MINIO_ADDRESS:-:9100}"
 MINIO_CONSOLE_ADDRESS="${MINIO_CONSOLE_ADDRESS:-:9101}"
+APP_PORT="${APP_PORT:-3000}"
+EXTRA_STOP_PORTS="${EXTRA_STOP_PORTS:-}"
+APP_PORT_SWEEP="${APP_PORT_SWEEP:-12}"
 CONDA_SH_PATH=""
 DOCKER_INFRA_ACTIVE=0
 
@@ -36,6 +39,9 @@ Environment variables:
   MINIO_DATA_DIR     MinIO data dir for standalone mode (default: ~/minio-data)
   MINIO_ADDRESS      MinIO API address for standalone mode (default: :9100)
   MINIO_CONSOLE_ADDRESS MinIO console address for standalone mode (default: :9101)
+  APP_PORT           Next.js port expected to be freed on stop/down (default: 3000)
+  EXTRA_STOP_PORTS   Extra space-separated ports to free on stop/down
+  APP_PORT_SWEEP     Number of consecutive app ports to free starting from APP_PORT (default: 12)
   COREPACK_HOME_DIR  Corepack home for pnpm fallback (default: /tmp/corepack)
 EOF
 }
@@ -188,6 +194,130 @@ stop_standalone_minio() {
   stop_service "minio-standalone"
 }
 
+collect_stop_ports() {
+  local minio_port console_port
+  local detected_port=""
+  local app_ports=""
+  local i
+  minio_port="$(address_port "${MINIO_ADDRESS}")"
+  console_port="$(address_port "${MINIO_CONSOLE_ADDRESS}")"
+  for ((i=0; i<APP_PORT_SWEEP; i++)); do
+    app_ports+="$((APP_PORT + i)) "
+  done
+  if app_url="$(detect_app_url)"; then
+    detected_port="${app_url##*:}"
+  fi
+  echo "${app_ports} ${detected_port} ${minio_port} ${console_port} ${EXTRA_STOP_PORTS}"
+}
+
+stop_workspace_next_dev() {
+  local pids=""
+  if command -v pgrep >/dev/null 2>&1; then
+    pids="$(pgrep -f "${ROOT_DIR}/node_modules/.*/next/dist/bin/next dev" || true)"
+  fi
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+  echo "[dev-stack] Stopping stale workspace next dev pids: $(echo "${pids}" | tr '\n' ' ')"
+  while IFS= read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    kill "${pid}" >/dev/null 2>&1 || true
+  done <<<"${pids}"
+  sleep 0.4
+  local remaining=""
+  if command -v pgrep >/dev/null 2>&1; then
+    remaining="$(pgrep -f "${ROOT_DIR}/node_modules/.*/next/dist/bin/next dev" || true)"
+  fi
+  if [[ -n "${remaining}" ]]; then
+    while IFS= read -r pid; do
+      [[ -z "${pid}" ]] && continue
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    done <<<"${remaining}"
+  fi
+}
+
+stop_workspace_worker() {
+  local pids=""
+  if command -v pgrep >/dev/null 2>&1; then
+    pids="$(pgrep -f "${ROOT_DIR}/node_modules/.*/tsx/dist/cli.mjs worker/index.ts" || true)"
+  fi
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+  echo "[dev-stack] Stopping stale workspace worker pids: $(echo "${pids}" | tr '\n' ' ')"
+  while IFS= read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    kill "${pid}" >/dev/null 2>&1 || true
+  done <<<"${pids}"
+  sleep 0.4
+  local remaining=""
+  if command -v pgrep >/dev/null 2>&1; then
+    remaining="$(pgrep -f "${ROOT_DIR}/node_modules/.*/tsx/dist/cli.mjs worker/index.ts" || true)"
+  fi
+  if [[ -n "${remaining}" ]]; then
+    while IFS= read -r pid; do
+      [[ -z "${pid}" ]] && continue
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    done <<<"${remaining}"
+  fi
+}
+
+port_listener_pids() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null \
+      | awk -v port="${port}" '
+          $4 ~ ":" port "$" {
+            while (match($0, /pid=[0-9]+/)) {
+              pid = substr($0, RSTART + 4, RLENGTH - 4);
+              print pid;
+              $0 = substr($0, RSTART + RLENGTH);
+            }
+          }
+        ' \
+      | sort -u || true
+    return 0
+  fi
+}
+
+kill_port_listener() {
+  local port="$1"
+  local pids
+  pids="$(port_listener_pids "${port}")"
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+
+  echo "[dev-stack] Freeing port ${port} (pids: $(echo "${pids}" | tr '\n' ' '))"
+  while IFS= read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    kill "${pid}" >/dev/null 2>&1 || true
+  done <<<"${pids}"
+  sleep 0.3
+  local remaining
+  remaining="$(port_listener_pids "${port}")"
+  if [[ -n "${remaining}" ]]; then
+    while IFS= read -r pid; do
+      [[ -z "${pid}" ]] && continue
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    done <<<"${remaining}"
+  fi
+}
+
+free_stop_ports() {
+  local ports
+  ports="$(collect_stop_ports)"
+  for port in ${ports}; do
+    [[ -z "${port}" ]] && continue
+    kill_port_listener "${port}"
+  done
+}
+
 start_service() {
   local name="$1"
   local cmd="$2"
@@ -262,17 +392,22 @@ detect_app_url() {
 start_all() {
   ensure_conda
   resolve_pnpm_cmd
+  stop_workspace_next_dev
+  stop_workspace_worker
   start_infra
   start_standalone_minio_if_needed
-  start_service "next-dev" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && ${PNPM_CMD[*]} dev"
+  start_service "next-dev" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && PORT='${APP_PORT}' ${PNPM_CMD[*]} dev"
   start_service "worker" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && ${PNPM_CMD[*]} worker"
 }
 
 stop_all() {
   stop_service "worker"
   stop_service "next-dev"
+  stop_workspace_next_dev
+  stop_workspace_worker
   stop_standalone_minio
   stop_infra
+  free_stop_ports
 }
 
 show_logs() {

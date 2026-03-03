@@ -6,9 +6,10 @@ import { prisma } from "@/lib/db";
 import { ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { MockModelRunner, stableHashForOutput } from "@/lib/execution/mock-runner";
 import { makeCacheKey, makeOutputCacheKey } from "@/lib/graph/cache";
-import { nodeSpecRegistry } from "@/lib/graph/node-specs";
+import { mergeNodeParamsWithDefaults, nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { buildExecutionPlan, parseGraphDocument } from "@/lib/graph/plan";
 import { artifactPreviewStorageKey, artifactStorageKey } from "@/lib/storage/keys";
+import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { getObjectBuffer, putObjectToStorage } from "@/lib/storage/s3";
 import { WorkflowNodeType } from "@/types/workflow";
 
@@ -129,6 +130,21 @@ function orderedInputHashes(nodeType: WorkflowNodeType, inputsByPort: Record<str
   return ordered;
 }
 
+function formatInputSummary(inputsByPort: Record<string, RuntimeArtifactRef[]>) {
+  const ports = Object.keys(inputsByPort).sort((a, b) => a.localeCompare(b));
+  if (ports.length === 0) return "none";
+  return ports
+    .map((port) => {
+      const entries = inputsByPort[port] ?? [];
+      if (entries.length === 0) return `${port}=[]`;
+      const value = entries
+        .map((entry) => `${entry.nodeId}:${entry.outputId}:${entry.kind}:${entry.artifactId.slice(0, 8)}`)
+        .join(",");
+      return `${port}=[${value}]`;
+    })
+    .join(" ");
+}
+
 function parseBoxesMeta(artifact?: RuntimeArtifactRef | null) {
   if (!artifact) {
     return {
@@ -205,6 +221,15 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
   });
 
   try {
+    const project = await prisma.project.findUnique({
+      where: { id: input.projectId },
+      select: { id: true, name: true }
+    });
+    const projectSlug = resolveProjectStorageSlug({
+      projectName: project?.name,
+      projectId: input.projectId
+    });
+
     const graph = await prisma.graph.findUnique({ where: { id: input.graphId } });
     if (!graph) {
       throw new Error(`Graph ${input.graphId} not found`);
@@ -220,6 +245,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     for (let i = 0; i < plan.tasks.length; i += 1) {
       const task = plan.tasks[i];
       const spec = nodeSpecRegistry[task.nodeType];
+      const resolvedParams = mergeNodeParamsWithDefaults(task.nodeType, task.params);
       const now = new Date().toISOString();
       const forcedNodeSet = new Set(input.forceNodeIds ?? []);
       const shouldBypassCache = forcedNodeSet.has(task.nodeId);
@@ -288,13 +314,13 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         const directImage = inputsByPort.image?.[0] ?? null;
         const boxesInput = inputsByPort.boxes?.[0] ?? inputsByPort.boxesConfig?.[0] ?? null;
         const modeParam =
-          typeof task.params.mode === "string" && ["guided", "full", "auto"].includes(task.params.mode)
-            ? task.params.mode
+          typeof resolvedParams.mode === "string" && ["guided", "full", "auto"].includes(resolvedParams.mode)
+            ? resolvedParams.mode
             : "auto";
         runtimeMode = modeParam === "auto" ? (boxesInput ? "guided" : "full") : modeParam;
 
         if (runtimeMode === "guided" && !boxesInput) {
-          throw new Error("Requires GroundingDINO config JSON input.");
+          throw new Error("Requires ObjectDetection config JSON input.");
         }
 
         let effectiveImage = directImage;
@@ -398,14 +424,17 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         }
       }
 
+      const inputSummary = formatInputSummary(inputsByPort);
+      console.log(`[worker] node=${task.nodeId} inputs ${inputSummary}`);
+
       if (task.nodeType === "input.image") {
-        const storageKey = typeof task.params.storageKey === "string" ? task.params.storageKey : "";
+        const storageKey = typeof resolvedParams.storageKey === "string" ? resolvedParams.storageKey : "";
         if (storageKey) {
           const sourceBuffer = await getObjectBuffer(storageKey);
           const sourceHash = stableHashForOutput(sourceBuffer);
           const filename =
-            typeof task.params.filename === "string" && task.params.filename.length > 0
-              ? task.params.filename
+            typeof resolvedParams.filename === "string" && resolvedParams.filename.length > 0
+              ? resolvedParams.filename
               : storageKey.split("/").pop() ?? "image.jpg";
           const sourceArtifact: RuntimeArtifactRef = {
             artifactId: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
@@ -426,6 +455,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           };
           producedByOutput.set(mapKey(task.nodeId, "image"), sourceArtifact);
           producedByArtifactId.set(sourceArtifact.artifactId, sourceArtifact);
+          console.log(
+            `[worker] node=${task.nodeId} outputs image:image:${storageKey}`
+          );
 
           const progress = Math.round(((i + 1) / total) * 100);
           await updateRun(input.runId, {
@@ -441,7 +473,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
       const nodeBaseCacheKey = makeCacheKey(
         task.nodeType,
-        task.params,
+        resolvedParams,
         orderedInputHashes(task.nodeType, inputsByPort),
         runtimeMode
       );
@@ -464,9 +496,14 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       }
 
       if (allOutputsCached && outputCacheHits.size > 0 && !shouldBypassCache) {
+        const cacheOutputs: string[] = [];
         for (const [outputId, artifact] of outputCacheHits.entries()) {
           producedByOutput.set(mapKey(task.nodeId, outputId), artifact);
           producedByArtifactId.set(artifact.artifactId, artifact);
+          cacheOutputs.push(`${outputId}:${artifact.kind}:${artifact.storageKey}`);
+        }
+        if (cacheOutputs.length > 0) {
+          console.log(`[worker] node=${task.nodeId} outputs(cache-hit) ${cacheOutputs.join(" | ")}`);
         }
         const progress = Math.round(((i + 1) / total) * 100);
         await updateRun(input.runId, {
@@ -475,7 +512,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             currentRun?.logs ?? "",
             `[${now}] ${task.nodeId} cache-hit mode=${runtimeMode ?? "default"} outputs=${[
               ...outputCacheHits.keys()
-            ].join(",")}`
+            ].join(",")} inputs=${inputSummary} stored=${cacheOutputs.join(" | ")}`
           )
         });
         continue;
@@ -492,10 +529,11 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
       const result = await runner.executeNode({
         projectId: input.projectId,
+        projectSlug,
         runId: input.runId,
         nodeId: task.nodeId,
         nodeType: task.nodeType,
-        params: task.params,
+        params: resolvedParams,
         inputs: inputsByPort,
         mode: runtimeMode,
         warnings: runtimeWarnings,
@@ -516,6 +554,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         throw new Error(`Node ${task.nodeId} produced no outputs`);
       }
 
+      const storedOutputs: string[] = [];
       for (const output of outputs) {
         const outputPort = spec.outputPorts.find((port) => port.id === output.outputId);
         const outputHidden = Boolean(output.hidden ?? outputPort?.hidden);
@@ -542,6 +581,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         });
 
         const key = artifactStorageKey({
+          projectSlug,
           projectId: input.projectId,
           runId: input.runId,
           nodeId: task.nodeId,
@@ -558,6 +598,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         let previewKey: string | null = null;
         if (output.preview) {
           previewKey = artifactPreviewStorageKey({
+            projectSlug,
             projectId: input.projectId,
             runId: input.runId,
             nodeId: task.nodeId,
@@ -582,6 +623,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
         });
         const mapped = mapArtifact(artifact);
+        storedOutputs.push(`${output.outputId}:${output.kind}:${key}`);
         producedByOutput.set(mapKey(task.nodeId, output.outputId), mapped);
         producedByArtifactId.set(mapped.artifactId, mapped);
 
@@ -598,6 +640,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
         });
       }
+      if (storedOutputs.length > 0) {
+        console.log(`[worker] node=${task.nodeId} outputs ${storedOutputs.join(" | ")}`);
+      }
 
       const progress = Math.round(((i + 1) / total) * 100);
       const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
@@ -607,7 +652,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           latestRun?.logs ?? "",
           `[${now}] ${task.nodeId} executed mode=${result.mode ?? runtimeMode ?? "default"} outputs=${outputs
             .map((output) => output.outputId)
-            .join(",")}${(result.warnings ?? runtimeWarnings).length ? ` warnings=${(result.warnings ?? runtimeWarnings).join(" | ")}` : ""}`
+            .join(",")} inputs=${inputSummary} stored=${storedOutputs.join(" | ")}${(result.warnings ?? runtimeWarnings).length ? ` warnings=${(result.warnings ?? runtimeWarnings).join(" | ")}` : ""}`
         )
       });
     }

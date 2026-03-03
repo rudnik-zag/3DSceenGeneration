@@ -40,6 +40,10 @@ function resolveInputExtension(ctx: NodeExecutionContext, sourceMimeType: string
   return storageExt || "jpg";
 }
 
+function getLocalStorageRoot() {
+  return process.env.LOCAL_STORAGE_ROOT || path.join(process.cwd(), ".local-storage");
+}
+
 async function runProcess(command: string, args: string[], cwd: string) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, {
@@ -251,16 +255,14 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
   const tokenSpans = typeof ctx.params.tokenSpans === "string" ? ctx.params.tokenSpans.trim() : "";
 
   const outputDir = path.join(
-    process.cwd(),
-    ".local-storage",
+    getLocalStorageRoot(),
     "projects",
-    ctx.projectId,
-    "model_outputs",
-    "groundingdino",
+    ctx.projectSlug || ctx.projectId,
     "runs",
     ctx.runId,
     "nodes",
-    ctx.nodeId
+    ctx.nodeId,
+    "groundingdino"
   );
   await fs.mkdir(outputDir, { recursive: true });
 

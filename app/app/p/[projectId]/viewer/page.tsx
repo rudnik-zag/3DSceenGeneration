@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { promises as fs } from "fs";
+import path from "path";
 
 import { ViewerLoader } from "@/components/viewer/viewer-loader";
 import { Badge } from "@/components/ui/badge";
@@ -8,18 +10,159 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { prisma } from "@/lib/db";
+import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
 import { isRenderableInViewer, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
+
+interface SceneResultManifest {
+  mesh_objects_dir?: string;
+  output_paths?: {
+    mesh_objects_dir?: string;
+  };
+}
+
+function getLocalStorageRoot() {
+  const configured = process.env.LOCAL_STORAGE_ROOT?.trim();
+  return configured && configured.length > 0
+    ? path.resolve(configured)
+    : path.join(process.cwd(), ".local-storage");
+}
+
+function toPosixPath(value: string) {
+  return value.split(path.sep).join("/");
+}
+
+function toStorageKeyFromLocalPath(localRoot: string, absolutePath: string): string | null {
+  const normalizedRoot = path.resolve(localRoot);
+  const normalizedPath = path.resolve(absolutePath);
+  const rootPrefix = `${normalizedRoot}${path.sep}`;
+
+  if (normalizedPath.startsWith(rootPrefix)) {
+    return toPosixPath(normalizedPath.slice(rootPrefix.length));
+  }
+
+  const projectsToken = `${path.sep}projects${path.sep}`;
+  const projectsIndex = normalizedPath.lastIndexOf(projectsToken);
+  if (projectsIndex >= 0) {
+    return toPosixPath(normalizedPath.slice(projectsIndex + 1));
+  }
+
+  return null;
+}
+
+function parseManifest(raw: string): SceneResultManifest | null {
+  try {
+    return JSON.parse(raw) as SceneResultManifest;
+  } catch {
+    return null;
+  }
+}
+
+function toUniqueStrings(values: string[]) {
+  return [...new Set(values.filter((value) => value.length > 0))];
+}
+
+async function resolveAdditionalSceneUrlsFromManifest(input: {
+  projectId: string;
+  projectName: string;
+  runId: string;
+  nodeId: string;
+}): Promise<string[]> {
+  const localRoot = getLocalStorageRoot();
+  const projectSlug = resolveProjectStorageSlug({
+    projectName: input.projectName,
+    projectId: input.projectId
+  });
+  const projectSegments = toUniqueStrings([projectSlug, input.projectId]);
+
+  const manifestCandidates = projectSegments.map((segment) =>
+    path.join(
+      localRoot,
+      "projects",
+      segment,
+      "runs",
+      input.runId,
+      "nodes",
+      input.nodeId,
+      "scene_generation",
+      "outputs",
+      "result_manifest.json"
+    )
+  );
+
+  for (const manifestPath of manifestCandidates) {
+    try {
+      const rawManifest = await fs.readFile(manifestPath, "utf8");
+      const manifest = parseManifest(rawManifest);
+      if (!manifest) continue;
+
+      const rawMeshObjectsDir =
+        typeof manifest.output_paths?.mesh_objects_dir === "string"
+          ? manifest.output_paths.mesh_objects_dir
+          : typeof manifest.mesh_objects_dir === "string"
+            ? manifest.mesh_objects_dir
+            : "";
+      if (!rawMeshObjectsDir) continue;
+
+      const primaryMeshDir = path.isAbsolute(rawMeshObjectsDir)
+        ? rawMeshObjectsDir
+        : path.resolve(path.dirname(manifestPath), rawMeshObjectsDir);
+      const fallbackMeshDir = path.resolve(process.cwd(), rawMeshObjectsDir);
+      const meshObjectsDir = await fs
+        .access(primaryMeshDir)
+        .then(() => primaryMeshDir)
+        .catch(async () =>
+          fs
+            .access(fallbackMeshDir)
+            .then(() => fallbackMeshDir)
+            .catch(() => null)
+        );
+      if (!meshObjectsDir) continue;
+
+      const files = await fs.readdir(meshObjectsDir);
+      const glbPaths = files
+        .filter((fileName) => fileName.toLowerCase().endsWith(".glb"))
+        .sort((a, b) => a.localeCompare(b))
+        .map((fileName) => path.join(meshObjectsDir, fileName));
+      if (glbPaths.length === 0) continue;
+
+      const storageKeys = glbPaths
+        .map((absoluteFilePath) => toStorageKeyFromLocalPath(localRoot, absoluteFilePath))
+        .filter((value): value is string => typeof value === "string" && value.length > 0);
+      if (storageKeys.length === 0) continue;
+
+      const urls = (
+        await Promise.all(storageKeys.map((storageKey) => safeGetSignedDownloadUrl(storageKey)))
+      ).filter((value): value is string => typeof value === "string" && value.length > 0);
+
+      if (urls.length > 0) {
+        return toUniqueStrings(urls);
+      }
+    } catch {
+      // Keep searching candidates and fall back to artifact metadata.
+    }
+  }
+
+  return [];
+}
+
+function buildViewerHref(projectId: string, payload: { artifactId?: string; nodeId?: string }) {
+  const params = new URLSearchParams();
+  if (payload.artifactId) params.set("artifactId", payload.artifactId);
+  if (payload.nodeId) params.set("nodeId", payload.nodeId);
+  const query = params.toString();
+  return query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
+}
 
 export default async function ViewerPage({
   params,
   searchParams
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ artifactId?: string }>;
+  searchParams: Promise<{ artifactId?: string; nodeId?: string }>;
 }) {
   const { projectId } = await params;
-  const { artifactId } = await searchParams;
+  const { artifactId, nodeId } = await searchParams;
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) {
@@ -42,7 +185,14 @@ export default async function ViewerPage({
     })
   );
 
-  const selectedArtifact = artifacts.find((a) => a.id === artifactId) ?? artifacts[0] ?? null;
+  const scopedArtifacts = nodeId ? artifacts.filter((artifact) => artifact.nodeId === nodeId) : [];
+  const artifactList = scopedArtifacts.length > 0 ? scopedArtifacts : artifacts;
+  const selectedArtifact =
+    artifactList.find((artifact) => artifact.id === artifactId) ??
+    (artifactId ? artifacts.find((artifact) => artifact.id === artifactId) ?? null : null) ??
+    artifactList[0] ??
+    null;
+  const activeNodeScope = scopedArtifacts.length > 0 ? (nodeId ?? selectedArtifact?.nodeId ?? null) : null;
   const selectedRenderer = selectedArtifact
     ? selectViewerRenderer({
         kind: selectedArtifact.kind,
@@ -60,6 +210,7 @@ export default async function ViewerPage({
         byteSize: number;
         storageKey: string;
         filename: string;
+        additionalSceneUrls: string[];
       }
     | null = null;
   let storageIssue:
@@ -85,16 +236,41 @@ export default async function ViewerPage({
           description: "Could not generate signed URL from configured S3/MinIO endpoint."
         };
       } else {
+        const artifactMeta = selectedArtifact.meta as Record<string, unknown> | null;
+        const metadataAdditionalSceneKeys =
+          artifactMeta && Array.isArray(artifactMeta.meshObjectStorageKeys)
+            ? artifactMeta.meshObjectStorageKeys.filter(
+                (value): value is string => typeof value === "string" && value.length > 0
+              )
+            : [];
+        const manifestAdditionalSceneUrls =
+          selectedArtifact.kind === "mesh_glb"
+            ? await resolveAdditionalSceneUrlsFromManifest({
+                projectId: project.id,
+                projectName: project.name,
+                runId: selectedArtifact.runId,
+                nodeId: selectedArtifact.nodeId
+              })
+            : [];
+        const metadataAdditionalSceneUrls = (
+          await Promise.all(metadataAdditionalSceneKeys.map(async (key) => safeGetSignedDownloadUrl(key)))
+        ).filter((value): value is string => typeof value === "string" && value.length > 0);
+        const additionalSceneUrls = toUniqueStrings([
+          ...manifestAdditionalSceneUrls,
+          ...metadataAdditionalSceneUrls
+        ]);
+
         initialArtifact = {
           id: selectedArtifact.id,
           kind: selectedArtifact.kind,
           url: signedUrl,
           mimeType: selectedArtifact.mimeType,
-          meta: selectedArtifact.meta as Record<string, unknown> | null,
+          meta: artifactMeta,
           byteSize: selectedArtifact.byteSize,
           storageKey: selectedArtifact.storageKey,
+          additionalSceneUrls,
           filename:
-            ((selectedArtifact.meta as Record<string, unknown> | null)?.filename as string | undefined) ??
+            (artifactMeta?.filename as string | undefined) ??
             selectedArtifact.storageKey.split("/").pop() ??
             selectedArtifact.id
         };
@@ -107,6 +283,9 @@ export default async function ViewerPage({
       {selectedArtifact ? (
         <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 panel-blur p-3">
           <Badge className="rounded-full border border-border/70 bg-background/65">{selectedArtifact.kind}</Badge>
+          {activeNodeScope ? (
+            <Badge className="rounded-full border border-border/70 bg-background/65">Node {activeNodeScope}</Badge>
+          ) : null}
           {selectedRenderer ? (
             <Badge className="rounded-full border border-border/70 bg-background/65">
               {selectedRenderer === "babylon-gs" ? "Babylon GS" : "Three.js"}
@@ -122,14 +301,21 @@ export default async function ViewerPage({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-[320px] rounded-xl border-border/70 bg-background/95 p-1">
                 <ScrollArea className="h-[40vh]">
-                  {artifacts.map((artifact) => (
+                  {artifactList.map((artifact) => (
                     <DropdownMenuItem key={artifact.id} asChild className="rounded-lg">
-                      <Link href={`/app/p/${projectId}/viewer?artifactId=${artifact.id}`}>
+                      <Link
+                        href={buildViewerHref(projectId, {
+                          artifactId: artifact.id,
+                          nodeId: activeNodeScope ?? undefined
+                        })}
+                      >
                         <span className="inline-flex min-w-0 items-center gap-2">
                           <Badge variant={artifact.id === selectedArtifact.id ? "default" : "secondary"} className="rounded-full">
                             {artifact.kind}
                           </Badge>
-                          <span className="truncate text-xs text-muted-foreground">{artifact.id}</span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {new Date(artifact.createdAt).toLocaleString()} · {artifact.id}
+                          </span>
                         </span>
                       </Link>
                     </DropdownMenuItem>

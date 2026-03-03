@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 
 import { prisma } from "@/lib/db";
+import { buildProjectUploadsPrefix, resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedUploadUrl } from "@/lib/storage/s3";
 
 let uploadAssetTableExists: boolean | null = null;
@@ -10,15 +11,6 @@ let loggedMissingUploadAssetTable = false;
 
 function sanitizeFilename(filename: string) {
   return filename.replace(/[^a-zA-Z0-9_.-]/g, "_");
-}
-
-function slugifyProjectName(name: string) {
-  const slug = name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "project";
 }
 
 async function canPersistUploadAsset() {
@@ -56,8 +48,11 @@ export async function POST(req: NextRequest) {
     where: { id: projectId },
     select: { id: true, name: true }
   });
-  const projectSlug = project ? slugifyProjectName(project.name) : "shared";
-  const key = `projects/${projectId}/${projectSlug}/images/${Date.now()}_${safeFilename}`;
+  const projectSlug = resolveProjectStorageSlug({
+    projectName: project?.name,
+    projectId
+  });
+  const key = `${buildProjectUploadsPrefix({ projectSlug })}/${projectId}/images/${Date.now()}_${safeFilename}`;
   const uploadUrl = await safeGetSignedUploadUrl(key, contentType);
   const directUploadUrl = uploadUrl ? null : `/api/storage/object?key=${encodeURIComponent(key)}`;
 
