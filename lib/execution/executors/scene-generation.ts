@@ -162,6 +162,12 @@ function resolveScriptPath(repoRoot: string) {
   return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured);
 }
 
+function resolveGaussianScriptPath(repoRoot: string) {
+  const configured = process.env.SAM3D_WEB_GAUSSIAN_SCRIPT?.trim();
+  if (!configured) return path.join(repoRoot, "inference_for_webapp_gaussian.py");
+  return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured);
+}
+
 function resolveSingleMaskScriptPath(repoRoot: string) {
   const configured = process.env.SAM3D_WEB_SINGLE_MASK_SCRIPT?.trim();
   if (!configured) return path.join(repoRoot, "inference_for_webapp_per_object_single_mask.py");
@@ -344,7 +350,7 @@ async function buildSceneCommand(params: {
   outputDir: string;
 }) {
   const repoRoot = getSam3dRepoRoot();
-  const scriptPath = resolveScriptPath(repoRoot);
+  const scriptPath = params.mode === "gaussian" ? resolveGaussianScriptPath(repoRoot) : resolveScriptPath(repoRoot);
   const base = buildPythonInvocation(scriptPath);
   const configName = await resolveSam3dConfigName(typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig());
   const settings = resolveSceneSettings(params.ctx);
