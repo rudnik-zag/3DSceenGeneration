@@ -397,37 +397,39 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               ))}
             </select>
           </div>
-          <div className="space-y-1">
-            <p className="text-[10px] text-zinc-400">Mask Execution</p>
-            <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-black/35 p-1">
-              <button
-                type="button"
-                onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", true)}
-                className={cn(
-                  "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
-                  sceneRunAllMasksInOneProcess
-                    ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
-                    : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
-                )}
-                title="One process handles all masks."
-              >
-                All masks
-              </button>
-              <button
-                type="button"
-                onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
-                className={cn(
-                  "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
-                  !sceneRunAllMasksInOneProcess
-                    ? "border border-amber-400/40 bg-amber-500/15 text-amber-200"
-                    : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
-                )}
-                title="Run one process per mask to reduce OOM risk."
-              >
-                Per mask
-              </button>
+          {sceneFormat === "mesh_glb" ? (
+            <div className="space-y-1">
+              <p className="text-[10px] text-zinc-400">Mask Execution</p>
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-black/35 p-1">
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", true)}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    sceneRunAllMasksInOneProcess
+                      ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+                      : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                  )}
+                  title="One process handles all masks."
+                >
+                  All masks
+                </button>
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    !sceneRunAllMasksInOneProcess
+                      ? "border border-amber-400/40 bg-amber-500/15 text-amber-200"
+                      : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                  )}
+                  title="Run one process per mask to reduce OOM risk."
+                >
+                  Per mask
+                </button>
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       ) : null}
 
