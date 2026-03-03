@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { promises as fs } from "fs";
+import os from "os";
 import path from "path";
 
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, ResolvedArtifactInput } from "@/lib/execution/contracts";
@@ -61,12 +62,25 @@ interface SceneManifest {
   masks_count?: number;
   image_path?: string;
   masks_dir?: string;
+  input_paths?: {
+    image?: string;
+    mask?: string;
+    pipeline_config?: string;
+  };
   output_paths?: {
     output_dir?: string;
     scene?: string;
     mesh_parts_dir?: string;
     mesh_objects_dir?: string;
   };
+  run_config?: Record<string, unknown>;
+  objects?: Array<{
+    index: number;
+    mask_name: string;
+    mask_path: string;
+    transformed_object_path: string;
+    mesh_part_path?: string;
+  }>;
   created_at?: string;
 }
 
@@ -590,91 +604,118 @@ async function executePerMaskReal(params: {
   const masksToProcess = maxObjects ? sortedMasks.slice(0, maxObjects) : sortedMasks;
   const aggregateStdout: string[] = [];
   const aggregateStderr: string[] = [];
-  const perMaskRoot = path.join(params.outputDir, "per_mask");
+  await fs.rm(path.join(params.outputDir, "per_mask"), { recursive: true, force: true }).catch(() => {
+    // legacy cleanup from older executor versions
+  });
+  const perMaskRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sam3d-per-mask-"));
   const meshPartsDir = path.join(params.outputDir, "mesh_parts");
   const meshObjectsDir = path.join(params.outputDir, "mesh_objects_transformed");
-  await fs.mkdir(perMaskRoot, { recursive: true });
   await fs.mkdir(meshPartsDir, { recursive: true });
   await fs.mkdir(meshObjectsDir, { recursive: true });
 
   let keptCount = 0;
   let firstScenePath: string | null = null;
+  let mergedRunConfig: Record<string, unknown> | null = null;
+  const mergedObjects: NonNullable<SceneManifest["objects"]> = [];
+  try {
+    for (let index = 0; index < masksToProcess.length; index += 1) {
+      const maskName = masksToProcess[index];
+      const maskPath = path.join(params.masksDir, maskName);
+      const maskOutDir = path.join(perMaskRoot, `mask_${index.toString().padStart(4, "0")}`);
+      await fs.mkdir(maskOutDir, { recursive: true });
 
-  for (let index = 0; index < masksToProcess.length; index += 1) {
-    const maskName = masksToProcess[index];
-    const maskPath = path.join(params.masksDir, maskName);
-    const maskOutDir = path.join(perMaskRoot, `mask_${index.toString().padStart(4, "0")}`);
-    await fs.mkdir(maskOutDir, { recursive: true });
-
-    const command = await buildSingleMaskSceneCommand({
-      ctx: params.ctx,
-      mode: params.mode,
-      imagePath: params.imagePath,
-      maskPath,
-      outputDir: maskOutDir,
-      maskIndex: index
-    });
-    const commandLine = formatCommandLine(command.command, command.args);
-    console.log(
-      `[scene-generation] runId=${params.ctx.runId} nodeId=${params.ctx.nodeId} mode=${params.mode} execution=real per-mask index=${index} cmd=${commandLine}`
-    );
-
-    try {
-      const processResult = await runProcess(command.command, command.args, command.cwd);
-      aggregateStdout.push(
-        `[per-mask ${index}] ${processResult.stdout.trim()}`.trim()
-      );
-      if (processResult.stderr.trim().length > 0) {
-        aggregateStderr.push(`[per-mask ${index}] ${processResult.stderr.trim()}`.trim());
-      }
-
-      const perMaskManifest = await loadManifest(maskOutDir, processResult.stdout);
-      const perMaskScenePath =
-        perMaskManifest.scene_path ?? path.join(maskOutDir, params.mode === "mesh" ? "scene.glb" : "scene.ply");
-
-      await fs.access(perMaskScenePath);
-      const copiedScenePath = path.join(
-        meshObjectsDir,
-        `object_${index.toString().padStart(3, "0")}_posed.glb`
-      );
-      await fs.copyFile(perMaskScenePath, copiedScenePath);
-      const sourceMeshPart = path.join(maskOutDir, "mesh_parts", `object_${index.toString().padStart(3, "0")}.glb`);
-      const targetMeshPart = path.join(meshPartsDir, `object_${index.toString().padStart(3, "0")}.glb`);
-      await fs.copyFile(sourceMeshPart, targetMeshPart).catch(() => {
-        // Some runs may not produce per-mask mesh part files.
+      const command = await buildSingleMaskSceneCommand({
+        ctx: params.ctx,
+        mode: params.mode,
+        imagePath: params.imagePath,
+        maskPath,
+        outputDir: maskOutDir,
+        maskIndex: index
       });
-
-      if (!firstScenePath) {
-        firstScenePath = copiedScenePath;
-      }
-      keptCount += 1;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      pushWarningUnique(
-        params.warnings,
-        `Per-mask subprocess failed for ${maskName}: ${truncateLine(message, 360)}`
+      const commandLine = formatCommandLine(command.command, command.args);
+      console.log(
+        `[scene-generation] runId=${params.ctx.runId} nodeId=${params.ctx.nodeId} mode=${params.mode} execution=real per-mask index=${index} cmd=${commandLine}`
       );
-      aggregateStderr.push(`[per-mask ${index}] ERROR: ${message}`);
+
+      try {
+        const processResult = await runProcess(command.command, command.args, command.cwd);
+        aggregateStdout.push(
+          `[per-mask ${index}] ${processResult.stdout.trim()}`.trim()
+        );
+        if (processResult.stderr.trim().length > 0) {
+          aggregateStderr.push(`[per-mask ${index}] ${processResult.stderr.trim()}`.trim());
+        }
+
+        const perMaskManifest = await loadManifest(maskOutDir, processResult.stdout);
+        if (!mergedRunConfig && perMaskManifest.run_config && typeof perMaskManifest.run_config === "object") {
+          mergedRunConfig = perMaskManifest.run_config;
+        }
+        const perMaskScenePath =
+          perMaskManifest.scene_path ?? path.join(maskOutDir, params.mode === "mesh" ? "scene.glb" : "scene.ply");
+
+        await fs.access(perMaskScenePath);
+        const copiedScenePath = path.join(
+          meshObjectsDir,
+          `object_${index.toString().padStart(3, "0")}_posed.glb`
+        );
+        await fs.copyFile(perMaskScenePath, copiedScenePath);
+        const sourceMeshPart = path.join(maskOutDir, "mesh_parts", `object_${index.toString().padStart(3, "0")}.glb`);
+        const targetMeshPart = path.join(meshPartsDir, `object_${index.toString().padStart(3, "0")}.glb`);
+        let meshPartPath: string | undefined;
+        await fs.copyFile(sourceMeshPart, targetMeshPart).then(() => {
+          meshPartPath = targetMeshPart;
+        }).catch(() => {
+          // Some runs may not produce per-mask mesh part files.
+        });
+
+        if (!firstScenePath) {
+          firstScenePath = copiedScenePath;
+        }
+        mergedObjects.push({
+          index,
+          mask_name: maskName,
+          mask_path: maskPath,
+          transformed_object_path: copiedScenePath,
+          mesh_part_path: meshPartPath
+        });
+        keptCount += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        pushWarningUnique(
+          params.warnings,
+          `Per-mask subprocess failed for ${maskName}: ${truncateLine(message, 360)}`
+        );
+        aggregateStderr.push(`[per-mask ${index}] ERROR: ${message}`);
+      }
     }
+  } finally {
+    await fs.rm(perMaskRoot, { recursive: true, force: true }).catch(() => {
+      // ignore temp cleanup failures
+    });
   }
 
   if (!firstScenePath || keptCount === 0) {
     throw new Error("SceneGeneration per-mask mode produced no valid mesh objects.");
   }
 
+  const scenePath = path.join(params.outputDir, "scene.glb");
+  await fs.copyFile(firstScenePath, scenePath);
+
   const composedManifest: SceneManifest = {
     mode: params.mode,
     config: typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig(),
-    scene_path: firstScenePath,
+    scene_path: scenePath,
     masks_count: keptCount,
     image_path: params.imagePath,
     masks_dir: params.masksDir,
     output_paths: {
       output_dir: params.outputDir,
-      scene: firstScenePath,
+      scene: scenePath,
       mesh_parts_dir: meshPartsDir,
       mesh_objects_dir: meshObjectsDir
     },
+    run_config: mergedRunConfig ?? undefined,
+    objects: mergedObjects,
     created_at: new Date().toISOString()
   };
   await fs.writeFile(
