@@ -1611,7 +1611,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     }
     const query = params.toString();
     const href = query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
-    window.open(href, "_blank");
+    window.location.assign(href);
   };
 
   const stableNodeRunHandler = useCallback((nodeId: string) => {
@@ -2115,7 +2115,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                     <Button
                                       size="sm"
                                       className="rounded-lg"
-                                      onClick={() => window.open(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`, "_blank")}
+                                      onClick={() => window.location.assign(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`)}
                                     >
                                       Open viewer
                                     </Button>

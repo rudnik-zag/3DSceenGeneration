@@ -118,9 +118,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
                           size="sm"
                           variant="outline"
                           className="rounded-lg"
-                          onClick={() =>
-                            window.open(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`, "_blank")
-                          }
+                          onClick={() => window.location.assign(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`)}
                         >
                           {artifact.kind}
                         </Button>

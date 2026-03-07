@@ -1268,7 +1268,7 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
 
   return (
     <div className="relative h-full w-full overflow-hidden rounded-none bg-[#04060d] md:rounded-2xl md:border md:border-border/70">
-      <div className="absolute left-3 top-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/50 p-2 backdrop-blur-sm">
+      <div className="absolute left-3 top-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/50 p-2 backdrop-blur-sm md:right-[312px]">
         <Button size="sm" variant={navMode === "orbit" ? "default" : "outline"} className="rounded-xl" onClick={() => setNavMode("orbit")}>
           <Navigation className="mr-1 h-4 w-4" />
           Orbit
@@ -1347,104 +1347,112 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         </div>
       </div>
 
-      <div className="absolute right-3 top-3 z-30 rounded-xl border border-border/70 bg-black/50 px-3 py-2 text-xs text-zinc-200 backdrop-blur-sm">
-        <div className="font-medium">HUD</div>
-        <div className="mt-1 space-y-0.5">
-          <div>FPS: {fps}</div>
-          <div>Triangles: {rendererRef.current?.info.render.triangles ?? 0}</div>
-          <div>Draw calls: {rendererRef.current?.info.render.calls ?? 0}</div>
-          <div>Loaded tiles: {hud.loadedTiles}</div>
-          <div>Loaded splats: {hud.loadedSplats.toLocaleString()}</div>
-          <div>Loaded MB: {hud.loadedMB.toFixed(1)}</div>
-          <div>
-            LOD: {hud.activeLodDistribution["0"]}/{hud.activeLodDistribution["1"]}/{hud.activeLodDistribution["2"]}
-          </div>
-          <div>Selected: {selectedName ?? "none"}</div>
-        </div>
-      </div>
-
-      <div className="absolute right-3 top-44 z-30 w-64 rounded-xl border border-border/70 bg-black/50 p-2 backdrop-blur-sm">
-        <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
-        <div className="max-h-48 space-y-1 overflow-auto pr-1">
-          {meshItems.length === 0 ? (
-            <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No mesh objects</div>
-          ) : (
-            meshItems.map((item) => (
-              <Button
-                key={item.id}
-                size="sm"
-                variant={selectedName === item.id ? "default" : "outline"}
-                className="h-8 w-full justify-start truncate rounded-md"
-                onClick={() => {
-                  const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
-                  setSelectedObject(target);
-                }}
-              >
-                {item.label}
-              </Button>
-            ))
-          )}
-        </div>
-
-        <div className="mt-2 rounded-lg border border-border/50 bg-background/30 p-2">
-          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-300">Transform</div>
-          {transformDraft ? (
-            <div className="space-y-2">
-              {(["position", "rotation", "scale"] as const).map((section) => (
-                <div key={section}>
-                  <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">{section}</div>
-                  <div className="grid grid-cols-3 gap-1">
-                    {([0, 1, 2] as const).map((axisIndex) => (
-                      <Input
-                        key={`${section}-${axisIndex}`}
-                        className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
-                        value={transformDraft[section][axisIndex]}
-                        onChange={(event) =>
-                          updateTransformDraftValue(section, axisIndex, event.target.value)
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-              ))}
-              <div className="grid grid-cols-2 gap-1">
-                <Button size="sm" className="h-7 rounded-md text-xs" onClick={applyTransformDraft}>
-                  Apply
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 rounded-md text-xs"
-                  onClick={() => syncTransformDraft(selectedRef.current)}
-                >
-                  Reset
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 rounded-md text-xs col-span-2"
-                  onClick={fitSelection}
-                  disabled={!selectedRef.current}
-                >
-                  Focus
-                </Button>
+      <aside className="absolute right-3 top-3 bottom-3 z-30 w-[300px] rounded-2xl border border-border/70 bg-black/55 p-2 backdrop-blur-md">
+        <div className="flex h-full flex-col gap-2">
+          <section className="rounded-xl border border-border/60 bg-background/30 p-3 text-xs text-zinc-200">
+            <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">HUD</div>
+            <div className="mt-2 space-y-1">
+              <div>FPS: {fps}</div>
+              <div>Triangles: {rendererRef.current?.info.render.triangles ?? 0}</div>
+              <div>Draw calls: {rendererRef.current?.info.render.calls ?? 0}</div>
+              <div>Loaded tiles: {hud.loadedTiles}</div>
+              <div>Loaded splats: {hud.loadedSplats.toLocaleString()}</div>
+              <div>Loaded MB: {hud.loadedMB.toFixed(1)}</div>
+              <div>
+                LOD: {hud.activeLodDistribution["0"]}/{hud.activeLodDistribution["1"]}/{hud.activeLodDistribution["2"]}
               </div>
-              <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
-                {transformDebug}
-              </div>
+              <div>Selected: {selectedName ?? "none"}</div>
             </div>
-          ) : (
-            <div className="text-[11px] text-zinc-500">Select an object to edit transform.</div>
-          )}
-        </div>
+          </section>
 
-        {isPersistableArtifact ? (
-          <div className="mt-2 text-[11px] text-zinc-400">
-            Transforms: {persistState}
-            {persistMessage ? ` • ${persistMessage}` : ""}
+          <section className="min-h-0 rounded-xl border border-border/60 bg-background/30 p-3">
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
+            <div className="max-h-[180px] space-y-1 overflow-auto pr-1">
+              {meshItems.length === 0 ? (
+                <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No mesh objects</div>
+              ) : (
+                meshItems.map((item) => (
+                  <Button
+                    key={item.id}
+                    size="sm"
+                    variant={selectedName === item.id ? "default" : "outline"}
+                    className="h-8 w-full justify-start truncate rounded-md"
+                    onClick={() => {
+                      const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
+                      setSelectedObject(target);
+                    }}
+                  >
+                    {item.label}
+                  </Button>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="min-h-0 rounded-xl border border-border/60 bg-background/30 p-3">
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Transform</div>
+            {transformDraft ? (
+              <div className="space-y-2">
+                {(["position", "rotation", "scale"] as const).map((section) => (
+                  <div key={section}>
+                    <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">{section}</div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {([0, 1, 2] as const).map((axisIndex) => (
+                        <Input
+                          key={`${section}-${axisIndex}`}
+                          className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                          value={transformDraft[section][axisIndex]}
+                          onChange={(event) =>
+                            updateTransformDraftValue(section, axisIndex, event.target.value)
+                          }
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <div className="grid grid-cols-2 gap-1">
+                  <Button size="sm" className="h-7 rounded-md text-xs" onClick={applyTransformDraft}>
+                    Apply
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-md text-xs"
+                    onClick={() => syncTransformDraft(selectedRef.current)}
+                  >
+                    Reset
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-md text-xs col-span-2"
+                    onClick={fitSelection}
+                    disabled={!selectedRef.current}
+                  >
+                    Focus
+                  </Button>
+                </div>
+                <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
+                  {transformDebug}
+                </div>
+              </div>
+            ) : (
+              <div className="text-[11px] text-zinc-500">Select an object to edit transform.</div>
+            )}
+            {isPersistableArtifact ? (
+              <div className="mt-2 text-[11px] text-zinc-400">
+                Transforms: {persistState}
+                {persistMessage ? ` • ${persistMessage}` : ""}
+              </div>
+            ) : null}
+          </section>
+
+          <div className="mt-auto rounded-lg border border-white/10 bg-black/55 px-2 py-1 text-[11px] text-zinc-300">
+            <Camera className="mr-1 inline h-3.5 w-3.5" />
+            Unified viewer
           </div>
-        ) : null}
-      </div>
+        </div>
+      </aside>
 
       {loading ? (
         <div className="absolute left-3 top-20 z-30 rounded-xl border border-border/70 bg-black/50 px-3 py-2 text-sm text-zinc-200 backdrop-blur-sm">
@@ -1459,10 +1467,6 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
 
       <div ref={containerRef} className="h-full w-full" />
 
-      <div className="pointer-events-none absolute bottom-3 right-3 z-20 rounded-lg border border-white/10 bg-black/55 px-2 py-1 text-[11px] text-zinc-300">
-        <Camera className="mr-1 inline h-3.5 w-3.5" />
-        Single unified viewer
-      </div>
     </div>
   );
 }
