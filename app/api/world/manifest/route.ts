@@ -49,6 +49,16 @@ function uniqueById<T extends { id: string }>(entries: T[]) {
   return ordered;
 }
 
+function toAbsoluteUrlMaybe(url: string | null, req: NextRequest): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  try {
+    return new URL(url, req.nextUrl.origin).toString();
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(req: NextRequest) {
   const artifactId = req.nextUrl.searchParams.get("artifactId")?.trim() ?? "";
   if (!artifactId) {
@@ -107,7 +117,8 @@ export async function GET(req: NextRequest) {
 
   const meshes: WorldManifestMeshEntry[] = [];
   for (const meshArtifact of meshArtifacts) {
-    const url = await safeGetSignedDownloadUrl(meshArtifact.storageKey);
+    const rawUrl = await safeGetSignedDownloadUrl(meshArtifact.storageKey);
+    const url = toAbsoluteUrlMaybe(rawUrl, req);
     if (!url) continue;
     meshes.push({
       id: `mesh-${meshArtifact.id}`,
@@ -120,10 +131,10 @@ export async function GET(req: NextRequest) {
 
   const splats: WorldManifestSplatEntry[] = [];
   for (const splatArtifact of splatArtifacts) {
-    const sourceUrl = await safeGetSignedDownloadUrl(splatArtifact.storageKey);
+    const sourceUrl = toAbsoluteUrlMaybe(await safeGetSignedDownloadUrl(splatArtifact.storageKey), req);
     const tilesetArtifact = latestTilesetBySourceArtifact.get(splatArtifact.id) ?? null;
     const tilesetUrl = tilesetArtifact
-      ? await safeGetSignedDownloadUrl(tilesetArtifact.storageKey)
+      ? `${req.nextUrl.origin}/api/storage/object?key=${encodeURIComponent(tilesetArtifact.storageKey)}`
       : null;
     const tilesetMeta = tilesetArtifact ? parseTilesetMeta(tilesetArtifact) : null;
     splats.push({

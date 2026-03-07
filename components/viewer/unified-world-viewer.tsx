@@ -14,7 +14,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
-import { SplatTilesetManager, SplatTilesetManagerStats } from "@/lib/viewer/splat-tileset-manager";
 
 interface WorldManifest {
   artifactId?: string;
@@ -56,9 +55,18 @@ interface SplatHandle {
   object: THREE.Object3D;
   dispose?: () => void;
   update?: () => void;
+  splatCount?: number;
 }
 
-const DEFAULT_STATS: SplatTilesetManagerStats = {
+interface ViewerHudStats {
+  visibleTiles: number;
+  loadedTiles: number;
+  loadedSplats: number;
+  loadedMB: number;
+  activeLodDistribution: { "0": number; "1": number; "2": number };
+}
+
+const DEFAULT_STATS: ViewerHudStats = {
   visibleTiles: 0,
   loadedTiles: 0,
   loadedSplats: 0,
@@ -88,7 +96,6 @@ const PLY_3DGS_PROPERTIES = [
 
 const PLY_3DGS_RECORD_SIZE_BYTES = 68; // 17 float32 values
 const SH_C0 = 0.28209479177387814;
-const MAX_DIRECT_GAUSSIAN_VERTEX_COUNT = 1_250_000;
 
 interface ParsedPlyHeader {
   vertexCount: number;
@@ -234,6 +241,84 @@ async function tryLoad3dgsBinaryPlyGeometry(url: string): Promise<THREE.BufferGe
   return geometry;
 }
 
+function hashU32(value: number): number {
+  let h = value >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x7feb352d);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x846ca68b);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+function replaceVertexCountInPlyHeader(rawHeader: string, nextVertexCount: number): string {
+  return rawHeader.replace(/element\s+vertex\s+\d+/m, `element vertex ${nextVertexCount}`);
+}
+
+async function buildDownsampled3dgsPlyBlob(
+  sourceUrl: string,
+  keepFraction: number
+): Promise<{ blobUrl: string; keptVertices: number; sourceVertices: number } | null> {
+  const response = await fetch(sourceUrl, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Failed to download PLY: ${response.status} ${response.statusText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+  const maxHeaderBytes = Math.min(bytes.byteLength, 256 * 1024);
+  const headerRaw = new TextDecoder("utf-8").decode(bytes.subarray(0, maxHeaderBytes));
+  const parsedHeader = parse3dgsHeader(headerRaw);
+  if (!parsedHeader) return null;
+
+  const sourceVertices = parsedHeader.vertexCount;
+  if (sourceVertices <= 0) return null;
+
+  if (keepFraction >= 0.9999) {
+    return {
+      blobUrl: URL.createObjectURL(new Blob([arrayBuffer], { type: "application/octet-stream" })),
+      keptVertices: sourceVertices,
+      sourceVertices
+    };
+  }
+
+  const dataStart = parsedHeader.dataOffset;
+  const sourceData = bytes.subarray(dataStart);
+  const requiredBytes = sourceVertices * PLY_3DGS_RECORD_SIZE_BYTES;
+  if (sourceData.byteLength < requiredBytes) {
+    throw new Error("PLY payload is truncated for expected 3DGS vertex count.");
+  }
+
+  const threshold = Math.max(1, Math.min(0xffffffff, Math.floor(keepFraction * 0xffffffff)));
+  let keptVertices = 0;
+  for (let i = 0; i < sourceVertices; i += 1) {
+    if (hashU32(i) <= threshold) keptVertices += 1;
+  }
+  if (keptVertices <= 0) keptVertices = 1;
+
+  const baseHeaderEnd = headerRaw.match(/end_header(?:\r?\n|$)/);
+  if (!baseHeaderEnd || baseHeaderEnd.index === undefined) {
+    throw new Error("Invalid PLY header.");
+  }
+  const originalHeader = headerRaw.slice(0, baseHeaderEnd.index + baseHeaderEnd[0].length);
+  const nextHeaderText = replaceVertexCountInPlyHeader(originalHeader, keptVertices);
+  const nextHeaderBytes = new TextEncoder().encode(nextHeaderText);
+  const out = new Uint8Array(nextHeaderBytes.byteLength + keptVertices * PLY_3DGS_RECORD_SIZE_BYTES);
+  out.set(nextHeaderBytes, 0);
+  let writeOffset = nextHeaderBytes.byteLength;
+
+  for (let i = 0; i < sourceVertices; i += 1) {
+    if (hashU32(i) > threshold) continue;
+    const recordStart = i * PLY_3DGS_RECORD_SIZE_BYTES;
+    const recordEnd = recordStart + PLY_3DGS_RECORD_SIZE_BYTES;
+    out.set(sourceData.subarray(recordStart, recordEnd), writeOffset);
+    writeOffset += PLY_3DGS_RECORD_SIZE_BYTES;
+  }
+
+  const blobUrl = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
+  return { blobUrl, keptVertices, sourceVertices };
+}
+
 function normalizeMeshUrlForDedup(url: string): string {
   try {
     const parsed = new URL(url, "http://localhost");
@@ -287,9 +372,8 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
   const clockRef = useRef(new THREE.Clock());
   const keysRef = useRef<Set<string>>(new Set());
   const splatHandlesRef = useRef(new Set<SplatHandle>());
-  const managerRef = useRef<SplatTilesetManager | null>(null);
-  const managerUpdateInFlightRef = useRef(false);
-  const hudRef = useRef<SplatTilesetManagerStats>(DEFAULT_STATS);
+  const tempBlobUrlsRef = useRef<string[]>([]);
+  const hudRef = useRef<ViewerHudStats>(DEFAULT_STATS);
   const fpsCounterRef = useRef({ acc: 0, frames: 0, fps: 0 });
   const pausedRef = useRef(false);
   const navModeRef = useRef<NavigationMode>("orbit");
@@ -297,7 +381,9 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [flySpeed, setFlySpeed] = useState([4]);
-  const [splatLoadProfile, setSplatLoadProfile] = useState<SplatLoadProfile>("balanced");
+  const [splatLoadProfile, setSplatLoadProfile] = useState<SplatLoadProfile>("full");
+  const [splatDensityDraft, setSplatDensityDraft] = useState([100]);
+  const [splatDensityApplied, setSplatDensityApplied] = useState(100);
   const [hud, setHud] = useState(DEFAULT_STATS);
   const [fps, setFps] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -309,18 +395,10 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
   const [persistState, setPersistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [persistMessage, setPersistMessage] = useState<string | null>(null);
 
-  const tilesetUrls = useMemo(
-    () =>
-      (manifest.splats ?? [])
-        .map((entry) => entry.tilesetUrl)
-        .filter((value): value is string => typeof value === "string" && value.length > 0),
-    [manifest.splats]
-  );
-
   const directSplats = useMemo(
     () =>
       (manifest.splats ?? [])
-        .filter((entry) => !entry.tilesetUrl && typeof entry.sourceUrl === "string" && entry.sourceUrl.length > 0)
+        .filter((entry) => typeof entry.sourceUrl === "string" && entry.sourceUrl.length > 0)
         .map((entry) => ({
           url: entry.sourceUrl as string,
           formatHint: entry.formatHint ?? null
@@ -341,6 +419,18 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
   useEffect(() => {
     flySpeedRef.current = flySpeed[0] ?? 4;
   }, [flySpeed]);
+
+  const updateHudFromHandles = useCallback(() => {
+    let loadedSplats = 0;
+    for (const handle of splatHandlesRef.current) {
+      loadedSplats += handle.splatCount ?? 0;
+    }
+    hudRef.current = {
+      ...DEFAULT_STATS,
+      loadedSplats,
+      loadedMB: (loadedSplats * PLY_3DGS_RECORD_SIZE_BYTES) / (1024 * 1024)
+    };
+  }, []);
 
   const refreshMeshItems = useCallback(() => {
     const byId = new Map<string, MeshListItem>();
@@ -770,29 +860,47 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    const createSplatHandleFromUrl = async (
+    type DropInViewerObject = THREE.Object3D & {
+      addSplatScene?: (path: string, options?: Record<string, unknown>) => Promise<void>;
+      addSplatScenes?: (entries: Array<Record<string, unknown>>) => Promise<void>;
+      removeSplatScene?: (index: number, showLoadingUI?: boolean) => Promise<void>;
+      dispose?: () => void;
+      update?: () => void;
+    };
+
+    const inferSceneFormat = (
+      sceneFormatEnum: Record<string, number>,
       url: string,
       formatHint?: "ply" | "splat" | "ksplat" | "spz" | null
-    ): Promise<SplatHandle> => {
+    ) => {
+      const hint = (formatHint ?? "").toLowerCase();
+      if (hint === "ply" && typeof sceneFormatEnum.Ply === "number") return sceneFormatEnum.Ply;
+      if (hint === "ksplat" && typeof sceneFormatEnum.KSplat === "number") return sceneFormatEnum.KSplat;
+      if (hint === "splat" && typeof sceneFormatEnum.Splat === "number") return sceneFormatEnum.Splat;
+      if (hint === "spz" && typeof sceneFormatEnum.Spz === "number") return sceneFormatEnum.Spz;
+      const lower = url.toLowerCase();
+      if ((lower.endsWith(".ply") || lower.endsWith(".compressed.ply")) && typeof sceneFormatEnum.Ply === "number")
+        return sceneFormatEnum.Ply;
+      if (lower.endsWith(".ksplat") && typeof sceneFormatEnum.KSplat === "number") return sceneFormatEnum.KSplat;
+      if (lower.endsWith(".splat") && typeof sceneFormatEnum.Splat === "number") return sceneFormatEnum.Splat;
+      if (lower.endsWith(".spz") && typeof sceneFormatEnum.Spz === "number") return sceneFormatEnum.Spz;
+      return undefined;
+    };
+
+    const createDropInViewerObject = async (): Promise<{
+      object: DropInViewerObject;
+      sceneFormatEnum: Record<string, number>;
+    }> => {
       const module = (await getGaussianSplatsModule()) as Record<string, unknown>;
-      const DropInViewerCtor = module.DropInViewer as
-        | (new (options: Record<string, unknown>) => THREE.Object3D & {
-            addSplatScene?: (path: string, options?: Record<string, unknown>) => Promise<void>;
-            addSplatScenes?: (entries: Array<Record<string, unknown>>) => Promise<void>;
-            dispose?: () => void;
-            update?: () => void;
-          })
-        | undefined;
+      const DropInViewerCtor = module.DropInViewer as (new (options: Record<string, unknown>) => DropInViewerObject) | undefined;
       if (!DropInViewerCtor) {
         throw new Error("Gaussian splat renderer module does not expose DropInViewer.");
       }
+      const sceneFormatEnum = (module.SceneFormat ?? {}) as Record<string, number>;
       const sharedMemoryAllowed = typeof window !== "undefined" && window.crossOriginIsolated === true;
-      const SceneFormat = (module.SceneFormat ?? {}) as Record<string, number>;
       const object = new DropInViewerCtor({
         selfDrivenMode: false,
         useBuiltInControls: false,
-        // SharedArrayBuffer path requires cross-origin isolation (COOP/COEP).
-        // In standard Next dev mode it's usually false, so force non-shared worker mode.
         sharedMemoryForWorkers: sharedMemoryAllowed,
         gpuAcceleratedSort: sharedMemoryAllowed,
         enableSIMDInSort: sharedMemoryAllowed,
@@ -803,28 +911,20 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
       });
       object.renderOrder = 1;
       root.add(object);
-      const inferFormatEnum = () => {
-        const hint = (formatHint ?? "").toLowerCase();
-        if (hint === "ply" && typeof SceneFormat.Ply === "number") return SceneFormat.Ply;
-        if (hint === "ksplat" && typeof SceneFormat.KSplat === "number") return SceneFormat.KSplat;
-        if (hint === "splat" && typeof SceneFormat.Splat === "number") return SceneFormat.Splat;
-        if (hint === "spz" && typeof SceneFormat.Spz === "number") return SceneFormat.Spz;
-        const lower = url.toLowerCase();
-        if ((lower.endsWith(".ply") || lower.endsWith(".compressed.ply")) && typeof SceneFormat.Ply === "number")
-          return SceneFormat.Ply;
-        if (lower.endsWith(".ksplat") && typeof SceneFormat.KSplat === "number") return SceneFormat.KSplat;
-        if (lower.endsWith(".splat") && typeof SceneFormat.Splat === "number") return SceneFormat.Splat;
-        if (lower.endsWith(".spz") && typeof SceneFormat.Spz === "number") return SceneFormat.Spz;
-        return undefined;
-      };
-      const sceneFormat = inferFormatEnum();
+      return { object, sceneFormatEnum };
+    };
+
+    const createSplatHandleFromUrl = async (
+      url: string,
+      formatHint?: "ply" | "splat" | "ksplat" | "spz" | null
+    ): Promise<SplatHandle> => {
+      const { object, sceneFormatEnum } = await createDropInViewerObject();
+      const sceneFormat = inferSceneFormat(sceneFormatEnum, url, formatHint);
       const addOptions: Record<string, unknown> = {
         showLoadingUI: false,
         progressiveLoad: true
       };
-      if (sceneFormat !== undefined) {
-        addOptions.format = sceneFormat;
-      }
+      if (sceneFormat !== undefined) addOptions.format = sceneFormat;
 
       try {
         if (typeof object.addSplatScene === "function") {
@@ -834,29 +934,27 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         } else {
           throw new Error("DropInViewer does not support addSplatScene/addSplatScenes APIs.");
         }
-        // Some loader paths can resolve without throwing but still produce an empty payload.
-        // Guard that case so caller can fallback (e.g. point cloud fallback for PLY).
         if (!object.children || object.children.length === 0) {
           throw new Error("Gaussian scene loaded with no renderable content.");
         }
       } catch (error) {
         root.remove(object);
-        if (typeof object.dispose === "function") {
-          object.dispose();
-        }
+        object.dispose?.();
         throw error;
       }
 
       const handle: SplatHandle = {
         object,
         dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
-        update: typeof object.update === "function" ? () => object.update?.() : undefined
+        update: typeof object.update === "function" ? () => object.update?.() : undefined,
+        splatCount: 0
       };
       splatHandlesRef.current.add(handle);
+      updateHudFromHandles();
       return handle;
     };
 
-    const createPointCloudHandleFromPly = async (url: string): Promise<SplatHandle> => {
+    const createPointCloudHandleFromPly = async (url: string, vertexCountHint?: number): Promise<SplatHandle> => {
       let geometry: THREE.BufferGeometry | null = null;
       try {
         geometry = await tryLoad3dgsBinaryPlyGeometry(url);
@@ -891,9 +989,11 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         dispose: () => {
           points.geometry.dispose();
           material.dispose();
-        }
+        },
+        splatCount: vertexCountHint ?? (geometry.getAttribute("position")?.count ?? 0)
       };
       splatHandlesRef.current.add(handle);
+      updateHudFromHandles();
       return handle;
     };
 
@@ -901,14 +1001,27 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
       const inspected = await inspectPlyUrl(url);
       const is3dgs = Boolean(inspected?.is3dgs);
       const vertexCount = inspected?.vertexCount ?? 0;
-      const canAttemptGaussian =
-        is3dgs &&
-        (splatLoadProfile === "full" ||
-          (splatLoadProfile === "balanced" && vertexCount <= MAX_DIRECT_GAUSSIAN_VERTEX_COUNT));
+      if (is3dgs) {
+        const sliderFraction = Math.max(0.01, Math.min(1, splatDensityApplied / 100));
+        const profileLimit =
+          splatLoadProfile === "full" ? 1 : splatLoadProfile === "balanced" ? 0.5 : 0.15;
+        const keepFraction = Math.max(0.01, Math.min(sliderFraction, profileLimit));
+        let gaussianUrl = url;
+        let effectiveVertexCount = vertexCount;
+        if (keepFraction < 0.9999) {
+          const downsampled = await buildDownsampled3dgsPlyBlob(url, keepFraction);
+          if (downsampled) {
+            gaussianUrl = downsampled.blobUrl;
+            tempBlobUrlsRef.current.push(downsampled.blobUrl);
+            effectiveVertexCount = downsampled.keptVertices;
+          }
+        }
 
-      if (canAttemptGaussian) {
         try {
-          await createSplatHandleFromUrl(url, "ply");
+          const handle = await createSplatHandleFromUrl(gaussianUrl, "ply");
+          handle.splatCount = effectiveVertexCount > 0 ? effectiveVertexCount : handle.splatCount;
+          updateHudFromHandles();
+          setError(null);
           return;
         } catch (gaussianError) {
           const message =
@@ -916,37 +1029,11 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
           console.warn(`[viewer] Gaussian PLY load failed, falling back to point-cloud: ${message}`);
           setError(`Gaussian load failed, using point fallback: ${message}`);
         }
-      } else if (is3dgs && splatLoadProfile === "balanced" && vertexCount > MAX_DIRECT_GAUSSIAN_VERTEX_COUNT) {
-        console.warn(
-          `[viewer] PLY has ${vertexCount.toLocaleString()} splats; using point-cloud fallback in balanced mode. ` +
-            `Build a tileset for stable real Gaussian streaming.`
-        );
-        setError(
-          `Large PLY (${vertexCount.toLocaleString()} splats): using point fallback in Balanced mode. ` +
-            `Use tileset streaming for real Gaussian.`
-        );
       }
 
-      await createPointCloudHandleFromPly(url);
+      await createPointCloudHandleFromPly(url, vertexCount > 0 ? vertexCount : undefined);
       setError(null);
     };
-
-    const manager = new SplatTilesetManager({
-      maxLoadedSplats: 5_000_000,
-      maxLoadedMB: 1500,
-      maxConcurrentLoads: 4,
-      onLoadTile: async (tile) => createSplatHandleFromUrl(tile.absoluteUrl, "ply"),
-      onUnloadTile: async (_tile, rawHandle) => {
-        const handle = rawHandle as SplatHandle;
-        splatHandlesRef.current.delete(handle);
-        root.remove(handle.object);
-        handle.dispose?.();
-      },
-      onStats: (stats) => {
-        hudRef.current = stats;
-      }
-    });
-    managerRef.current = manager;
 
     const loadWorld = async () => {
       try {
@@ -1019,21 +1106,7 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
           );
         }
 
-        if (tilesetUrls.length > 0) {
-          void manager
-            .loadTileset(tilesetUrls[0])
-            .catch((tilesetError) => {
-              if (disposed || cancelled) return;
-              const message =
-                tilesetError instanceof Error ? tilesetError.message : "Failed to load splat tileset.";
-              setError(message);
-            });
-          if (tilesetUrls.length > 1) {
-            console.warn(
-              `[viewer] Multiple splat tilesets found (${tilesetUrls.length}); loading first only for now: ${tilesetUrls[0]}`
-            );
-          }
-        } else if (directSplats.length > 0) {
+        if (directSplats.length > 0) {
           for (const splatEntry of directSplats) {
             if (disposed || cancelled) break;
             if (splatEntry.formatHint === "ply") {
@@ -1051,6 +1124,8 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
               });
             }
           }
+        } else {
+          setError("No direct splat source URL found for this artifact.");
         }
 
         if (disposed || cancelled) return;
@@ -1099,20 +1174,20 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         }
       }
 
-      for (const handle of splatHandlesRef.current) {
-        handle.update?.();
+      for (const handle of [...splatHandlesRef.current]) {
+        if (!handle.update) continue;
+        try {
+          handle.update();
+        } catch (updateError) {
+          splatHandlesRef.current.delete(handle);
+          root.remove(handle.object);
+          handle.dispose?.();
+          const message =
+            updateError instanceof Error ? updateError.message : "Splat renderer update failed.";
+          setError(`Splat update failed: ${message}`);
+        }
       }
       selectedBoxRef.current?.update();
-
-      if (managerRef.current && !managerUpdateInFlightRef.current) {
-        managerUpdateInFlightRef.current = true;
-        void managerRef.current
-          .update(camera, renderer.domElement.clientHeight)
-          .catch(() => {})
-          .finally(() => {
-            managerUpdateInFlightRef.current = false;
-          });
-      }
 
       renderer.render(scene, camera);
 
@@ -1155,8 +1230,6 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         selectedBoxRef.current = null;
       }
 
-      void manager.reset();
-      managerRef.current = null;
       orbit.dispose();
       draco.dispose();
       ktx2.dispose();
@@ -1165,6 +1238,11 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         handle.dispose?.();
       }
       splatHandlesRef.current.clear();
+      updateHudFromHandles();
+      for (const blobUrl of tempBlobUrlsRef.current) {
+        URL.revokeObjectURL(blobUrl);
+      }
+      tempBlobUrlsRef.current = [];
 
       disposeObjectTree(root);
       scene.clear();
@@ -1184,7 +1262,8 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
     schedulePersist,
     setSelectedObject,
     splatLoadProfile,
-    tilesetUrls
+    splatDensityApplied,
+    updateHudFromHandles
   ]);
 
   return (
@@ -1252,6 +1331,20 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
         <p className="mt-2 text-xs text-zinc-400">
           {flySpeed[0].toFixed(1)} u/s {navMode === "fly" ? "• Shift boost x3" : ""}
         </p>
+        <div className="mt-3 border-t border-border/50 pt-3">
+          <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-400">Splat Density</p>
+          <Slider
+            min={1}
+            max={100}
+            step={1}
+            value={splatDensityDraft}
+            onValueChange={setSplatDensityDraft}
+            onValueCommit={(values) => setSplatDensityApplied(values[0] ?? 100)}
+          />
+          <p className="mt-2 text-xs text-zinc-400">
+            {Math.round(splatDensityDraft[0] ?? 100)}% requested • {Math.round(splatDensityApplied)}% applied
+          </p>
+        </div>
       </div>
 
       <div className="absolute right-3 top-3 z-30 rounded-xl border border-border/70 bg-black/50 px-3 py-2 text-xs text-zinc-200 backdrop-blur-sm">

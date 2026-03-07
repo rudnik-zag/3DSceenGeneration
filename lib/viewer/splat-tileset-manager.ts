@@ -46,6 +46,44 @@ interface SplatTilesetManagerOptions {
   onStats?: (stats: SplatTilesetManagerStats) => void;
 }
 
+function isAbsoluteUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function resolveStorageTileUrl(baseTilesetUrl: string, tileUrl: string): string {
+  const base = new URL(baseTilesetUrl);
+  if (base.pathname !== "/api/storage/object") {
+    return new URL(tileUrl, baseTilesetUrl).toString();
+  }
+
+  if (isAbsoluteUrl(tileUrl)) {
+    return tileUrl;
+  }
+
+  const baseKey = base.searchParams.get("key");
+  if (!baseKey) {
+    return new URL(tileUrl, baseTilesetUrl).toString();
+  }
+
+  if (tileUrl.startsWith("/")) {
+    return `${base.origin}${tileUrl}`;
+  }
+
+  const segments = baseKey.split("/");
+  segments.pop(); // tileset.json
+  const tileSegments = tileUrl.split("/");
+  for (const segment of tileSegments) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  const resolvedKey = segments.join("/");
+  return `${base.origin}/api/storage/object?key=${encodeURIComponent(resolvedKey)}`;
+}
+
 export class SplatTilesetManager {
   private readonly options: Required<
     Pick<
@@ -83,16 +121,27 @@ export class SplatTilesetManager {
     if (this.tilesetUrl === tilesetUrl && this.tileset) return;
     await this.reset();
 
-    const response = await fetch(tilesetUrl, { cache: "no-store" });
+    let absoluteTilesetUrl: string;
+    try {
+      const base =
+        typeof window !== "undefined" && window.location?.origin
+          ? window.location.origin
+          : "http://localhost";
+      absoluteTilesetUrl = new URL(tilesetUrl, base).toString();
+    } catch {
+      throw new Error(`Invalid tileset URL: ${tilesetUrl}`);
+    }
+
+    const response = await fetch(absoluteTilesetUrl, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Failed to load tileset.json (${response.status})`);
     }
     const raw = (await response.json()) as SplatTilesetDocument;
     this.validateTileset(raw);
 
-    this.tilesetUrl = tilesetUrl;
+    this.tilesetUrl = absoluteTilesetUrl;
     this.tileset = raw;
-    this.groups = this.buildGroups(raw, tilesetUrl);
+    this.groups = this.buildGroups(raw, absoluteTilesetUrl);
   }
 
   private validateTileset(tileset: SplatTilesetDocument) {
@@ -110,7 +159,12 @@ export class SplatTilesetManager {
     for (const lod of tileset.lods) {
       for (const tile of lod.tiles) {
         const key = `${lod.level}:${tile.id}`;
-        const absoluteUrl = new URL(tile.url, tilesetUrl).toString();
+        let absoluteUrl: string;
+        try {
+          absoluteUrl = resolveStorageTileUrl(tilesetUrl, tile.url);
+        } catch {
+          throw new Error(`Invalid tile URL "${tile.url}" for tileset base "${tilesetUrl}"`);
+        }
         const runtimeTile: RuntimeSplatTile = {
           ...tile,
           level: lod.level,
@@ -303,4 +357,3 @@ export class SplatTilesetManager {
     this.frameCounter = 0;
   }
 }
-
