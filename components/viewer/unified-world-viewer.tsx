@@ -1125,7 +1125,11 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
             }
           }
         } else {
-          setError("No direct splat source URL found for this artifact.");
+          const hasSplatEntries = (manifest.splats?.length ?? 0) > 0;
+          const hasMeshEntries = (manifest.meshes?.length ?? 0) > 0;
+          if (hasSplatEntries && !hasMeshEntries) {
+            setError((prev) => prev ?? "No direct splat source URL found for this artifact.");
+          }
         }
 
         if (disposed || cancelled) return;
