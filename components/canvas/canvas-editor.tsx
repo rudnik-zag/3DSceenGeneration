@@ -459,18 +459,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
 
       const restoredNodes = graph.nodes.map((node) => {
+        // Always use fresh artifact-backed URLs. Signed preview URLs from local draft can be stale after restart.
         const hydrated = buildNodeData(node as Node<GraphNodeData>, nodeArtifacts) as Node<GraphNodeData>;
-        const previewUrl =
-          node.data && typeof node.data.previewUrl === "string" && node.data.previewUrl.length > 0
-            ? node.data.previewUrl
-            : hydrated.data.previewUrl ?? null;
-        return {
-          ...hydrated,
-          data: {
-            ...hydrated.data,
-            previewUrl
-          }
-        };
+        return hydrated;
       }) as Node<GraphNodeData>[];
 
       setNodes(restoredNodes);

@@ -87,7 +87,6 @@ def build_manifest(
 
 def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> dict:
     from notebook.inference import Inference, load_image
-    from demo_multi_object_mesh import build_mesh_scene
     from generate_per_object import (
         cleanup_cuda,
         export_transformed_object_glb,
@@ -140,18 +139,8 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
         str(transformed_path),
     )
 
-    scene_path = output_dir / "scene.glb"
-    build_mesh_scene(
-        [
-            {
-                "mesh": mesh_data,
-                "rotation": obj["rotation"],
-                "translation": obj["translation"],
-                "scale": obj["scale"],
-            }
-        ],
-        str(scene_path),
-    )
+    # Mesh mode exports transformed per-object GLBs only.
+    scene_path = transformed_path
     cleanup_cuda()
 
     return build_manifest(

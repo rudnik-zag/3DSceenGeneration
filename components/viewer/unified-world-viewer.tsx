@@ -1,0 +1,1042 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { KTX2Loader } from "three/examples/jsm/loaders/KTX2Loader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
+import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
+import { cn } from "@/lib/utils";
+import { SplatTilesetManager, SplatTilesetManagerStats } from "@/lib/viewer/splat-tileset-manager";
+
+interface WorldManifest {
+  artifactId?: string;
+  camera?: {
+    position?: [number, number, number];
+    target?: [number, number, number];
+    fov?: number;
+  };
+  meshes: Array<{ id: string; url: string }>;
+  splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null }>;
+}
+
+type NavigationMode = "orbit" | "fly";
+
+interface MeshTransformRecord {
+  position: [number, number, number];
+  rotation: [number, number, number, number];
+  scale: [number, number, number];
+}
+
+interface MeshListItem {
+  id: string;
+  label: string;
+}
+
+interface TransformDraft {
+  position: [string, string, string];
+  rotation: [string, string, string];
+  scale: [string, string, string];
+}
+
+interface SplatHandle {
+  object: THREE.Object3D;
+  dispose?: () => void;
+  update?: () => void;
+  blobUrl?: string;
+}
+
+const DEFAULT_STATS: SplatTilesetManagerStats = {
+  visibleTiles: 0,
+  loadedTiles: 0,
+  loadedSplats: 0,
+  loadedMB: 0,
+  activeLodDistribution: { "0": 0, "1": 0, "2": 0 }
+};
+
+function normalizeMeshUrlForDedup(url: string): string {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    if (parsed.pathname === "/api/storage/object" && keyParam) {
+      return `${parsed.origin}${parsed.pathname}?key=${keyParam}`;
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+async function getGaussianSplatsModule() {
+  return import("@mkkellogg/gaussian-splats-3d");
+}
+
+function disposeObjectTree(root: THREE.Object3D) {
+  root.traverse((object: THREE.Object3D) => {
+    const mesh = object as THREE.Mesh;
+    if (mesh.isMesh && mesh.geometry) {
+      mesh.geometry.dispose();
+    }
+
+    const materialValue = mesh.material;
+    const materials = Array.isArray(materialValue) ? materialValue : materialValue ? [materialValue] : [];
+    for (const material of materials) {
+      const record = material as unknown as Record<string, unknown>;
+      for (const value of Object.values(record)) {
+        if (value && typeof value === "object" && "isTexture" in value) {
+          (value as THREE.Texture).dispose();
+        }
+      }
+      material.dispose();
+    }
+  });
+}
+
+export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const orbitRef = useRef<OrbitControls | null>(null);
+  const selectedRef = useRef<THREE.Object3D | null>(null);
+  const selectedBoxRef = useRef<THREE.BoxHelper | null>(null);
+  const requestRef = useRef<number | null>(null);
+  const rootRef = useRef<THREE.Group | null>(null);
+  const meshRootsRef = useRef<THREE.Object3D[]>([]);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clockRef = useRef(new THREE.Clock());
+  const keysRef = useRef<Set<string>>(new Set());
+  const splatHandlesRef = useRef(new Set<SplatHandle>());
+  const managerRef = useRef<SplatTilesetManager | null>(null);
+  const managerUpdateInFlightRef = useRef(false);
+  const hudRef = useRef<SplatTilesetManagerStats>(DEFAULT_STATS);
+  const fpsCounterRef = useRef({ acc: 0, frames: 0, fps: 0 });
+  const pausedRef = useRef(false);
+  const navModeRef = useRef<NavigationMode>("orbit");
+  const flySpeedRef = useRef(4);
+
+  const [navMode, setNavMode] = useState<NavigationMode>("orbit");
+  const [flySpeed, setFlySpeed] = useState([4]);
+  const [hud, setHud] = useState(DEFAULT_STATS);
+  const [fps, setFps] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [meshItems, setMeshItems] = useState<MeshListItem[]>([]);
+  const [transformDraft, setTransformDraft] = useState<TransformDraft | null>(null);
+  const [transformDebug, setTransformDebug] = useState<string>("");
+  const [persistState, setPersistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [persistMessage, setPersistMessage] = useState<string | null>(null);
+
+  const tilesetUrls = useMemo(
+    () =>
+      (manifest.splats ?? [])
+        .map((entry) => entry.tilesetUrl)
+        .filter((value): value is string => typeof value === "string" && value.length > 0),
+    [manifest.splats]
+  );
+
+  const directSplatUrls = useMemo(
+    () =>
+      (manifest.splats ?? [])
+        .filter((entry) => !entry.tilesetUrl && typeof entry.sourceUrl === "string" && entry.sourceUrl.length > 0)
+        .map((entry) => entry.sourceUrl as string),
+    [manifest.splats]
+  );
+
+  const isPersistableArtifact = Boolean(
+    typeof manifest.artifactId === "string" &&
+      manifest.artifactId.length > 0 &&
+      !manifest.artifactId.startsWith("local-")
+  );
+
+  useEffect(() => {
+    navModeRef.current = navMode;
+  }, [navMode]);
+
+  useEffect(() => {
+    flySpeedRef.current = flySpeed[0] ?? 4;
+  }, [flySpeed]);
+
+  const refreshMeshItems = useCallback(() => {
+    const byId = new Map<string, MeshListItem>();
+    meshRootsRef.current.forEach((meshRoot, index) => {
+      const id = meshRoot.name || meshRoot.uuid;
+      if (byId.has(id)) return;
+      byId.set(id, {
+        id,
+        label: meshRoot.name || `Mesh ${index + 1}`
+      });
+    });
+    setMeshItems([...byId.values()]);
+  }, []);
+
+  const syncTransformDraft = useCallback((object: THREE.Object3D | null) => {
+    if (!object) {
+      setTransformDraft(null);
+      setTransformDebug("No object selected");
+      return;
+    }
+    const euler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
+    const world = new THREE.Vector3();
+    object.getWorldPosition(world);
+    setTransformDraft({
+      position: [
+        object.position.x.toFixed(3),
+        object.position.y.toFixed(3),
+        object.position.z.toFixed(3)
+      ],
+      rotation: [
+        THREE.MathUtils.radToDeg(euler.x).toFixed(2),
+        THREE.MathUtils.radToDeg(euler.y).toFixed(2),
+        THREE.MathUtils.radToDeg(euler.z).toFixed(2)
+      ],
+      scale: [object.scale.x.toFixed(3), object.scale.y.toFixed(3), object.scale.z.toFixed(3)]
+    });
+    setTransformDebug(
+      `selected=${object.name || object.uuid} local=(${object.position.x.toFixed(3)}, ${object.position.y.toFixed(
+        3
+      )}, ${object.position.z.toFixed(3)}) world=(${world.x.toFixed(3)}, ${world.y.toFixed(3)}, ${world.z.toFixed(3)})`
+    );
+  }, []);
+
+  const serializeMeshTransforms = useCallback((): Record<string, MeshTransformRecord> => {
+    const transforms: Record<string, MeshTransformRecord> = {};
+    for (const meshRoot of meshRootsRef.current) {
+      const id = meshRoot.name || meshRoot.uuid;
+      transforms[id] = {
+        position: [meshRoot.position.x, meshRoot.position.y, meshRoot.position.z],
+        rotation: [meshRoot.quaternion.x, meshRoot.quaternion.y, meshRoot.quaternion.z, meshRoot.quaternion.w],
+        scale: [meshRoot.scale.x, meshRoot.scale.y, meshRoot.scale.z]
+      };
+    }
+    return transforms;
+  }, []);
+
+  const applyMeshTransforms = useCallback((transforms: Record<string, MeshTransformRecord>) => {
+    for (const meshRoot of meshRootsRef.current) {
+      const id = meshRoot.name || meshRoot.uuid;
+      const transform = transforms[id];
+      if (!transform) continue;
+      meshRoot.position.set(transform.position[0], transform.position[1], transform.position[2]);
+      meshRoot.quaternion.set(
+        transform.rotation[0],
+        transform.rotation[1],
+        transform.rotation[2],
+        transform.rotation[3]
+      );
+      meshRoot.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
+      meshRoot.updateMatrixWorld(true);
+    }
+  }, []);
+
+  const persistTransforms = useCallback(async () => {
+    if (!isPersistableArtifact || !manifest.artifactId) return;
+    try {
+      setPersistState("saving");
+      const response = await fetch("/api/world/transforms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          artifactId: manifest.artifactId,
+          meshes: serializeMeshTransforms()
+        })
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `Save failed (${response.status})`);
+      }
+      setPersistState("saved");
+      setPersistMessage(`Saved ${new Date().toLocaleTimeString()}`);
+    } catch (err) {
+      setPersistState("error");
+      setPersistMessage(err instanceof Error ? err.message : "Failed to save transforms");
+    }
+  }, [isPersistableArtifact, manifest.artifactId, serializeMeshTransforms]);
+
+  const schedulePersist = useCallback(() => {
+    if (!isPersistableArtifact) return;
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void persistTransforms();
+    }, 650);
+  }, [isPersistableArtifact, persistTransforms]);
+
+  const loadPersistedTransforms = useCallback(async (): Promise<Record<string, MeshTransformRecord>> => {
+    if (!isPersistableArtifact || !manifest.artifactId) return {};
+    try {
+      const response = await fetch(`/api/world/transforms?artifactId=${encodeURIComponent(manifest.artifactId)}`, {
+        cache: "no-store"
+      });
+      if (!response.ok) return {};
+      const payload = (await response.json()) as {
+        payload?: {
+          meshes?: Record<string, MeshTransformRecord>;
+        };
+      };
+      return payload.payload?.meshes ?? {};
+    } catch {
+      return {};
+    }
+  }, [isPersistableArtifact, manifest.artifactId]);
+
+  const setSelectedObject = useCallback((object: THREE.Object3D | null) => {
+    selectedRef.current = object;
+    setSelectedName(object ? object.name || object.uuid : null);
+    syncTransformDraft(object);
+    const scene = sceneRef.current;
+    if (selectedBoxRef.current) {
+      if (scene) scene.remove(selectedBoxRef.current);
+      selectedBoxRef.current.geometry.dispose();
+      const mat = selectedBoxRef.current.material as THREE.Material;
+      mat.dispose();
+      selectedBoxRef.current = null;
+    }
+    if (object) {
+      object.traverse((node: THREE.Object3D) => {
+        node.matrixAutoUpdate = true;
+      });
+      object.updateMatrixWorld(true);
+      const box = new THREE.BoxHelper(object, 0x34d399);
+      box.renderOrder = 9998;
+      const boxMaterial = box.material as THREE.Material;
+      boxMaterial.depthTest = false;
+      boxMaterial.depthWrite = false;
+      boxMaterial.transparent = true;
+      boxMaterial.opacity = 0.95;
+      if (scene) scene.add(box);
+      selectedBoxRef.current = box;
+    }
+  }, [syncTransformDraft]);
+
+  const updateTransformDraftValue = useCallback(
+    (section: keyof TransformDraft, axisIndex: 0 | 1 | 2, value: string) => {
+      setTransformDraft((current) => {
+        if (!current) return current;
+        const next: TransformDraft = {
+          position: [...current.position] as [string, string, string],
+          rotation: [...current.rotation] as [string, string, string],
+          scale: [...current.scale] as [string, string, string]
+        };
+        next[section][axisIndex] = value;
+        return next;
+      });
+    },
+    []
+  );
+
+  const applyTransformDraft = useCallback(() => {
+    const selectedId = selectedName;
+    const object =
+      (selectedId
+        ? meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === selectedId) ?? null
+        : null) ?? selectedRef.current;
+    if (!object || !transformDraft) return;
+
+    const read = (value: string, fallback: number) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
+    const px = read(transformDraft.position[0], object.position.x);
+    const py = read(transformDraft.position[1], object.position.y);
+    const pz = read(transformDraft.position[2], object.position.z);
+    const rx = read(transformDraft.rotation[0], THREE.MathUtils.radToDeg(object.rotation.x));
+    const ry = read(transformDraft.rotation[1], THREE.MathUtils.radToDeg(object.rotation.y));
+    const rz = read(transformDraft.rotation[2], THREE.MathUtils.radToDeg(object.rotation.z));
+    const sx = read(transformDraft.scale[0], object.scale.x);
+    const sy = read(transformDraft.scale[1], object.scale.y);
+    const sz = read(transformDraft.scale[2], object.scale.z);
+    const beforeEuler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
+    const beforeWorld = new THREE.Vector3();
+    object.getWorldPosition(beforeWorld);
+
+    object.traverse((node: THREE.Object3D) => {
+      node.matrixAutoUpdate = true;
+      node.matrixWorldAutoUpdate = true;
+    });
+    object.position.set(px, py, pz);
+    object.rotation.set(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz),
+      "XYZ"
+    );
+    object.scale.set(sx, sy, sz);
+    object.updateWorldMatrix(true, true);
+    sceneRef.current?.updateMatrixWorld(true);
+    if (rendererRef.current && cameraRef.current && sceneRef.current) {
+      rendererRef.current.render(sceneRef.current, cameraRef.current);
+    }
+    const afterEuler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
+    const afterWorld = new THREE.Vector3();
+    object.getWorldPosition(afterWorld);
+
+    schedulePersist();
+    selectedRef.current = object;
+    setSelectedName(object.name || object.uuid);
+    setTransformDebug(
+      `apply id=${object.name || object.uuid} inPos=(${transformDraft.position.join(",")}) inRot=(${transformDraft.rotation.join(
+        ","
+      )}) inScale=(${transformDraft.scale.join(",")}) ` +
+        `beforeL=(${beforeWorld.x.toFixed(3)},${beforeWorld.y.toFixed(3)},${beforeWorld.z.toFixed(
+          3
+        )}) beforeR=(${THREE.MathUtils.radToDeg(beforeEuler.x).toFixed(2)},${THREE.MathUtils.radToDeg(
+          beforeEuler.y
+        ).toFixed(2)},${THREE.MathUtils.radToDeg(beforeEuler.z).toFixed(2)}) ` +
+        `afterL=(${object.position.x.toFixed(3)},${object.position.y.toFixed(3)},${object.position.z.toFixed(
+          3
+        )}) afterW=(${afterWorld.x.toFixed(3)},${afterWorld.y.toFixed(3)},${afterWorld.z.toFixed(
+          3
+        )}) afterR=(${THREE.MathUtils.radToDeg(afterEuler.x).toFixed(2)},${THREE.MathUtils.radToDeg(
+          afterEuler.y
+        ).toFixed(2)},${THREE.MathUtils.radToDeg(afterEuler.z).toFixed(2)})`
+    );
+    syncTransformDraft(object);
+  }, [schedulePersist, selectedName, syncTransformDraft, transformDraft]);
+
+  const fitScene = useCallback(() => {
+    const root = rootRef.current;
+    const camera = cameraRef.current;
+    const orbit = orbitRef.current;
+    if (!root || !camera || !orbit) return;
+
+    const box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const distance = maxDim * 1.8;
+
+    camera.position.copy(center.clone().add(new THREE.Vector3(distance, distance * 0.75, distance)));
+    camera.near = Math.max(0.0001, distance / 3000);
+    camera.far = Math.max(1000, distance * 5000);
+    camera.updateProjectionMatrix();
+    orbit.target.copy(center);
+    orbit.update();
+  }, []);
+
+  const resetCamera = useCallback(() => {
+    const camera = cameraRef.current;
+    const orbit = orbitRef.current;
+    if (!camera || !orbit) return;
+
+    const preset = manifest.camera;
+    const position = preset?.position ?? [4, 3, 4];
+    const target = preset?.target ?? [0, 0, 0];
+
+    camera.position.set(position[0], position[1], position[2]);
+    orbit.target.set(target[0], target[1], target[2]);
+    orbit.update();
+  }, [manifest.camera]);
+
+  const fitSelection = useCallback(() => {
+    const selected = selectedRef.current;
+    const camera = cameraRef.current;
+    const orbit = orbitRef.current;
+    if (!selected || !camera || !orbit) return;
+
+    const box = new THREE.Box3().setFromObject(selected);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 0.5);
+    const distance = maxDim * 2.2;
+    camera.position.copy(center.clone().add(new THREE.Vector3(distance, distance * 0.6, distance)));
+    orbit.target.copy(center);
+    orbit.update();
+  }, []);
+
+  const captureScreenshot = useCallback(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const dataUrl = renderer.domElement.toDataURL("image/png");
+    const link = document.createElement("a");
+    link.href = dataUrl;
+    link.download = `world_${Date.now()}.png`;
+    link.click();
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    let disposed = false;
+    let cancelled = false;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#05070e");
+    sceneRef.current = scene;
+    meshRootsRef.current = [];
+    setSelectedObject(null);
+
+    const root = new THREE.Group();
+    root.name = "WorldRoot";
+    scene.add(root);
+    rootRef.current = root;
+
+    const camera = new THREE.PerspectiveCamera(
+      manifest.camera?.fov ?? 50,
+      Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
+      0.0001,
+      4000
+    );
+    camera.position.set(...(manifest.camera?.position ?? [4, 3, 4]));
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x101828, 1.1);
+    hemi.position.set(0, 30, 0);
+    scene.add(hemi);
+
+    const directional = new THREE.DirectionalLight(0xffffff, 1.2);
+    directional.position.set(8, 12, 6);
+    scene.add(directional);
+
+    scene.add(new THREE.GridHelper(24, 48, 0x263245, 0x111827));
+
+    const orbit = new OrbitControls(camera, renderer.domElement);
+    orbit.enableDamping = true;
+    orbit.dampingFactor = 0.07;
+    orbit.zoomSpeed = 0.35;
+    orbit.target.set(...(manifest.camera?.target ?? [0, 0, 0]));
+    orbit.update();
+    orbitRef.current = orbit;
+
+    const loader = new GLTFLoader();
+    const draco = new DRACOLoader();
+    draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.7/");
+    loader.setDRACOLoader(draco);
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    const ktx2 = new KTX2Loader();
+    ktx2.setTranscoderPath("https://unpkg.com/three@0.170.0/examples/jsm/libs/basis/");
+    ktx2.detectSupport(renderer);
+    loader.setKTX2Loader(ktx2);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      keysRef.current.add(event.code);
+      if (event.code === "Delete" || event.code === "Backspace") {
+        if (selectedRef.current) {
+          setSelectedObject(null);
+        }
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      keysRef.current.delete(event.code);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rendererRef.current || !cameraRef.current) return;
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(pointer, cameraRef.current);
+
+      const intersections = raycaster.intersectObjects(meshRootsRef.current, true);
+      if (intersections.length === 0) {
+        return;
+      }
+
+      const hit = intersections[0]?.object;
+      if (!hit) {
+        return;
+      }
+
+      let current: THREE.Object3D | null = hit;
+      let selected: THREE.Object3D | null = hit;
+      while (current) {
+        if (meshRootsRef.current.includes(current)) {
+          selected = current;
+          break;
+        }
+        current = current.parent;
+      }
+      setSelectedObject(selected);
+    };
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (!containerRef.current || !rendererRef.current || !cameraRef.current) return;
+      const width = Math.max(1, containerRef.current.clientWidth);
+      const height = Math.max(1, containerRef.current.clientHeight);
+      rendererRef.current.setSize(width, height);
+      cameraRef.current.aspect = width / height;
+      cameraRef.current.updateProjectionMatrix();
+    });
+    resizeObserver.observe(container);
+
+    const onVisibilityChange = () => {
+      pausedRef.current = document.hidden;
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    const createSplatHandleFromUrl = async (url: string): Promise<SplatHandle> => {
+      const module = (await getGaussianSplatsModule()) as Record<string, unknown>;
+      const DropInViewerCtor = module.DropInViewer as
+        | (new (options: Record<string, unknown>) => THREE.Object3D & {
+            addSplatScene?: (path: string, options?: Record<string, unknown>) => Promise<void>;
+            addSplatScenes?: (entries: Array<Record<string, unknown>>) => Promise<void>;
+            dispose?: () => void;
+            update?: () => void;
+          })
+        | undefined;
+      if (!DropInViewerCtor) {
+        throw new Error("Gaussian splat renderer module does not expose DropInViewer.");
+      }
+
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Failed to load splat (${response.status}): ${url}`);
+      }
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const object = new DropInViewerCtor({
+        selfDrivenMode: false,
+        useBuiltInControls: false,
+        gpuAcceleratedSort: true,
+        renderer,
+        camera
+      });
+      object.renderOrder = 1;
+
+      if (typeof object.addSplatScene === "function") {
+        await object.addSplatScene(blobUrl, { showLoadingUI: false });
+      } else if (typeof object.addSplatScenes === "function") {
+        await object.addSplatScenes([{ path: blobUrl, showLoadingUI: false }]);
+      } else {
+        URL.revokeObjectURL(blobUrl);
+        throw new Error("DropInViewer does not support addSplatScene/addSplatScenes APIs.");
+      }
+
+      root.add(object);
+      const handle: SplatHandle = {
+        object,
+        dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
+        update: typeof object.update === "function" ? () => object.update?.() : undefined,
+        blobUrl
+      };
+      splatHandlesRef.current.add(handle);
+      return handle;
+    };
+
+    const manager = new SplatTilesetManager({
+      maxLoadedSplats: 5_000_000,
+      maxLoadedMB: 1500,
+      maxConcurrentLoads: 4,
+      onLoadTile: async (tile) => createSplatHandleFromUrl(tile.absoluteUrl),
+      onUnloadTile: async (_tile, rawHandle) => {
+        const handle = rawHandle as SplatHandle;
+        splatHandlesRef.current.delete(handle);
+        root.remove(handle.object);
+        handle.dispose?.();
+        if (handle.blobUrl) URL.revokeObjectURL(handle.blobUrl);
+      },
+      onStats: (stats) => {
+        hudRef.current = stats;
+      }
+    });
+    managerRef.current = manager;
+
+    const loadWorld = async () => {
+      try {
+        if (disposed || cancelled) return;
+        setLoading(true);
+        setError(null);
+        if (isPersistableArtifact) {
+          setPersistState("idle");
+          setPersistMessage(null);
+        }
+
+        const persistedTransforms = await loadPersistedTransforms();
+        if (disposed || cancelled) return;
+
+        const meshIdUsage = new Map<string, number>();
+        const meshLoadErrors: string[] = [];
+        const dedupedMeshes = (manifest.meshes ?? []).filter((mesh, index, source) => {
+          const key = normalizeMeshUrlForDedup(mesh.url);
+          return source.findIndex((candidate) => normalizeMeshUrlForDedup(candidate.url) === key) === index;
+        });
+
+        for (const mesh of dedupedMeshes) {
+          if (disposed || cancelled) break;
+          try {
+            const gltf = await loader.loadAsync(mesh.url);
+            if (disposed || cancelled) {
+              disposeObjectTree(gltf.scene);
+              continue;
+            }
+            gltf.scene.traverse((obj: THREE.Object3D) => {
+              obj.matrixAutoUpdate = true;
+              const meshObj = obj as THREE.Mesh;
+              if (!meshObj.isMesh) return;
+              meshObj.userData.transformRoot = gltf.scene;
+              const applyState = (material: THREE.Material) => {
+                material.depthTest = true;
+                material.depthWrite = !material.transparent;
+              };
+              if (Array.isArray(meshObj.material)) meshObj.material.forEach(applyState);
+              else if (meshObj.material) applyState(meshObj.material);
+            });
+            gltf.scene.userData.transformRoot = true;
+            gltf.scene.renderOrder = 0;
+
+            const baseId = mesh.id || gltf.scene.name || "mesh";
+            const usageCount = meshIdUsage.get(baseId) ?? 0;
+            meshIdUsage.set(baseId, usageCount + 1);
+            gltf.scene.name = usageCount === 0 ? baseId : `${baseId}-${usageCount}`;
+
+            meshRootsRef.current.push(gltf.scene);
+            root.add(gltf.scene);
+          } catch (meshError) {
+            const message = meshError instanceof Error ? meshError.message : "Unknown mesh load error";
+            meshLoadErrors.push(`${mesh.id}: ${message}`);
+          }
+        }
+
+        applyMeshTransforms(persistedTransforms);
+        refreshMeshItems();
+        if (meshRootsRef.current.length > 0) {
+          setSelectedObject(meshRootsRef.current[0] ?? null);
+        }
+        if (isPersistableArtifact) {
+          setPersistState("saved");
+          setPersistMessage("Loaded saved transforms");
+        }
+        if (meshLoadErrors.length > 0) {
+          setError(
+            `Loaded ${meshRootsRef.current.length}/${manifest.meshes.length} meshes. Failed: ${meshLoadErrors.join(" | ")}`
+          );
+        }
+
+        if (tilesetUrls.length > 0) {
+          await manager.loadTileset(tilesetUrls[0]);
+          if (disposed || cancelled) return;
+          if (tilesetUrls.length > 1) {
+            console.warn(
+              `[viewer] Multiple splat tilesets found (${tilesetUrls.length}); loading first only for now: ${tilesetUrls[0]}`
+            );
+          }
+        } else if (directSplatUrls.length > 0) {
+          for (const splatUrl of directSplatUrls) {
+            if (disposed || cancelled) break;
+            await createSplatHandleFromUrl(splatUrl);
+          }
+        }
+
+        if (disposed || cancelled) return;
+        fitScene();
+      } catch (err) {
+        if (disposed || cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load world");
+      } finally {
+        if (!disposed && !cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadWorld();
+
+    const animate = () => {
+      if (disposed) return;
+      requestRef.current = requestAnimationFrame(animate);
+
+      const dt = Math.min(clockRef.current.getDelta(), 1 / 20);
+      if (pausedRef.current) return;
+
+      if (navModeRef.current === "orbit") {
+        orbit.enabled = true;
+        orbit.update();
+      } else {
+        orbit.enabled = false;
+        const keys = keysRef.current;
+        const direction = new THREE.Vector3();
+        camera.getWorldDirection(direction);
+        direction.normalize();
+        const right = new THREE.Vector3().crossVectors(direction, camera.up).normalize();
+        const up = camera.up.clone().normalize();
+        const speed = flySpeedRef.current * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 3 : 1);
+        const move = new THREE.Vector3();
+        if (keys.has("KeyW")) move.add(direction);
+        if (keys.has("KeyS")) move.sub(direction);
+        if (keys.has("KeyD")) move.add(right);
+        if (keys.has("KeyA")) move.sub(right);
+        if (keys.has("KeyE")) move.add(up);
+        if (keys.has("KeyQ")) move.sub(up);
+        if (move.lengthSq() > 0) {
+          move.normalize().multiplyScalar(speed * dt);
+          camera.position.add(move);
+        }
+      }
+
+      for (const handle of splatHandlesRef.current) {
+        handle.update?.();
+      }
+      selectedBoxRef.current?.update();
+
+      if (managerRef.current && !managerUpdateInFlightRef.current) {
+        managerUpdateInFlightRef.current = true;
+        void managerRef.current
+          .update(camera, renderer.domElement.clientHeight)
+          .catch(() => {})
+          .finally(() => {
+            managerUpdateInFlightRef.current = false;
+          });
+      }
+
+      renderer.render(scene, camera);
+
+      fpsCounterRef.current.acc += dt;
+      fpsCounterRef.current.frames += 1;
+      if (fpsCounterRef.current.acc >= 0.25) {
+        const nextFps = Math.round(fpsCounterRef.current.frames / fpsCounterRef.current.acc);
+        fpsCounterRef.current = { acc: 0, frames: 0, fps: nextFps };
+        setFps(nextFps);
+        setHud(hudRef.current);
+      }
+    };
+
+    requestRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      disposed = true;
+      cancelled = true;
+      pausedRef.current = false;
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (requestRef.current) {
+        cancelAnimationFrame(requestRef.current);
+        requestRef.current = null;
+      }
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      resizeObserver.disconnect();
+
+      setSelectedObject(null);
+      if (selectedBoxRef.current) {
+        scene.remove(selectedBoxRef.current);
+        selectedBoxRef.current.geometry.dispose();
+        const mat = selectedBoxRef.current.material as THREE.Material;
+        mat.dispose();
+        selectedBoxRef.current = null;
+      }
+
+      void manager.reset();
+      managerRef.current = null;
+      orbit.dispose();
+      draco.dispose();
+      ktx2.dispose();
+
+      for (const handle of splatHandlesRef.current) {
+        handle.dispose?.();
+        if (handle.blobUrl) URL.revokeObjectURL(handle.blobUrl);
+      }
+      splatHandlesRef.current.clear();
+
+      disposeObjectTree(root);
+      scene.clear();
+      renderer.dispose();
+      if (renderer.domElement.parentNode) {
+        renderer.domElement.parentNode.removeChild(renderer.domElement);
+      }
+    };
+  }, [
+    applyMeshTransforms,
+    directSplatUrls,
+    fitScene,
+    isPersistableArtifact,
+    loadPersistedTransforms,
+    manifest,
+    refreshMeshItems,
+    schedulePersist,
+    setSelectedObject,
+    tilesetUrls
+  ]);
+
+  return (
+    <div className="relative h-full w-full overflow-hidden rounded-none bg-[#04060d] md:rounded-2xl md:border md:border-border/70">
+      <div className="absolute left-3 top-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/50 p-2 backdrop-blur-sm">
+        <Button size="sm" variant={navMode === "orbit" ? "default" : "outline"} className="rounded-xl" onClick={() => setNavMode("orbit")}>
+          <Navigation className="mr-1 h-4 w-4" />
+          Orbit
+        </Button>
+        <Button size="sm" variant={navMode === "fly" ? "default" : "outline"} className="rounded-xl" onClick={() => setNavMode("fly")}>
+          <MoveHorizontal className="mr-1 h-4 w-4" />
+          Fly
+        </Button>
+        <Button size="sm" variant="outline" className="rounded-xl" onClick={resetCamera}>
+          <RotateCcw className="mr-1 h-4 w-4" />
+          Reset
+        </Button>
+        <Button size="sm" variant="outline" className="rounded-xl" onClick={fitScene}>
+          <Crosshair className="mr-1 h-4 w-4" />
+          Fit Scene
+        </Button>
+        <Button size="sm" variant="outline" className="rounded-xl" onClick={fitSelection} disabled={!selectedRef.current}>
+          <Crosshair className="mr-1 h-4 w-4" />
+          Fit Selection
+        </Button>
+        <Button size="sm" variant="outline" className="rounded-xl" onClick={captureScreenshot}>
+          <Download className="mr-1 h-4 w-4" />
+          Screenshot
+        </Button>
+        {isPersistableArtifact ? (
+          <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void persistTransforms()}>
+            Save Transforms
+          </Button>
+        ) : null}
+      </div>
+
+      <div className="absolute bottom-3 left-3 z-30 w-[280px] rounded-xl border border-border/70 bg-black/50 p-3 backdrop-blur-sm">
+        <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-400">Fly Speed</p>
+        <Slider min={1} max={20} step={0.5} value={flySpeed} onValueChange={setFlySpeed} />
+        <p className="mt-2 text-xs text-zinc-400">
+          {flySpeed[0].toFixed(1)} u/s {navMode === "fly" ? "• Shift boost x3" : ""}
+        </p>
+      </div>
+
+      <div className="absolute right-3 top-3 z-30 rounded-xl border border-border/70 bg-black/50 px-3 py-2 text-xs text-zinc-200 backdrop-blur-sm">
+        <div className="font-medium">HUD</div>
+        <div className="mt-1 space-y-0.5">
+          <div>FPS: {fps}</div>
+          <div>Triangles: {rendererRef.current?.info.render.triangles ?? 0}</div>
+          <div>Draw calls: {rendererRef.current?.info.render.calls ?? 0}</div>
+          <div>Loaded tiles: {hud.loadedTiles}</div>
+          <div>Loaded splats: {hud.loadedSplats.toLocaleString()}</div>
+          <div>Loaded MB: {hud.loadedMB.toFixed(1)}</div>
+          <div>
+            LOD: {hud.activeLodDistribution["0"]}/{hud.activeLodDistribution["1"]}/{hud.activeLodDistribution["2"]}
+          </div>
+          <div>Selected: {selectedName ?? "none"}</div>
+        </div>
+      </div>
+
+      <div className="absolute right-3 top-44 z-30 w-64 rounded-xl border border-border/70 bg-black/50 p-2 backdrop-blur-sm">
+        <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
+        <div className="max-h-48 space-y-1 overflow-auto pr-1">
+          {meshItems.length === 0 ? (
+            <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No mesh objects</div>
+          ) : (
+            meshItems.map((item) => (
+              <Button
+                key={item.id}
+                size="sm"
+                variant={selectedName === item.id ? "default" : "outline"}
+                className="h-8 w-full justify-start truncate rounded-md"
+                onClick={() => {
+                  const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
+                  setSelectedObject(target);
+                }}
+              >
+                {item.label}
+              </Button>
+            ))
+          )}
+        </div>
+
+        <div className="mt-2 rounded-lg border border-border/50 bg-background/30 p-2">
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-300">Transform</div>
+          {transformDraft ? (
+            <div className="space-y-2">
+              {(["position", "rotation", "scale"] as const).map((section) => (
+                <div key={section}>
+                  <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">{section}</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {([0, 1, 2] as const).map((axisIndex) => (
+                      <Input
+                        key={`${section}-${axisIndex}`}
+                        className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                        value={transformDraft[section][axisIndex]}
+                        onChange={(event) =>
+                          updateTransformDraftValue(section, axisIndex, event.target.value)
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="grid grid-cols-2 gap-1">
+                <Button size="sm" className="h-7 rounded-md text-xs" onClick={applyTransformDraft}>
+                  Apply
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 rounded-md text-xs"
+                  onClick={() => syncTransformDraft(selectedRef.current)}
+                >
+                  Reset
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 rounded-md text-xs col-span-2"
+                  onClick={fitSelection}
+                  disabled={!selectedRef.current}
+                >
+                  Focus
+                </Button>
+              </div>
+              <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
+                {transformDebug}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[11px] text-zinc-500">Select an object to edit transform.</div>
+          )}
+        </div>
+
+        {isPersistableArtifact ? (
+          <div className="mt-2 text-[11px] text-zinc-400">
+            Transforms: {persistState}
+            {persistMessage ? ` • ${persistMessage}` : ""}
+          </div>
+        ) : null}
+      </div>
+
+      {loading ? (
+        <div className="absolute left-3 top-20 z-30 rounded-xl border border-border/70 bg-black/50 px-3 py-2 text-sm text-zinc-200 backdrop-blur-sm">
+          Loading world...
+        </div>
+      ) : null}
+      {error ? (
+        <div className={cn("absolute left-3 top-20 z-30 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200")}>
+          {error}
+        </div>
+      ) : null}
+
+      <div ref={containerRef} className="h-full w-full" />
+
+      <div className="pointer-events-none absolute bottom-3 right-3 z-20 rounded-lg border border-white/10 bg-black/55 px-2 py-1 text-[11px] text-zinc-300">
+        <Camera className="mr-1 inline h-3.5 w-3.5" />
+        Single unified viewer
+      </div>
+    </div>
+  );
+}

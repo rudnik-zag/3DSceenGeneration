@@ -1,29 +1,13 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { FileUp, X } from "lucide-react";
 
-import { ViewerCanvas } from "@/components/viewer/viewer-canvas";
+import { UnifiedWorldViewer } from "@/components/viewer/unified-world-viewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
-import { extractArtifactExtension, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
-
-const BabylonSplatViewer = dynamic(
-  () => import("@/components/viewer/BabylonSplatViewer").then((mod) => mod.BabylonSplatViewer),
-  {
-    ssr: false,
-    loading: () => (
-      <Card className="rounded-2xl border-border/70 panel-blur">
-        <CardHeader>
-          <CardTitle className="text-white">Loading Babylon renderer...</CardTitle>
-        </CardHeader>
-      </Card>
-    )
-  }
-);
 
 interface ViewerArtifact {
   id: string;
@@ -37,73 +21,174 @@ interface ViewerArtifact {
   additionalSceneUrls?: string[] | null;
 }
 
+interface WorldManifestResponse {
+  artifactId: string;
+  meshes: Array<{ id: string; url: string }>;
+  splats: Array<{ id: string; artifactId: string; tilesetUrl: string | null; sourceUrl: string | null }>;
+  build?: {
+    canBuildTileset?: boolean;
+    defaultPresetName?: string;
+  };
+}
+
+interface UnifiedManifest {
+  artifactId?: string;
+  camera?: {
+    position?: [number, number, number];
+    target?: [number, number, number];
+    fov?: number;
+  };
+  meshes: Array<{ id: string; url: string }>;
+  splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null }>;
+}
+
+function normalizeAssetUrlForDedup(url: string): string {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    if (parsed.pathname === "/api/storage/object" && keyParam) {
+      return `${parsed.origin}${parsed.pathname}?key=${keyParam}`;
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+function meshIdFromUrl(url: string, fallback: string): string {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = keyParam && keyParam.length > 0 ? keyParam : parsed.pathname;
+    const filename = source.split("/").pop() || fallback;
+    const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    return safe.length > 0 ? safe : fallback;
+  } catch {
+    const filename = url.split("/").pop() || fallback;
+    const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    return safe.length > 0 ? safe : fallback;
+  }
+}
+
 function inferKindFromFilename(filename: string): ViewerArtifact["kind"] | null {
   const lower = filename.toLowerCase();
-  if (lower.endsWith(".compressed.ply")) return "gsplat";
+  if (lower.endsWith(".compressed.ply")) return "splat_ksplat";
   if (lower.endsWith(".ply")) return "point_ply";
   if (lower.endsWith(".glb") || lower.endsWith(".gltf")) return "mesh_glb";
-  if (lower.endsWith(".ksplat")) return "ksplat";
-  if (lower.endsWith(".spz")) return "spz";
-  if (lower.endsWith(".splat")) return "splat";
+  if (lower.endsWith(".ksplat")) return "splat_ksplat";
+  if (lower.endsWith(".spz")) return "splat_ksplat";
+  if (lower.endsWith(".splat")) return "splat_ksplat";
   return null;
 }
 
 async function detectKindForLocalFile(file: File): Promise<ViewerArtifact["kind"] | null> {
   const directKind = inferKindFromFilename(file.name);
   if (!directKind) return null;
-
-  if (directKind !== "point_ply") {
-    return directKind;
-  }
-
-  try {
-    const headerText = await file.slice(0, 256 * 1024).text();
-    const isGaussianHeader =
-      headerText.includes("end_header") &&
-      headerText.includes("f_dc_0") &&
-      headerText.includes("f_dc_1") &&
-      headerText.includes("f_dc_2");
-
-    if (isGaussianHeader) {
-      return "gsplat";
-    }
-  } catch {
-    // Keep default point_ply when header detection fails.
-  }
-
-  return "point_ply";
+  return directKind;
 }
 
 function isBlobUrl(url: string) {
   return url.startsWith("blob:");
 }
 
+function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest {
+  const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
+    ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const meshLike = artifact.kind === "mesh_glb" || artifact.url.toLowerCase().endsWith(".glb") || artifact.url.toLowerCase().endsWith(".gltf");
+  if (meshLike) {
+    const preferPerObjectMeshes = extraMeshUrls.length > 0;
+    const meshes: Array<{ id: string; url: string }> = [];
+    const knownUrls = new Set<string>();
+    if (!preferPerObjectMeshes) {
+      meshes.push({ id: `mesh-${artifact.id}`, url: artifact.url });
+      knownUrls.add(normalizeAssetUrlForDedup(artifact.url));
+    }
+    extraMeshUrls.forEach((url, index) => {
+      const dedupKey = normalizeAssetUrlForDedup(url);
+      if (knownUrls.has(dedupKey)) return;
+      knownUrls.add(dedupKey);
+      meshes.push({ id: `mesh-extra-${meshIdFromUrl(url, `${artifact.id}-${index}`)}-${index}`, url });
+    });
+    return {
+      artifactId: artifact.id,
+      camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+      meshes,
+      splats: []
+    };
+  }
+
+  const splatLike = artifact.kind === "point_ply" || artifact.kind === "splat_ksplat";
+  if (splatLike) {
+    return {
+      artifactId: artifact.id,
+      camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+      meshes: [],
+      splats: [{ id: `splat-${artifact.id}`, tilesetUrl: null, sourceUrl: artifact.url }]
+    };
+  }
+
+  return {
+    artifactId: artifact.id,
+    camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+    meshes: [],
+    splats: []
+  };
+}
+
 export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtifact | null }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [localArtifact, setLocalArtifact] = useState<ViewerArtifact | null>(null);
-  const [plyRendererOverride, setPlyRendererOverride] = useState<"three" | "babylon-gs" | null>(null);
+  const [worldManifest, setWorldManifest] = useState<WorldManifestResponse | null>(null);
+  const [worldManifestLoading, setWorldManifestLoading] = useState(false);
+  const [worldManifestError, setWorldManifestError] = useState<string | null>(null);
+  const [buildTilesetLoading, setBuildTilesetLoading] = useState(false);
+  const [buildJobId, setBuildJobId] = useState<string | null>(null);
 
   const activeArtifact = useMemo(() => localArtifact ?? initialArtifact, [initialArtifact, localArtifact]);
-  const renderer = useMemo(() => (activeArtifact ? selectViewerRenderer(activeArtifact) : null), [activeArtifact]);
-  const artifactExt = useMemo(
-    () => (activeArtifact ? extractArtifactExtension(activeArtifact.filename ?? activeArtifact.url) : null),
-    [activeArtifact]
-  );
-  const effectiveRenderer = useMemo(() => {
-    if (artifactExt === ".ply" && plyRendererOverride) {
-      return plyRendererOverride;
+
+  const unifiedManifest = useMemo<UnifiedManifest | null>(() => {
+    if (localArtifact) {
+      return buildSingleArtifactManifest(localArtifact);
     }
-    return renderer;
-  }, [artifactExt, plyRendererOverride, renderer]);
-  const threeCompatibleArtifact = useMemo(() => {
-    if (!activeArtifact) return null;
-    if (effectiveRenderer !== "three") return activeArtifact;
-    if (artifactExt !== ".ply") return activeArtifact;
-    return {
-      ...activeArtifact,
-      kind: "point_ply"
-    };
-  }, [activeArtifact, artifactExt, effectiveRenderer]);
+    if (worldManifest) {
+      const extraMeshUrls =
+        activeArtifact && Array.isArray(activeArtifact.additionalSceneUrls)
+          ? activeArtifact.additionalSceneUrls.filter(
+              (value): value is string => typeof value === "string" && value.length > 0
+            )
+          : [];
+      const preferPerObjectMeshes = extraMeshUrls.length > 0;
+      const baseMeshes = preferPerObjectMeshes
+        ? []
+        : worldManifest.meshes.map((entry) => ({ id: entry.id, url: entry.url }));
+      const mergedMeshes = [...baseMeshes];
+      const knownUrls = new Set(mergedMeshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
+      extraMeshUrls.forEach((url, index) => {
+        const dedupKey = normalizeAssetUrlForDedup(url);
+        if (knownUrls.has(dedupKey)) return;
+        knownUrls.add(dedupKey);
+        mergedMeshes.push({
+          id: `mesh-extra-${meshIdFromUrl(url, `${worldManifest.artifactId}-${index}`)}-${index}`,
+          url
+        });
+      });
+      return {
+        artifactId: worldManifest.artifactId,
+        camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+        meshes: mergedMeshes,
+        splats: worldManifest.splats.map((entry) => ({
+          id: entry.id,
+          tilesetUrl: entry.tilesetUrl,
+          sourceUrl: entry.sourceUrl
+        }))
+      };
+    }
+    if (activeArtifact) {
+      return buildSingleArtifactManifest(activeArtifact);
+    }
+    return null;
+  }, [activeArtifact, localArtifact, worldManifest]);
 
   useEffect(() => {
     return () => {
@@ -114,14 +199,131 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
   }, [localArtifact]);
 
   useEffect(() => {
-    setPlyRendererOverride(null);
-  }, [activeArtifact?.id]);
+    if (!activeArtifact || localArtifact) {
+      setWorldManifest(null);
+      setWorldManifestError(null);
+      setWorldManifestLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadWorldManifest = async () => {
+      setWorldManifestLoading(true);
+      setWorldManifestError(null);
+      try {
+        const response = await fetch(`/api/world/manifest?artifactId=${encodeURIComponent(activeArtifact.id)}`, {
+          cache: "no-store"
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to load world manifest (${response.status})`);
+        }
+        const payload = (await response.json()) as WorldManifestResponse;
+        if (cancelled) return;
+        setWorldManifest(payload);
+      } catch (error) {
+        if (cancelled) return;
+        setWorldManifestError(error instanceof Error ? error.message : "Failed to load world manifest");
+        setWorldManifest(null);
+      } finally {
+        if (!cancelled) setWorldManifestLoading(false);
+      }
+    };
+
+    void loadWorldManifest();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeArtifact, localArtifact]);
+
+  useEffect(() => {
+    if (!buildJobId) return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/splats/buildTileset?jobId=${encodeURIComponent(buildJobId)}`, {
+          cache: "no-store"
+        });
+        if (!response.ok) return;
+        const payload = (await response.json()) as {
+          state?: string;
+          failedReason?: string | null;
+        };
+        if (cancelled) return;
+        if (payload.state === "completed") {
+          window.clearInterval(timer);
+          setBuildJobId(null);
+          setBuildTilesetLoading(false);
+          toast({
+            title: "Tileset Ready",
+            description: "Splat tileset build completed."
+          });
+          if (activeArtifact && !localArtifact) {
+            const refresh = await fetch(`/api/world/manifest?artifactId=${encodeURIComponent(activeArtifact.id)}`, {
+              cache: "no-store"
+            });
+            if (refresh.ok) {
+              const nextManifest = (await refresh.json()) as WorldManifestResponse;
+              if (!cancelled) setWorldManifest(nextManifest);
+            }
+          }
+        }
+        if (payload.state === "failed") {
+          window.clearInterval(timer);
+          setBuildJobId(null);
+          setBuildTilesetLoading(false);
+          toast({
+            title: "Tileset Build Failed",
+            description: payload.failedReason ?? "Background build failed."
+          });
+        }
+      } catch {
+        // keep polling
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeArtifact, buildJobId, localArtifact]);
+
+  const onBuildTileset = async () => {
+    if (!activeArtifact || localArtifact) return;
+    try {
+      setBuildTilesetLoading(true);
+      const response = await fetch("/api/splats/buildTileset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          artifactId: activeArtifact.id,
+          presetName: worldManifest?.build?.defaultPresetName ?? "Default"
+        })
+      });
+      const payload = (await response.json().catch(() => ({}))) as { jobId?: string; error?: string };
+      if (!response.ok || !payload.jobId) {
+        throw new Error(payload.error ?? `Build request failed (${response.status})`);
+      }
+      setBuildJobId(payload.jobId);
+      toast({
+        title: "Tileset Build Queued",
+        description: "Streaming tileset generation started."
+      });
+    } catch (error) {
+      setBuildTilesetLoading(false);
+      toast({
+        title: "Tileset Build Error",
+        description: error instanceof Error ? error.message : "Failed to start tileset build."
+      });
+    }
+  };
+
+  const canBuildTileset = Boolean(!localArtifact && worldManifest?.build?.canBuildTileset);
 
   const onPickLocalFile = () => {
     inputRef.current?.click();
   };
 
-  const onFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -180,24 +382,12 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
         <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
           {localArtifact ? "Source: local file" : activeArtifact ? "Source: run artifact" : "No artifact selected"}
         </Badge>
-        {renderer ? (
-          <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
-            Renderer: {effectiveRenderer === "babylon-gs" ? "Babylon GS" : "Three.js"}
-          </Badge>
-        ) : null}
-        {artifactExt === ".ply" && activeArtifact ? (
-          <Button
-            size="sm"
-            variant={effectiveRenderer === "babylon-gs" ? "default" : "outline"}
-            className="rounded-xl"
-            onClick={() =>
-              setPlyRendererOverride((current) => {
-                const baseline = current ?? renderer ?? "three";
-                return baseline === "three" ? "babylon-gs" : "three";
-              })
-            }
-          >
-            {effectiveRenderer === "babylon-gs" ? "Use Three PLY" : "Render PLY as GS"}
+        <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
+          Viewer: Unified
+        </Badge>
+        {canBuildTileset ? (
+          <Button size="sm" className="rounded-xl" onClick={onBuildTileset} disabled={buildTilesetLoading || Boolean(buildJobId)}>
+            {buildTilesetLoading || buildJobId ? "Building tileset..." : "Build Tileset"}
           </Button>
         ) : null}
         <input
@@ -210,19 +400,21 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
       </div>
 
       <div className="min-h-0 flex-1">
-        {activeArtifact && effectiveRenderer === "babylon-gs" ? (
-          <BabylonSplatViewer artifact={activeArtifact} />
-        ) : activeArtifact && effectiveRenderer === "three" ? (
-          <ViewerCanvas artifact={threeCompatibleArtifact ?? activeArtifact} />
-        ) : activeArtifact ? (
+        {worldManifestLoading && !localArtifact ? (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>
-              <CardTitle className="text-white">Unsupported artifact type</CardTitle>
+              <CardTitle className="text-white">Loading world manifest...</CardTitle>
             </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              Could not infer renderer for this artifact. Try .glb/.gltf/.ply for Three.js or .splat/.spz/.compressed.ply for Babylon GS.
-            </CardContent>
           </Card>
+        ) : worldManifestError && !localArtifact ? (
+          <Card className="rounded-2xl border-border/70 panel-blur">
+            <CardHeader>
+              <CardTitle className="text-white">World manifest unavailable</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">{worldManifestError}</CardContent>
+          </Card>
+        ) : unifiedManifest ? (
+          <UnifiedWorldViewer manifest={unifiedManifest} />
         ) : (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>

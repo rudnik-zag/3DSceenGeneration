@@ -34,7 +34,7 @@ def build_manifest(
     image_path: Path,
     masks_dir: Path,
     output_dir: Path,
-    scene_path: Path,
+    scene_path: Path | None,
     masks_count: int,
     run_config: dict,
     mesh_parts_dir: Path | None = None,
@@ -42,8 +42,9 @@ def build_manifest(
 ) -> dict:
     output_paths = {
         "output_dir": str(output_dir.resolve()),
-        "scene": str(scene_path.resolve()),
     }
+    if scene_path is not None:
+        output_paths["scene"] = str(scene_path.resolve())
     if mesh_parts_dir is not None:
         output_paths["mesh_parts_dir"] = str(mesh_parts_dir.resolve())
     if mesh_objects_dir is not None:
@@ -52,7 +53,7 @@ def build_manifest(
     return {
         "mode": mode,
         "config": config_tag,
-        "scene_path": str(scene_path.resolve()),
+        "scene_path": str(scene_path.resolve()) if scene_path is not None else None,
         "masks_count": int(masks_count),
         "image_path": str(image_path.resolve()),
         "masks_dir": str(masks_dir.resolve()),
@@ -142,7 +143,6 @@ def run_gaussian(args: argparse.Namespace, config_path: Path, output_dir: Path) 
 
 def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> dict:
     from notebook.inference import Inference, load_image, load_masks
-    from demo_multi_object_mesh import build_mesh_scene
     from generate_per_object import (
         cleanup_cuda,
         export_transformed_object_glb,
@@ -179,7 +179,7 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
     if cfg["max_objects"] is not None:
         masks = masks[: cfg["max_objects"]]
 
-    mesh_scene_items = []
+    transformed_paths: list[Path] = []
     for idx, mask in enumerate(masks):
         obj = run_one_mask(inference, image, mask, seed=42, cfg=cfg, idx=idx, mesh_dir=str(mesh_parts_dir))
 
@@ -202,22 +202,14 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
             obj["scale"],
             str(transformed_path),
         )
-
-        mesh_scene_items.append(
-            {
-                "mesh": mesh_data,
-                "rotation": obj["rotation"],
-                "translation": obj["translation"],
-                "scale": obj["scale"],
-            }
-        )
+        transformed_paths.append(transformed_path)
         cleanup_cuda()
 
-    if not mesh_scene_items:
+    if not transformed_paths:
         raise RuntimeError("No mesh scene items were generated from provided masks.")
 
-    scene_path = output_dir / "scene.glb"
-    build_mesh_scene(mesh_scene_items, str(scene_path))
+    # Mesh mode exports transformed per-object GLBs only.
+    scene_path = transformed_paths[0]
 
     return build_manifest(
         mode="mesh",
@@ -227,7 +219,7 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
         masks_dir=Path(args.masks_dir),
         output_dir=output_dir,
         scene_path=scene_path,
-        masks_count=len(mesh_scene_items),
+        masks_count=len(transformed_paths),
         run_config=cfg,
         mesh_parts_dir=mesh_parts_dir,
         mesh_objects_dir=mesh_objects_dir,

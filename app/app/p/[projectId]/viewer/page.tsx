@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { promises as fs } from "fs";
 import path from "path";
+import { createHash } from "crypto";
 
 import { ViewerLoader } from "@/components/viewer/viewer-loader";
 import { Badge } from "@/components/ui/badge";
@@ -15,8 +16,13 @@ import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3"
 import { isRenderableInViewer, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
 
 interface SceneResultManifest {
+  scene_path?: string;
+  objects?: Array<{
+    transformed_object_path?: string;
+  }>;
   mesh_objects_dir?: string;
   output_paths?: {
+    scene?: string;
     mesh_objects_dir?: string;
   };
 }
@@ -58,8 +64,37 @@ function parseManifest(raw: string): SceneResultManifest | null {
   }
 }
 
+async function sha256File(filePath: string): Promise<string | null> {
+  try {
+    const buffer = await fs.readFile(filePath);
+    return createHash("sha256").update(buffer).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
 function toUniqueStrings(values: string[]) {
   return [...new Set(values.filter((value) => value.length > 0))];
+}
+
+function toUniqueSignedUrlsByAssetPath(values: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const rawValue of values) {
+    if (!rawValue || rawValue.length === 0) continue;
+    let key = rawValue;
+    try {
+      const parsed = new URL(rawValue);
+      const storageKey = parsed.searchParams.get("key");
+      key = storageKey && storageKey.length > 0 ? `key:${storageKey}` : `path:${parsed.origin}${parsed.pathname}`;
+    } catch {
+      key = rawValue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(rawValue);
+  }
+  return result;
 }
 
 async function resolveAdditionalSceneUrlsFromManifest(input: {
@@ -103,6 +138,12 @@ async function resolveAdditionalSceneUrlsFromManifest(input: {
             ? manifest.mesh_objects_dir
             : "";
       if (!rawMeshObjectsDir) continue;
+      const rawScenePath =
+        typeof manifest.output_paths?.scene === "string"
+          ? manifest.output_paths.scene
+          : typeof manifest.scene_path === "string"
+            ? manifest.scene_path
+            : "";
 
       const primaryMeshDir = path.isAbsolute(rawMeshObjectsDir)
         ? rawMeshObjectsDir
@@ -119,12 +160,59 @@ async function resolveAdditionalSceneUrlsFromManifest(input: {
         );
       if (!meshObjectsDir) continue;
 
-      const files = await fs.readdir(meshObjectsDir);
-      const glbPaths = files
-        .filter((fileName) => fileName.toLowerCase().endsWith(".glb"))
-        .sort((a, b) => a.localeCompare(b))
-        .map((fileName) => path.join(meshObjectsDir, fileName));
+      const manifestObjectPaths = Array.isArray(manifest.objects)
+        ? manifest.objects
+            .map((entry) =>
+              typeof entry?.transformed_object_path === "string" ? entry.transformed_object_path : ""
+            )
+            .filter((value) => value.length > 0)
+        : [];
+      const resolvedObjectPaths = manifestObjectPaths
+        .map((value) => (path.isAbsolute(value) ? value : path.resolve(path.dirname(manifestPath), value)))
+        .filter((value) => value.toLowerCase().endsWith(".glb"));
+
+      let glbPaths: string[] = [];
+      if (resolvedObjectPaths.length > 0) {
+        glbPaths = [...resolvedObjectPaths].sort((a, b) => a.localeCompare(b));
+      } else {
+        const files = await fs.readdir(meshObjectsDir);
+        glbPaths = files
+          .filter((fileName) => fileName.toLowerCase().endsWith(".glb"))
+          .sort((a, b) => a.localeCompare(b))
+          .map((fileName) => path.join(meshObjectsDir, fileName));
+      }
       if (glbPaths.length === 0) continue;
+
+      // Legacy runs may include both scene.glb and per-object GLBs.
+      // For new runs, scene_path points to object_000_posed.glb, so we must not filter it out.
+      // Apply scene-hash filtering only when manifest does not explicitly provide objects[].
+      if (resolvedObjectPaths.length === 0) {
+        const resolvedScenePath = rawScenePath
+          ? path.isAbsolute(rawScenePath)
+            ? rawScenePath
+            : path.resolve(path.dirname(manifestPath), rawScenePath)
+          : null;
+        const sceneHash = resolvedScenePath ? await sha256File(resolvedScenePath) : null;
+        const glbHashCache = new Map<string, string | null>();
+        const filteredGlbPaths: string[] = [];
+        for (const glbPath of glbPaths) {
+          if (resolvedScenePath && path.resolve(glbPath) === path.resolve(resolvedScenePath)) {
+            continue;
+          }
+          if (sceneHash) {
+            const existing = glbHashCache.get(glbPath);
+            const glbHash = existing === undefined ? await sha256File(glbPath) : existing;
+            if (existing === undefined) glbHashCache.set(glbPath, glbHash);
+            if (glbHash && glbHash === sceneHash) {
+              continue;
+            }
+          }
+          filteredGlbPaths.push(glbPath);
+        }
+        if (filteredGlbPaths.length > 0) {
+          glbPaths = filteredGlbPaths;
+        }
+      }
 
       const storageKeys = glbPaths
         .map((absoluteFilePath) => toStorageKeyFromLocalPath(localRoot, absoluteFilePath))
@@ -255,10 +343,9 @@ export default async function ViewerPage({
         const metadataAdditionalSceneUrls = (
           await Promise.all(metadataAdditionalSceneKeys.map(async (key) => safeGetSignedDownloadUrl(key)))
         ).filter((value): value is string => typeof value === "string" && value.length > 0);
-        const additionalSceneUrls = toUniqueStrings([
-          ...manifestAdditionalSceneUrls,
-          ...metadataAdditionalSceneUrls
-        ]);
+        const additionalSceneUrls = toUniqueSignedUrlsByAssetPath(
+          manifestAdditionalSceneUrls.length > 0 ? manifestAdditionalSceneUrls : metadataAdditionalSceneUrls
+        );
 
         initialArtifact = {
           id: selectedArtifact.id,
