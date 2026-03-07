@@ -21,10 +21,18 @@ interface ViewerArtifact {
   additionalSceneUrls?: string[] | null;
 }
 
+type SplatFormatHint = "ply" | "splat" | "ksplat" | "spz" | null;
+
 interface WorldManifestResponse {
   artifactId: string;
   meshes: Array<{ id: string; url: string }>;
-  splats: Array<{ id: string; artifactId: string; tilesetUrl: string | null; sourceUrl: string | null }>;
+  splats: Array<{
+    id: string;
+    artifactId: string;
+    kind?: string;
+    tilesetUrl: string | null;
+    sourceUrl: string | null;
+  }>;
   build?: {
     canBuildTileset?: boolean;
     defaultPresetName?: string;
@@ -39,7 +47,7 @@ interface UnifiedManifest {
     fov?: number;
   };
   meshes: Array<{ id: string; url: string }>;
-  splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null }>;
+  splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
 }
 
 function normalizeAssetUrlForDedup(url: string): string {
@@ -78,6 +86,25 @@ function inferKindFromFilename(filename: string): ViewerArtifact["kind"] | null 
   if (lower.endsWith(".ksplat")) return "splat_ksplat";
   if (lower.endsWith(".spz")) return "splat_ksplat";
   if (lower.endsWith(".splat")) return "splat_ksplat";
+  return null;
+}
+
+function inferSplatFormatHintFromUrl(url: string): SplatFormatHint {
+  const lower = url.toLowerCase();
+  if (lower.endsWith(".compressed.ply")) return "ply";
+  if (lower.endsWith(".ply")) return "ply";
+  if (lower.endsWith(".ksplat")) return "ksplat";
+  if (lower.endsWith(".spz")) return "spz";
+  if (lower.endsWith(".splat")) return "splat";
+  return null;
+}
+
+function inferSplatFormatHintFromKind(kind: string | null | undefined): SplatFormatHint {
+  const normalized = (kind ?? "").toLowerCase();
+  if (normalized === "point_ply") return "ply";
+  if (normalized === "splat_ksplat") return "ksplat";
+  if (normalized === "splat" || normalized === "gsplat") return "splat";
+  if (normalized === "spz") return "spz";
   return null;
 }
 
@@ -120,11 +147,15 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
 
   const splatLike = artifact.kind === "point_ply" || artifact.kind === "splat_ksplat";
   if (splatLike) {
+    const formatHint =
+      inferSplatFormatHintFromKind(artifact.kind) ??
+      inferSplatFormatHintFromUrl(artifact.url) ??
+      inferSplatFormatHintFromUrl(artifact.filename ?? "");
     return {
       artifactId: artifact.id,
       camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
       meshes: [],
-      splats: [{ id: `splat-${artifact.id}`, tilesetUrl: null, sourceUrl: artifact.url }]
+      splats: [{ id: `splat-${artifact.id}`, tilesetUrl: null, sourceUrl: artifact.url, formatHint }]
     };
   }
 
@@ -180,7 +211,10 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
         splats: worldManifest.splats.map((entry) => ({
           id: entry.id,
           tilesetUrl: entry.tilesetUrl,
-          sourceUrl: entry.sourceUrl
+          sourceUrl: entry.sourceUrl,
+          formatHint:
+            inferSplatFormatHintFromKind(entry.kind) ??
+            (entry.sourceUrl ? inferSplatFormatHintFromUrl(entry.sourceUrl) : null)
         }))
       };
     }
