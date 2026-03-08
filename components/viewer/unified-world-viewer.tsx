@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent
+} from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -70,6 +78,11 @@ interface MeshTransformRecord {
   scale: [number, number, number];
 }
 
+interface PersistedViewerTransforms {
+  meshes: Record<string, MeshTransformRecord>;
+  splats: Record<string, MeshTransformRecord>;
+}
+
 interface MeshListItem {
   id: string;
   label: string;
@@ -135,6 +148,8 @@ const PLY_3DGS_PROPERTIES = [
   "rot_3"
 ] as const;
 
+const TRANSFORM_STEP_OPTIONS = [0.1, 1, 10] as const;
+
 const PLY_3DGS_RECORD_SIZE_BYTES = 68; // 17 float32 values
 const SH_C0 = 0.28209479177387814;
 
@@ -143,6 +158,35 @@ interface ParsedPlyHeader {
   dataOffset: number;
   format: string;
   properties: string[];
+}
+
+function objectToTransformRecord(object: THREE.Object3D): MeshTransformRecord {
+  return {
+    position: [object.position.x, object.position.y, object.position.z],
+    rotation: [object.quaternion.x, object.quaternion.y, object.quaternion.z, object.quaternion.w],
+    scale: [object.scale.x, object.scale.y, object.scale.z]
+  };
+}
+
+function applyTransformRecord(object: THREE.Object3D, transform: MeshTransformRecord) {
+  object.position.set(transform.position[0], transform.position[1], transform.position[2]);
+  object.quaternion.set(
+    transform.rotation[0],
+    transform.rotation[1],
+    transform.rotation[2],
+    transform.rotation[3]
+  );
+  object.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
+  object.updateMatrixWorld(true);
+}
+
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function clamp01(value: number): number {
@@ -478,6 +522,7 @@ export function UnifiedWorldViewer({
   const [meshItems, setMeshItems] = useState<MeshListItem[]>([]);
   const [splatItems, setSplatItems] = useState<SplatListItem[]>([]);
   const [transformDraft, setTransformDraft] = useState<TransformDraft | null>(null);
+  const [transformStep, setTransformStep] = useState<number>(1);
   const [transformDebug, setTransformDebug] = useState<string>("");
   const [persistState, setPersistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [persistMessage, setPersistMessage] = useState<string | null>(null);
@@ -595,11 +640,15 @@ export function UnifiedWorldViewer({
     const transforms: Record<string, MeshTransformRecord> = {};
     for (const meshRoot of meshRootsRef.current) {
       const id = meshRoot.name || meshRoot.uuid;
-      transforms[id] = {
-        position: [meshRoot.position.x, meshRoot.position.y, meshRoot.position.z],
-        rotation: [meshRoot.quaternion.x, meshRoot.quaternion.y, meshRoot.quaternion.z, meshRoot.quaternion.w],
-        scale: [meshRoot.scale.x, meshRoot.scale.y, meshRoot.scale.z]
-      };
+      transforms[id] = objectToTransformRecord(meshRoot);
+    }
+    return transforms;
+  }, []);
+
+  const serializeSplatTransforms = useCallback((): Record<string, MeshTransformRecord> => {
+    const transforms: Record<string, MeshTransformRecord> = {};
+    for (const handle of splatHandlesRef.current) {
+      transforms[handle.id] = objectToTransformRecord(handle.object);
     }
     return transforms;
   }, []);
@@ -609,15 +658,7 @@ export function UnifiedWorldViewer({
       const id = meshRoot.name || meshRoot.uuid;
       const transform = transforms[id];
       if (!transform) continue;
-      meshRoot.position.set(transform.position[0], transform.position[1], transform.position[2]);
-      meshRoot.quaternion.set(
-        transform.rotation[0],
-        transform.rotation[1],
-        transform.rotation[2],
-        transform.rotation[3]
-      );
-      meshRoot.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
-      meshRoot.updateMatrixWorld(true);
+      applyTransformRecord(meshRoot, transform);
     }
   }, []);
 
@@ -630,7 +671,8 @@ export function UnifiedWorldViewer({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           artifactId: manifest.artifactId,
-          meshes: serializeMeshTransforms()
+          meshes: serializeMeshTransforms(),
+          splats: serializeSplatTransforms()
         })
       });
       if (!response.ok) {
@@ -643,7 +685,7 @@ export function UnifiedWorldViewer({
       setPersistState("error");
       setPersistMessage(err instanceof Error ? err.message : "Failed to save transforms");
     }
-  }, [isPersistableArtifact, manifest.artifactId, serializeMeshTransforms]);
+  }, [isPersistableArtifact, manifest.artifactId, serializeMeshTransforms, serializeSplatTransforms]);
 
   const schedulePersist = useCallback(() => {
     if (!isPersistableArtifact) return;
@@ -657,21 +699,25 @@ export function UnifiedWorldViewer({
     }, 650);
   }, [isPersistableArtifact, persistTransforms]);
 
-  const loadPersistedTransforms = useCallback(async (): Promise<Record<string, MeshTransformRecord>> => {
-    if (!isPersistableArtifact || !manifest.artifactId) return {};
+  const loadPersistedTransforms = useCallback(async (): Promise<PersistedViewerTransforms> => {
+    if (!isPersistableArtifact || !manifest.artifactId) return { meshes: {}, splats: {} };
     try {
       const response = await fetch(`/api/world/transforms?artifactId=${encodeURIComponent(manifest.artifactId)}`, {
         cache: "no-store"
       });
-      if (!response.ok) return {};
+      if (!response.ok) return { meshes: {}, splats: {} };
       const payload = (await response.json()) as {
         payload?: {
           meshes?: Record<string, MeshTransformRecord>;
+          splats?: Record<string, MeshTransformRecord>;
         };
       };
-      return payload.payload?.meshes ?? {};
+      return {
+        meshes: payload.payload?.meshes ?? {},
+        splats: payload.payload?.splats ?? {}
+      };
     } catch {
-      return {};
+      return { meshes: {}, splats: {} };
     }
   }, [isPersistableArtifact, manifest.artifactId]);
 
@@ -729,7 +775,8 @@ export function UnifiedWorldViewer({
       selectedBoxRef.current = box;
     };
     const attachSplatSelectionBox = (target: THREE.Object3D, bounds?: THREE.Box3) => {
-      const box = bounds?.clone() ?? new THREE.Box3().setFromObject(target);
+      target.updateMatrixWorld(true);
+      const box = bounds?.clone().applyMatrix4(target.matrixWorld) ?? new THREE.Box3().setFromObject(target);
       if (box.isEmpty()) return;
       const helper = new THREE.Box3Helper(box, 0x34d399);
       helper.renderOrder = 9998;
@@ -751,8 +798,7 @@ export function UnifiedWorldViewer({
     }
     if (object && resolvedKind === "splat") {
       attachSplatSelectionBox(object, splatHandle?.bounds);
-      setTransformDraft(null);
-      setTransformDebug(`selected=${object.name || object.uuid} (splat)`);
+      syncTransformDraft(object);
       return;
     }
     setTransformDraft(null);
@@ -775,79 +821,125 @@ export function UnifiedWorldViewer({
     []
   );
 
-  const applyTransformDraft = useCallback(() => {
-    if (selectedKind !== "mesh") {
-      setTransformDebug("Transform editing is available only for mesh objects.");
-      return;
-    }
+  const resolveSelectedObject = useCallback((): THREE.Object3D | null => {
     const selectedId = selectedName;
-    const object =
-      (selectedId
-        ? meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === selectedId) ?? null
-        : null) ?? selectedRef.current;
-    if (!object || !transformDraft) return;
-
-    const read = (value: string, fallback: number) => {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : fallback;
-    };
-
-    const px = read(transformDraft.position[0], object.position.x);
-    const py = read(transformDraft.position[1], object.position.y);
-    const pz = read(transformDraft.position[2], object.position.z);
-    const rx = read(transformDraft.rotation[0], THREE.MathUtils.radToDeg(object.rotation.x));
-    const ry = read(transformDraft.rotation[1], THREE.MathUtils.radToDeg(object.rotation.y));
-    const rz = read(transformDraft.rotation[2], THREE.MathUtils.radToDeg(object.rotation.z));
-    const sx = read(transformDraft.scale[0], object.scale.x);
-    const sy = read(transformDraft.scale[1], object.scale.y);
-    const sz = read(transformDraft.scale[2], object.scale.z);
-    const beforeEuler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
-    const beforeWorld = new THREE.Vector3();
-    object.getWorldPosition(beforeWorld);
-
-    object.traverse((node: THREE.Object3D) => {
-      node.matrixAutoUpdate = true;
-      node.matrixWorldAutoUpdate = true;
-    });
-    object.position.set(px, py, pz);
-    object.rotation.set(
-      THREE.MathUtils.degToRad(rx),
-      THREE.MathUtils.degToRad(ry),
-      THREE.MathUtils.degToRad(rz),
-      "XYZ"
-    );
-    object.scale.set(sx, sy, sz);
-    object.updateWorldMatrix(true, true);
-    sceneRef.current?.updateMatrixWorld(true);
-    if (rendererRef.current && cameraRef.current && sceneRef.current) {
-      rendererRef.current.render(sceneRef.current, cameraRef.current);
+    if (selectedId && selectedKind === "mesh") {
+      return meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === selectedId) ?? selectedRef.current;
     }
-    const afterEuler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
-    const afterWorld = new THREE.Vector3();
-    object.getWorldPosition(afterWorld);
+    if (selectedId && selectedKind === "splat") {
+      return [...splatHandlesRef.current].find((entry) => entry.id === selectedId)?.object ?? selectedRef.current;
+    }
+    return selectedRef.current;
+  }, [selectedKind, selectedName]);
+
+  const syncLiveSplatSelectionBox = useCallback(() => {
+    if (selectedKind !== "splat") return;
+    const helper = selectedBoxRef.current;
+    if (!(helper instanceof THREE.Box3Helper)) return;
+    const selectedId = selectedName;
+    if (!selectedId) return;
+    const handle = [...splatHandlesRef.current].find((entry) => entry.id === selectedId);
+    if (!handle?.bounds) return;
+    helper.box.copy(handle.bounds).applyMatrix4(handle.object.matrixWorld);
+    helper.updateMatrixWorld(true);
+  }, [selectedKind, selectedName]);
+
+  const applyTransformFromDraft = useCallback(
+    (draft: TransformDraft, commit: boolean) => {
+      const object = resolveSelectedObject();
+      if (!object) return false;
+
+      const read = (value: string, fallback: number) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      };
+
+      const px = read(draft.position[0], object.position.x);
+      const py = read(draft.position[1], object.position.y);
+      const pz = read(draft.position[2], object.position.z);
+      const rx = read(draft.rotation[0], THREE.MathUtils.radToDeg(object.rotation.x));
+      const ry = read(draft.rotation[1], THREE.MathUtils.radToDeg(object.rotation.y));
+      const rz = read(draft.rotation[2], THREE.MathUtils.radToDeg(object.rotation.z));
+      const sx = read(draft.scale[0], object.scale.x);
+      const sy = read(draft.scale[1], object.scale.y);
+      const sz = read(draft.scale[2], object.scale.z);
+
+      object.position.set(px, py, pz);
+      object.rotation.set(
+        THREE.MathUtils.degToRad(rx),
+        THREE.MathUtils.degToRad(ry),
+        THREE.MathUtils.degToRad(rz),
+        "XYZ"
+      );
+      object.scale.set(sx, sy, sz);
+      object.updateWorldMatrix(true, true);
+      sceneRef.current?.updateMatrixWorld(true);
+
+      if (commit) {
+        schedulePersist();
+        setTransformDebug(`apply id=${object.name || object.uuid} pos=(${px.toFixed(3)},${py.toFixed(3)},${pz.toFixed(3)})`);
+        setSelectedObject(object, selectedKind);
+      } else {
+        syncLiveSplatSelectionBox();
+      }
+      return true;
+    },
+    [resolveSelectedObject, schedulePersist, selectedKind, setSelectedObject, syncLiveSplatSelectionBox]
+  );
+
+  const nudgeTransformDraftValue = useCallback(
+    (section: keyof TransformDraft, axisIndex: 0 | 1 | 2, direction: -1 | 1) => {
+      if (!transformDraft) return;
+
+      const fallback = section === "scale" ? 1 : 0;
+      const raw = transformDraft[section][axisIndex];
+      const parsed = Number(raw);
+      const base = Number.isFinite(parsed) ? parsed : fallback;
+      let nextValue = base + direction * transformStep;
+      if (section === "scale") {
+        nextValue = Math.max(0.001, nextValue);
+      }
+      const precision = section === "rotation" ? 2 : 3;
+      const next: TransformDraft = {
+        position: [...transformDraft.position] as [string, string, string],
+        rotation: [...transformDraft.rotation] as [string, string, string],
+        scale: [...transformDraft.scale] as [string, string, string]
+      };
+      next[section][axisIndex] = nextValue.toFixed(precision);
+      setTransformDraft(next);
+      if (applyTransformFromDraft(next, false)) {
+        schedulePersist();
+      }
+    },
+    [applyTransformFromDraft, schedulePersist, transformDraft, transformStep]
+  );
+
+  const applyTransformDraft = useCallback(() => {
+    if (!transformDraft) return;
+    applyTransformFromDraft(transformDraft, true);
+  }, [applyTransformFromDraft, transformDraft]);
+
+  const resetSelectedTransform = useCallback(() => {
+    const selectedId = selectedName;
+    let object: THREE.Object3D | null = null;
+    if (selectedId && selectedKind === "mesh") {
+      object = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === selectedId) ?? null;
+    } else if (selectedId && selectedKind === "splat") {
+      object = [...splatHandlesRef.current].find((entry) => entry.id === selectedId)?.object ?? null;
+    }
+    object = object ?? selectedRef.current;
+    if (!object) return;
+
+    object.position.set(0, 0, 0);
+    object.quaternion.set(0, 0, 0, 1);
+    object.scale.set(1, 1, 1);
+    object.updateMatrixWorld(true);
+    sceneRef.current?.updateMatrixWorld(true);
 
     schedulePersist();
-    selectedRef.current = object;
-    setSelectedName(object.name || object.uuid);
-    setTransformDebug(
-      `apply id=${object.name || object.uuid} inPos=(${transformDraft.position.join(",")}) inRot=(${transformDraft.rotation.join(
-        ","
-      )}) inScale=(${transformDraft.scale.join(",")}) ` +
-        `beforeL=(${beforeWorld.x.toFixed(3)},${beforeWorld.y.toFixed(3)},${beforeWorld.z.toFixed(
-          3
-        )}) beforeR=(${THREE.MathUtils.radToDeg(beforeEuler.x).toFixed(2)},${THREE.MathUtils.radToDeg(
-          beforeEuler.y
-        ).toFixed(2)},${THREE.MathUtils.radToDeg(beforeEuler.z).toFixed(2)}) ` +
-        `afterL=(${object.position.x.toFixed(3)},${object.position.y.toFixed(3)},${object.position.z.toFixed(
-          3
-        )}) afterW=(${afterWorld.x.toFixed(3)},${afterWorld.y.toFixed(3)},${afterWorld.z.toFixed(
-          3
-        )}) afterR=(${THREE.MathUtils.radToDeg(afterEuler.x).toFixed(2)},${THREE.MathUtils.radToDeg(
-          afterEuler.y
-        ).toFixed(2)},${THREE.MathUtils.radToDeg(afterEuler.z).toFixed(2)})`
-    );
-    syncTransformDraft(object);
-  }, [schedulePersist, selectedKind, selectedName, syncTransformDraft, transformDraft]);
+    setTransformDebug(`reset id=${object.name || object.uuid} -> identity transform`);
+    setSelectedObject(object, selectedKind);
+  }, [schedulePersist, selectedKind, selectedName, setSelectedObject]);
 
   const fitScene = useCallback(() => {
     const root = rootRef.current;
@@ -1092,8 +1184,19 @@ export function UnifiedWorldViewer({
       return { object, sceneFormatEnum };
     };
 
-    const buildSplatHandleId = (source: string) =>
-      `splat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${source.length.toString(36)}`;
+    let persistedSplatTransforms: Record<string, MeshTransformRecord> = {};
+
+    const buildSplatHandleId = (source: string) => {
+      const normalized = source.split("?")[0] ?? source;
+      const base = `splat-${stableHash(normalized)}`;
+      let id = base;
+      let suffix = 1;
+      while ([...splatHandlesRef.current].some((handle) => handle.id === id)) {
+        id = `${base}-${suffix}`;
+        suffix += 1;
+      }
+      return id;
+    };
 
     const buildSplatLabel = (source: string) => {
       const base = source.split("?")[0]?.split("/").pop() || source;
@@ -1108,7 +1211,8 @@ export function UnifiedWorldViewer({
 
     const createSplatHandleFromUrl = async (
       url: string,
-      formatHint?: "ply" | "splat" | "ksplat" | "spz" | null
+      formatHint?: "ply" | "splat" | "ksplat" | "spz" | null,
+      idSource?: string
     ): Promise<SplatHandle> => {
       const { object, sceneFormatEnum } = await createDropInViewerObject();
       const sceneFormat = inferSceneFormat(sceneFormatEnum, url, formatHint);
@@ -1136,8 +1240,8 @@ export function UnifiedWorldViewer({
       }
 
       const handle: SplatHandle = {
-        id: buildSplatHandleId(url),
-        label: buildSplatLabel(url),
+        id: buildSplatHandleId(idSource ?? url),
+        label: buildSplatLabel(idSource ?? url),
         object,
         dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
         update: typeof object.update === "function" ? () => object.update?.() : undefined,
@@ -1145,6 +1249,10 @@ export function UnifiedWorldViewer({
       };
       object.name = handle.label;
       splatHandlesRef.current.add(handle);
+      const persisted = persistedSplatTransforms[handle.id];
+      if (persisted) {
+        applyTransformRecord(handle.object, persisted);
+      }
       refreshSplatItems();
       updateHudFromHandles();
       if (!selectedRef.current && meshRootsRef.current.length === 0) {
@@ -1153,7 +1261,11 @@ export function UnifiedWorldViewer({
       return handle;
     };
 
-    const createPointCloudHandleFromPly = async (url: string, vertexCountHint?: number): Promise<SplatHandle> => {
+    const createPointCloudHandleFromPly = async (
+      url: string,
+      vertexCountHint?: number,
+      idSource?: string
+    ): Promise<SplatHandle> => {
       let geometry: THREE.BufferGeometry | null = null;
       try {
         geometry = await tryLoad3dgsBinaryPlyGeometry(url);
@@ -1185,8 +1297,8 @@ export function UnifiedWorldViewer({
       root.add(points);
 
       const handle: SplatHandle = {
-        id: buildSplatHandleId(url),
-        label: buildSplatLabel(url),
+        id: buildSplatHandleId(idSource ?? url),
+        label: buildSplatLabel(idSource ?? url),
         object: points,
         dispose: () => {
           points.geometry.dispose();
@@ -1196,6 +1308,10 @@ export function UnifiedWorldViewer({
         bounds: geometry.boundingBox?.clone()
       };
       splatHandlesRef.current.add(handle);
+      const persisted = persistedSplatTransforms[handle.id];
+      if (persisted) {
+        applyTransformRecord(handle.object, persisted);
+      }
       refreshSplatItems();
       updateHudFromHandles();
       if (!selectedRef.current && meshRootsRef.current.length === 0) {
@@ -1229,7 +1345,7 @@ export function UnifiedWorldViewer({
         }
 
         try {
-          const handle = await createSplatHandleFromUrl(gaussianUrl, "ply");
+          const handle = await createSplatHandleFromUrl(gaussianUrl, "ply", url);
           handle.splatCount = effectiveVertexCount > 0 ? effectiveVertexCount : handle.splatCount;
           handle.bounds = splatBounds ?? undefined;
           refreshSplatItems();
@@ -1244,7 +1360,7 @@ export function UnifiedWorldViewer({
         }
       }
 
-      await createPointCloudHandleFromPly(url, vertexCount > 0 ? vertexCount : undefined);
+      await createPointCloudHandleFromPly(url, vertexCount > 0 ? vertexCount : undefined, url);
       setError(null);
     };
 
@@ -1259,6 +1375,7 @@ export function UnifiedWorldViewer({
         }
 
         const persistedTransforms = await loadPersistedTransforms();
+        persistedSplatTransforms = persistedTransforms.splats;
         if (disposed || cancelled) return;
 
         const meshIdUsage = new Map<string, number>();
@@ -1304,7 +1421,7 @@ export function UnifiedWorldViewer({
           }
         }
 
-        applyMeshTransforms(persistedTransforms);
+        applyMeshTransforms(persistedTransforms.meshes);
         refreshMeshItems();
         if (meshRootsRef.current.length > 0) {
           setSelectedObject(meshRootsRef.current[0] ?? null);
@@ -1330,7 +1447,11 @@ export function UnifiedWorldViewer({
                 setError(message);
               });
             } else {
-              void createSplatHandleFromUrl(splatEntry.url, splatEntry.formatHint).catch((splatError) => {
+              void createSplatHandleFromUrl(
+                splatEntry.url,
+                splatEntry.formatHint,
+                splatEntry.url
+              ).catch((splatError) => {
                 if (disposed || cancelled) return;
                 const message = splatError instanceof Error ? splatError.message : "Failed to load splat scene.";
                 setError(message);
@@ -1788,21 +1909,70 @@ export function UnifiedWorldViewer({
       {openPanel === "transform" ? (
         <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Transform</div>
-          {selectedKind === "mesh" && transformDraft ? (
+          {selectedKind && transformDraft ? (
             <div className="space-y-2">
+              <div className="rounded-md border border-border/50 bg-background/20 p-1.5">
+                <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Step</div>
+                <div className="grid grid-cols-3 gap-1">
+                  {TRANSFORM_STEP_OPTIONS.map((step) => (
+                    <Button
+                      key={`transform-step-${step}`}
+                      type="button"
+                      size="sm"
+                      variant={transformStep === step ? "default" : "outline"}
+                      className="h-6 rounded-md px-2 text-[11px]"
+                      onClick={() => setTransformStep(step)}
+                    >
+                      {step}
+                    </Button>
+                  ))}
+                </div>
+              </div>
               {(["position", "rotation", "scale"] as const).map((section) => (
                 <div key={section}>
                   <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">{section}</div>
                   <div className="grid grid-cols-3 gap-1">
                     {([0, 1, 2] as const).map((axisIndex) => (
-                      <Input
-                        key={`${section}-${axisIndex}`}
-                        className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
-                        value={transformDraft[section][axisIndex]}
-                        onChange={(event) =>
-                          updateTransformDraftValue(section, axisIndex, event.target.value)
-                        }
-                      />
+                      <div key={`${section}-${axisIndex}`} className="grid grid-cols-[1fr_auto] gap-1">
+                        <Input
+                          className="h-7 min-w-0 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                          value={transformDraft[section][axisIndex]}
+                          onChange={(event) =>
+                            updateTransformDraftValue(section, axisIndex, event.target.value)
+                          }
+                          onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            applyTransformDraft();
+                          }}
+                          onMouseDownCapture={(event: ReactMouseEvent<HTMLInputElement>) => {
+                            if (event.button === 1) {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }
+                          }}
+                        />
+                        <div className="grid grid-rows-2 gap-0.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-[13px] w-6 rounded-[6px] px-0 text-[10px] leading-none"
+                            onClick={() => nudgeTransformDraftValue(section, axisIndex, 1)}
+                          >
+                            +
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-[13px] w-6 rounded-[6px] px-0 text-[10px] leading-none"
+                            onClick={() => nudgeTransformDraftValue(section, axisIndex, -1)}
+                          >
+                            -
+                          </Button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -1815,9 +1985,10 @@ export function UnifiedWorldViewer({
                   size="sm"
                   variant="outline"
                   className="h-7 rounded-md text-xs"
-                  onClick={() => syncTransformDraft(selectedRef.current)}
+                  onClick={resetSelectedTransform}
+                  disabled={!selectedRef.current}
                 >
-                  Reset
+                  Reset Transform
                 </Button>
                 <Button
                   size="sm"
@@ -1832,30 +2003,15 @@ export function UnifiedWorldViewer({
               <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
                 {transformDebug}
               </div>
+              {selectedKind === "splat" ? (
+                <div className="text-[11px] text-zinc-400">Editing splat transform</div>
+              ) : null}
               {isPersistableArtifact ? (
                 <div className="text-[11px] text-zinc-400">
                   Transforms: {persistState}
                   {persistMessage ? ` • ${persistMessage}` : ""}
                 </div>
               ) : null}
-            </div>
-          ) : selectedKind === "splat" ? (
-            <div className="space-y-2">
-              <div className="rounded-md border border-border/50 bg-background/20 p-2 text-[11px] text-zinc-400">
-                Splat selected. Transform editing is disabled for splats.
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 w-full rounded-md text-xs"
-                onClick={fitSelection}
-                disabled={!selectedRef.current}
-              >
-                Focus
-              </Button>
-              <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
-                {transformDebug}
-              </div>
             </div>
           ) : (
             <div className="text-[11px] text-zinc-500">Select an object to edit transform.</div>

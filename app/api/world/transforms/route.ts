@@ -5,7 +5,7 @@ import path from "path";
 import { prisma } from "@/lib/db";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 
-interface MeshTransformRecord {
+interface TransformRecord {
   position: [number, number, number];
   rotation: [number, number, number, number];
   scale: [number, number, number];
@@ -15,7 +15,8 @@ interface ViewerTransformsPayload {
   version: 1;
   artifactId: string;
   updatedAt: string;
-  meshes: Record<string, MeshTransformRecord>;
+  meshes: Record<string, TransformRecord>;
+  splats: Record<string, TransformRecord>;
 }
 
 function getLocalStorageRoot() {
@@ -50,7 +51,7 @@ function isNumberTuple(value: unknown, length: number) {
   );
 }
 
-function isValidMeshTransformRecord(value: unknown): value is MeshTransformRecord {
+function isValidTransformRecord(value: unknown): value is TransformRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const obj = value as Record<string, unknown>;
   return (
@@ -60,12 +61,12 @@ function isValidMeshTransformRecord(value: unknown): value is MeshTransformRecor
   );
 }
 
-function sanitizeMeshesMap(raw: unknown): Record<string, MeshTransformRecord> {
+function sanitizeTransformsMap(raw: unknown): Record<string, TransformRecord> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const entries = Object.entries(raw as Record<string, unknown>);
-  const cleaned: Record<string, MeshTransformRecord> = {};
+  const cleaned: Record<string, TransformRecord> = {};
   for (const [key, value] of entries) {
-    if (!key || !isValidMeshTransformRecord(value)) continue;
+    if (!key || !isValidTransformRecord(value)) continue;
     cleaned[key] = value;
   }
   return cleaned;
@@ -126,7 +127,8 @@ export async function GET(req: NextRequest) {
         version: 1,
         artifactId,
         updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
-        meshes: sanitizeMeshesMap(parsed.meshes)
+        meshes: sanitizeTransformsMap(parsed.meshes),
+        splats: sanitizeTransformsMap(parsed.splats)
       }
     });
   } catch {
@@ -138,7 +140,8 @@ export async function GET(req: NextRequest) {
         version: 1,
         artifactId,
         updatedAt: new Date().toISOString(),
-        meshes: {}
+        meshes: {},
+        splats: {}
       }
     });
   }
@@ -154,12 +157,14 @@ export async function POST(req: NextRequest) {
   const context = await resolveContext(artifactId);
   if ("error" in context) return context.error;
 
-  const meshes = sanitizeMeshesMap(body.meshes);
+  const meshes = sanitizeTransformsMap(body.meshes);
+  const splats = sanitizeTransformsMap(body.splats);
   const payload: ViewerTransformsPayload = {
     version: 1,
     artifactId,
     updatedAt: new Date().toISOString(),
-    meshes
+    meshes,
+    splats
   };
 
   await fs.mkdir(path.dirname(context.transformsPath), { recursive: true });
@@ -169,7 +174,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     artifactId,
     transformsPath: context.transformsPath,
-    savedMeshCount: Object.keys(meshes).length
+    savedMeshCount: Object.keys(meshes).length,
+    savedSplatCount: Object.keys(splats).length
   });
 }
-
