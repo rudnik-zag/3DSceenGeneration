@@ -1,15 +1,10 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { promises as fs } from "fs";
 import path from "path";
 import { createHash } from "crypto";
 
 import { ViewerLoader } from "@/components/viewer/viewer-loader";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { prisma } from "@/lib/db";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
@@ -288,6 +283,25 @@ export default async function ViewerPage({
         meta: selectedArtifact.meta as Record<string, unknown> | null
       })
     : null;
+  const artifactPicker =
+    selectedArtifact && artifactList.length > 0
+      ? {
+          selectedKind: selectedArtifact.kind,
+          selectedArtifactText: `Artifact ${selectedArtifact.id}`,
+          activeNodeScope,
+          rendererLabel: selectedRenderer === "babylon-gs" ? "Babylon GS" : selectedRenderer === "three" ? "Three.js" : null,
+          options: artifactList.map((artifact) => ({
+            id: artifact.id,
+            kind: artifact.kind,
+            href: buildViewerHref(projectId, {
+              artifactId: artifact.id,
+              nodeId: activeNodeScope ?? undefined
+            }),
+            label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.id}`,
+            selected: artifact.id === selectedArtifact.id
+          }))
+        }
+      : null;
   let initialArtifact:
     | {
         id: string;
@@ -366,65 +380,7 @@ export default async function ViewerPage({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      {selectedArtifact ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 panel-blur p-3">
-          <Badge className="rounded-full border border-border/70 bg-background/65">{selectedArtifact.kind}</Badge>
-          {activeNodeScope ? (
-            <Badge className="rounded-full border border-border/70 bg-background/65">Node {activeNodeScope}</Badge>
-          ) : null}
-          {selectedRenderer ? (
-            <Badge className="rounded-full border border-border/70 bg-background/65">
-              {selectedRenderer === "babylon-gs" ? "Babylon GS" : "Three.js"}
-            </Badge>
-          ) : null}
-          <span className="text-sm text-muted-foreground">Artifact {selectedArtifact.id}</span>
-          <div className="ml-auto">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline" className="rounded-xl">
-                  Select artifact
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-[320px] rounded-xl border-border/70 bg-background/95 p-1">
-                <ScrollArea className="h-[40vh]">
-                  {artifactList.map((artifact) => (
-                    <DropdownMenuItem key={artifact.id} asChild className="rounded-lg">
-                      <Link
-                        href={buildViewerHref(projectId, {
-                          artifactId: artifact.id,
-                          nodeId: activeNodeScope ?? undefined
-                        })}
-                      >
-                        <span className="inline-flex min-w-0 items-center gap-2">
-                          <Badge variant={artifact.id === selectedArtifact.id ? "default" : "secondary"} className="rounded-full">
-                            {artifact.kind}
-                          </Badge>
-                          <span className="truncate text-xs text-muted-foreground">
-                            {new Date(artifact.createdAt).toLocaleString()} · {artifact.id}
-                          </span>
-                        </span>
-                      </Link>
-                    </DropdownMenuItem>
-                  ))}
-                </ScrollArea>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-      ) : (
-        <Card className="rounded-2xl border-border/70 panel-blur">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-white">No pipeline artifacts yet</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
-            <p>You can still open a local `.ply` / `.glb` file right now.</p>
-            <Button asChild className="rounded-xl">
-              <Link href={`/app/p/${projectId}/canvas`}>Open canvas</Link>
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+    <div className="flex h-full min-h-0 flex-col gap-1">
 
       {storageIssue ? (
         <Card className="rounded-2xl border-amber-300/40 bg-amber-500/10">
@@ -437,7 +393,7 @@ export default async function ViewerPage({
         </Card>
       ) : null}
 
-      <ViewerLoader initialArtifact={initialArtifact} />
+      <ViewerLoader initialArtifact={initialArtifact} artifactPicker={artifactPicker} />
     </div>
   );
 }

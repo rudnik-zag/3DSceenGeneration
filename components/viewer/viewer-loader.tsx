@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { FileUp, X } from "lucide-react";
 
@@ -7,6 +8,8 @@ import { UnifiedWorldViewer } from "@/components/viewer/unified-world-viewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/hooks/use-toast";
 
 interface ViewerArtifact {
@@ -48,6 +51,22 @@ interface UnifiedManifest {
   };
   meshes: Array<{ id: string; url: string }>;
   splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
+}
+
+interface ViewerArtifactPickerOption {
+  id: string;
+  kind: string;
+  href: string;
+  label: string;
+  selected: boolean;
+}
+
+interface ViewerArtifactPicker {
+  selectedKind: string;
+  selectedArtifactText: string;
+  activeNodeScope: string | null;
+  rendererLabel: string | null;
+  options: ViewerArtifactPickerOption[];
 }
 
 function normalizeAssetUrlForDedup(url: string): string {
@@ -167,7 +186,13 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
   };
 }
 
-export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtifact | null }) {
+export function ViewerLoader({
+  initialArtifact,
+  artifactPicker
+}: {
+  initialArtifact: ViewerArtifact | null;
+  artifactPicker?: ViewerArtifactPicker | null;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [localArtifact, setLocalArtifact] = useState<ViewerArtifact | null>(null);
   const [worldManifest, setWorldManifest] = useState<WorldManifestResponse | null>(null);
@@ -401,8 +426,44 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 panel-blur p-3">
+    <div className="flex h-full min-h-0 flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/70 panel-blur px-2 py-1.5">
+        {artifactPicker ? (
+          <>
+            <Badge className="rounded-full border border-border/70 bg-background/65">{artifactPicker.selectedKind}</Badge>
+            {artifactPicker.activeNodeScope ? (
+              <Badge className="rounded-full border border-border/70 bg-background/65">Node {artifactPicker.activeNodeScope}</Badge>
+            ) : null}
+            {artifactPicker.rendererLabel ? (
+              <Badge className="rounded-full border border-border/70 bg-background/65">{artifactPicker.rendererLabel}</Badge>
+            ) : null}
+            <span className="text-xs text-muted-foreground">{artifactPicker.selectedArtifactText}</span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline" className="rounded-xl">
+                  Select artifact
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[340px] rounded-xl border-border/70 bg-background/95 p-1">
+                <ScrollArea className="h-[38vh]">
+                  {artifactPicker.options.map((option) => (
+                    <DropdownMenuItem key={option.id} asChild className="rounded-lg">
+                      <Link href={option.href}>
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <Badge variant={option.selected ? "default" : "secondary"} className="rounded-full">
+                            {option.kind}
+                          </Badge>
+                          <span className="truncate text-xs text-muted-foreground">{option.label}</span>
+                        </span>
+                      </Link>
+                    </DropdownMenuItem>
+                  ))}
+                </ScrollArea>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        ) : null}
+
         <Button size="sm" className="rounded-xl" onClick={onPickLocalFile}>
           <FileUp className="mr-1 h-4 w-4" />
           Open local file
