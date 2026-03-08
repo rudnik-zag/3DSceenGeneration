@@ -10,6 +10,8 @@ import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
 import { isRenderableInViewer, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
 
+type BundleMode = "same_node" | "project_fallback";
+
 interface SceneResultManifest {
   scene_path?: string;
   objects?: Array<{
@@ -229,10 +231,11 @@ async function resolveAdditionalSceneUrlsFromManifest(input: {
   return [];
 }
 
-function buildViewerHref(projectId: string, payload: { artifactId?: string; nodeId?: string }) {
+function buildViewerHref(projectId: string, payload: { artifactId?: string; nodeId?: string; bundleMode?: BundleMode }) {
   const params = new URLSearchParams();
   if (payload.artifactId) params.set("artifactId", payload.artifactId);
   if (payload.nodeId) params.set("nodeId", payload.nodeId);
+  if (payload.bundleMode) params.set("bundleMode", payload.bundleMode);
   const query = params.toString();
   return query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
 }
@@ -242,10 +245,11 @@ export default async function ViewerPage({
   searchParams
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ artifactId?: string; nodeId?: string }>;
+  searchParams: Promise<{ artifactId?: string; nodeId?: string; bundleMode?: string }>;
 }) {
   const { projectId } = await params;
-  const { artifactId, nodeId } = await searchParams;
+  const { artifactId, nodeId, bundleMode } = await searchParams;
+  const selectedBundleMode: BundleMode = bundleMode === "same_node" ? "same_node" : "project_fallback";
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) {
@@ -269,13 +273,13 @@ export default async function ViewerPage({
   );
 
   const scopedArtifacts = nodeId ? artifacts.filter((artifact) => artifact.nodeId === nodeId) : [];
-  const artifactList = scopedArtifacts.length > 0 ? scopedArtifacts : artifacts;
+  const artifactList = artifacts;
   const selectedArtifact =
-    artifactList.find((artifact) => artifact.id === artifactId) ??
-    (artifactId ? artifacts.find((artifact) => artifact.id === artifactId) ?? null : null) ??
-    artifactList[0] ??
+    artifacts.find((artifact) => artifact.id === artifactId) ??
+    scopedArtifacts[0] ??
+    artifacts[0] ??
     null;
-  const activeNodeScope = scopedArtifacts.length > 0 ? (nodeId ?? selectedArtifact?.nodeId ?? null) : null;
+  const activeNodeScope = nodeId ?? selectedArtifact?.nodeId ?? null;
   const selectedRenderer = selectedArtifact
     ? selectViewerRenderer({
         kind: selectedArtifact.kind,
@@ -295,7 +299,7 @@ export default async function ViewerPage({
             kind: artifact.kind,
             href: buildViewerHref(projectId, {
               artifactId: artifact.id,
-              nodeId: activeNodeScope ?? undefined
+              bundleMode: selectedBundleMode
             }),
             label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.id}`,
             selected: artifact.id === selectedArtifact.id
@@ -392,7 +396,11 @@ export default async function ViewerPage({
         </Card>
       ) : null}
 
-      <ViewerLoader initialArtifact={initialArtifact} artifactPicker={artifactPicker} />
+      <ViewerLoader
+        initialArtifact={initialArtifact}
+        artifactPicker={artifactPicker}
+        initialBundleMode={selectedBundleMode}
+      />
     </div>
   );
 }

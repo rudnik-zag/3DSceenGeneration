@@ -19,13 +19,25 @@ interface ViewerArtifact {
 }
 
 type SplatFormatHint = "ply" | "splat" | "ksplat" | "spz" | null;
+type BundleMode = "same_node" | "project_fallback";
 
 interface WorldManifestResponse {
   artifactId: string;
-  meshes: Array<{ id: string; url: string }>;
+  context?: {
+    selectedRunId?: string | null;
+    selectedNodeId?: string | null;
+  };
+  bundle?: {
+    mode?: BundleMode;
+    meshRunIds?: string[];
+    splatRunIds?: string[];
+    usedCrossRunFallback?: boolean;
+  };
+  meshes: Array<{ id: string; url: string; runId?: string | null }>;
   splats: Array<{
     id: string;
     artifactId: string;
+    runId?: string | null;
     kind?: string;
     tilesetUrl: string | null;
     sourceUrl: string | null;
@@ -61,6 +73,10 @@ interface ViewerArtifactPicker {
   activeNodeScope: string | null;
   rendererLabel: string | null;
   options: ViewerArtifactPickerOption[];
+}
+
+function shortId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
 }
 
 function normalizeAssetUrlForDedup(url: string): string {
@@ -131,6 +147,17 @@ function isBlobUrl(url: string) {
   return url.startsWith("blob:");
 }
 
+function withBundleModeHref(href: string, bundleMode: BundleMode) {
+  if (typeof window === "undefined") return href;
+  try {
+    const nextUrl = new URL(href, window.location.origin);
+    nextUrl.searchParams.set("bundleMode", bundleMode);
+    return `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+  } catch {
+    return href;
+  }
+}
+
 function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest {
   const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
     ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
@@ -182,10 +209,12 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
 
 export function ViewerLoader({
   initialArtifact,
-  artifactPicker
+  artifactPicker,
+  initialBundleMode
 }: {
   initialArtifact: ViewerArtifact | null;
   artifactPicker?: ViewerArtifactPicker | null;
+  initialBundleMode?: BundleMode;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [localArtifact, setLocalArtifact] = useState<ViewerArtifact | null>(null);
@@ -194,6 +223,8 @@ export function ViewerLoader({
   const [worldManifestError, setWorldManifestError] = useState<string | null>(null);
   const [buildTilesetLoading, setBuildTilesetLoading] = useState(false);
   const [buildJobId, setBuildJobId] = useState<string | null>(null);
+  const [viewerResetVersion, setViewerResetVersion] = useState(0);
+  const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "project_fallback");
 
   const activeArtifact = useMemo(() => localArtifact ?? initialArtifact, [initialArtifact, localArtifact]);
 
@@ -208,10 +239,7 @@ export function ViewerLoader({
               (value): value is string => typeof value === "string" && value.length > 0
             )
           : [];
-      const preferPerObjectMeshes = extraMeshUrls.length > 0;
-      const baseMeshes = preferPerObjectMeshes
-        ? []
-        : worldManifest.meshes.map((entry) => ({ id: entry.id, url: entry.url }));
+      const baseMeshes = worldManifest.meshes.map((entry) => ({ id: entry.id, url: entry.url }));
       const mergedMeshes = [...baseMeshes];
       const knownUrls = new Set(mergedMeshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
       extraMeshUrls.forEach((url, index) => {
@@ -264,9 +292,11 @@ export function ViewerLoader({
       setWorldManifestLoading(true);
       setWorldManifestError(null);
       try {
-        const response = await fetch(`/api/world/manifest?artifactId=${encodeURIComponent(activeArtifact.id)}`, {
-          cache: "no-store"
+        const params = new URLSearchParams({
+          artifactId: activeArtifact.id,
+          bundleMode
         });
+        const response = await fetch(`/api/world/manifest?${params.toString()}`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Failed to load world manifest (${response.status})`);
         }
@@ -286,7 +316,7 @@ export function ViewerLoader({
     return () => {
       cancelled = true;
     };
-  }, [activeArtifact, localArtifact]);
+  }, [activeArtifact, localArtifact, bundleMode]);
 
   useEffect(() => {
     if (!buildJobId) return;
@@ -311,9 +341,11 @@ export function ViewerLoader({
             description: "Splat tileset build completed."
           });
           if (activeArtifact && !localArtifact) {
-            const refresh = await fetch(`/api/world/manifest?artifactId=${encodeURIComponent(activeArtifact.id)}`, {
-              cache: "no-store"
+            const refreshParams = new URLSearchParams({
+              artifactId: activeArtifact.id,
+              bundleMode
             });
+            const refresh = await fetch(`/api/world/manifest?${refreshParams.toString()}`, { cache: "no-store" });
             if (refresh.ok) {
               const nextManifest = (await refresh.json()) as WorldManifestResponse;
               if (!cancelled) setWorldManifest(nextManifest);
@@ -338,7 +370,7 @@ export function ViewerLoader({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeArtifact, buildJobId, localArtifact]);
+  }, [activeArtifact, buildJobId, localArtifact, bundleMode]);
 
   const onBuildTileset = async () => {
     if (!activeArtifact || localArtifact) return;
@@ -371,6 +403,32 @@ export function ViewerLoader({
   };
 
   const canBuildTileset = Boolean(!localArtifact && worldManifest?.build?.canBuildTileset);
+  const bundleSourceNote = useMemo(() => {
+    if (!worldManifest || localArtifact) return null;
+    const selectedRunId = worldManifest.context?.selectedRunId ?? null;
+    const meshRunIds =
+      worldManifest.bundle?.meshRunIds?.filter((value): value is string => typeof value === "string" && value.length > 0) ??
+      [];
+    const splatRunIds =
+      worldManifest.bundle?.splatRunIds?.filter((value): value is string => typeof value === "string" && value.length > 0) ??
+      [];
+
+    const renderPart = (label: string, runIds: string[]) => {
+      if (runIds.length === 0) return `${label}: none`;
+      if (runIds.length === 1) {
+        const id = runIds[0];
+        return selectedRunId && id === selectedRunId ? `${label}: selected run` : `${label}: ${shortId(id)}`;
+      }
+      return `${label}: ${runIds.length} runs`;
+    };
+
+    const parts = [renderPart("Meshes", meshRunIds), renderPart("Splats", splatRunIds)];
+    parts.unshift(worldManifest.bundle?.mode === "same_node" ? "mode: same node" : "mode: project fallback");
+    if (worldManifest.bundle?.usedCrossRunFallback) {
+      parts.push("cross-run fallback");
+    }
+    return parts.join(" • ");
+  }, [localArtifact, worldManifest]);
 
   const onPickLocalFile = () => {
     inputRef.current?.click();
@@ -419,6 +477,24 @@ export function ViewerLoader({
     });
   };
 
+  const onResetViewer = () => {
+    clearLocalArtifact();
+    setWorldManifest(null);
+    setWorldManifestError(null);
+    setWorldManifestLoading(false);
+    setBuildTilesetLoading(false);
+    setBuildJobId(null);
+    setViewerResetVersion((value) => value + 1);
+  };
+  const onBundleModeChange = (nextMode: BundleMode) => {
+    setBundleMode(nextMode);
+    if (typeof window !== "undefined") {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("bundleMode", nextMode);
+      window.history.replaceState(null, "", nextUrl.toString());
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
@@ -437,6 +513,7 @@ export function ViewerLoader({
           </Card>
         ) : unifiedManifest ? (
           <UnifiedWorldViewer
+            key={`${activeArtifact?.id ?? "no-artifact"}:${viewerResetVersion}`}
             manifest={unifiedManifest}
             fileMenu={{
               selectedKind: artifactPicker?.selectedKind ?? null,
@@ -445,15 +522,23 @@ export function ViewerLoader({
               selectedArtifactText:
                 artifactPicker?.selectedArtifactText ??
                 (activeArtifact ? `Artifact ${activeArtifact.id}` : "No artifact selected"),
-              options: artifactPicker?.options ?? [],
+              options:
+                artifactPicker?.options.map((option) => ({
+                  ...option,
+                  href: withBundleModeHref(option.href, bundleMode)
+                })) ?? [],
               sourceLabel: localArtifact ? "local file" : activeArtifact ? "run artifact" : "none",
               viewerLabel: "Unified",
               canUseRunArtifact: Boolean(localArtifact),
               canBuildTileset,
               buildTilesetLoading: buildTilesetLoading || Boolean(buildJobId),
+              bundleSourceNote,
+              bundleMode,
               onPickLocalFile,
               onUseRunArtifact: localArtifact ? clearLocalArtifact : undefined,
-              onBuildTileset: canBuildTileset ? onBuildTileset : undefined
+              onBuildTileset: canBuildTileset ? onBuildTileset : undefined,
+              onBundleModeChange,
+              onResetViewer
             }}
           />
         ) : (

@@ -34,6 +34,7 @@ interface WorldManifest {
 type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
 type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform";
+type BundleMode = "same_node" | "project_fallback";
 
 interface ViewerFileMenuOption {
   id: string;
@@ -54,9 +55,13 @@ interface ViewerFileMenu {
   canUseRunArtifact: boolean;
   canBuildTileset: boolean;
   buildTilesetLoading: boolean;
+  bundleSourceNote?: string | null;
+  bundleMode: BundleMode;
   onPickLocalFile: () => void;
   onUseRunArtifact?: () => void;
   onBuildTileset?: () => void;
+  onBundleModeChange?: (mode: BundleMode) => void;
+  onResetViewer?: () => void;
 }
 
 interface MeshTransformRecord {
@@ -1426,6 +1431,27 @@ export function UnifiedWorldViewer({
             ) : null}
           </div>
           <div className="mb-2 truncate text-xs text-zinc-400">{fileMenu.selectedArtifactText}</div>
+          <div className="mb-2">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Bundle Mode</div>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                size="sm"
+                variant={fileMenu.bundleMode === "same_node" ? "default" : "outline"}
+                className="h-8 rounded-md text-xs"
+                onClick={() => fileMenu.onBundleModeChange?.("same_node")}
+              >
+                Same Node
+              </Button>
+              <Button
+                size="sm"
+                variant={fileMenu.bundleMode === "project_fallback" ? "default" : "outline"}
+                className="h-8 rounded-md text-xs"
+                onClick={() => fileMenu.onBundleModeChange?.("project_fallback")}
+              >
+                Project Fallback
+              </Button>
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <Button size="sm" className="h-8 rounded-md text-xs" onClick={fileMenu.onPickLocalFile}>
               Open local file
@@ -1455,12 +1481,23 @@ export function UnifiedWorldViewer({
                 {fileMenu.buildTilesetLoading ? "Building tileset..." : "Build Tileset"}
               </Button>
             ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs col-span-2"
+              onClick={() => fileMenu.onResetViewer?.()}
+            >
+              Reset Viewer
+            </Button>
           </div>
           <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
             <span>Source: {fileMenu.sourceLabel}</span>
             <span>•</span>
             <span>Viewer: {fileMenu.viewerLabel}</span>
           </div>
+          {fileMenu.bundleSourceNote ? (
+            <div className="mt-1 text-[11px] text-zinc-400">Bundle: {fileMenu.bundleSourceNote}</div>
+          ) : null}
           {fileMenu.options.length > 0 ? (
             <div className="mt-3">
               <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Select Artifact</div>
@@ -1519,6 +1556,10 @@ export function UnifiedWorldViewer({
             <div>FPS: {fps}</div>
             <div>Triangles: {rendererRef.current?.info.render.triangles ?? 0}</div>
             <div>Draw calls: {rendererRef.current?.info.render.calls ?? 0}</div>
+            <div>
+              Scene bundle: {meshItems.length}/{manifest.meshes.length} meshes • {splatHandlesRef.current.size}/
+              {directSplats.length} splats
+            </div>
             <div>Loaded tiles: {hud.loadedTiles}</div>
             <div>Loaded splats: {hud.loadedSplats.toLocaleString()}</div>
             <div>Loaded MB: {hud.loadedMB.toFixed(1)}</div>
