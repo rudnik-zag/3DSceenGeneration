@@ -75,6 +75,14 @@ interface MeshListItem {
   label: string;
 }
 
+type SceneObjectKind = "mesh" | "splat";
+
+interface SplatListItem {
+  id: string;
+  label: string;
+  splatCount: number;
+}
+
 interface TransformDraft {
   position: [string, string, string];
   rotation: [string, string, string];
@@ -82,10 +90,13 @@ interface TransformDraft {
 }
 
 interface SplatHandle {
+  id: string;
+  label: string;
   object: THREE.Object3D;
   dispose?: () => void;
   update?: () => void;
   splatCount?: number;
+  bounds?: THREE.Box3;
 }
 
 interface ViewerHudStats {
@@ -209,6 +220,44 @@ async function inspectPlyUrl(url: string): Promise<{ vertexCount: number; is3dgs
       parsed.properties.length === expectedProperties.length &&
       expectedProperties.every((prop, idx) => parsed.properties[idx] === prop);
     return { vertexCount: parsed.vertexCount, is3dgs };
+  } catch {
+    return null;
+  }
+}
+
+async function compute3dgsBoundsFromUrl(url: string): Promise<THREE.Box3 | null> {
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const maxHeaderBytes = Math.min(bytes.byteLength, 256 * 1024);
+    const headerRaw = new TextDecoder("utf-8").decode(bytes.subarray(0, maxHeaderBytes));
+    const parsedHeader = parse3dgsHeader(headerRaw);
+    if (!parsedHeader) return null;
+
+    const requiredBytes = parsedHeader.dataOffset + parsedHeader.vertexCount * PLY_3DGS_RECORD_SIZE_BYTES;
+    if (requiredBytes > arrayBuffer.byteLength) {
+      return null;
+    }
+
+    const dataView = new DataView(arrayBuffer, parsedHeader.dataOffset);
+    const min = new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+    const max = new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+    for (let i = 0; i < parsedHeader.vertexCount; i += 1) {
+      const base = i * PLY_3DGS_RECORD_SIZE_BYTES;
+      const x = dataView.getFloat32(base + 0, true);
+      const y = dataView.getFloat32(base + 4, true);
+      const z = dataView.getFloat32(base + 8, true);
+      if (x < min.x) min.x = x;
+      if (y < min.y) min.y = y;
+      if (z < min.z) min.z = z;
+      if (x > max.x) max.x = x;
+      if (y > max.y) max.y = y;
+      if (z > max.z) max.z = z;
+    }
+    if (!Number.isFinite(min.x) || !Number.isFinite(max.x)) return null;
+    return new THREE.Box3(min, max);
   } catch {
     return null;
   }
@@ -400,7 +449,7 @@ export function UnifiedWorldViewer({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const orbitRef = useRef<OrbitControls | null>(null);
   const selectedRef = useRef<THREE.Object3D | null>(null);
-  const selectedBoxRef = useRef<THREE.BoxHelper | null>(null);
+  const selectedBoxRef = useRef<THREE.Object3D | null>(null);
   const requestRef = useRef<number | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
   const meshRootsRef = useRef<THREE.Object3D[]>([]);
@@ -425,7 +474,9 @@ export function UnifiedWorldViewer({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedKind, setSelectedKind] = useState<SceneObjectKind | null>(null);
   const [meshItems, setMeshItems] = useState<MeshListItem[]>([]);
+  const [splatItems, setSplatItems] = useState<SplatListItem[]>([]);
   const [transformDraft, setTransformDraft] = useState<TransformDraft | null>(null);
   const [transformDebug, setTransformDebug] = useState<string>("");
   const [persistState, setPersistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -441,6 +492,23 @@ export function UnifiedWorldViewer({
           formatHint: entry.formatHint ?? null
         })),
     [manifest.splats]
+  );
+
+  const objectItems = useMemo(
+    () => [
+      ...meshItems.map((item) => ({
+        id: item.id,
+        label: item.label,
+        kind: "mesh" as const
+      })),
+      ...splatItems.map((item) => ({
+        id: item.id,
+        label: item.label,
+        kind: "splat" as const,
+        splatCount: item.splatCount
+      }))
+    ],
+    [meshItems, splatItems]
   );
 
   const isPersistableArtifact = Boolean(
@@ -480,6 +548,18 @@ export function UnifiedWorldViewer({
       });
     });
     setMeshItems([...byId.values()]);
+  }, []);
+
+  const refreshSplatItems = useCallback(() => {
+    const next: SplatListItem[] = [];
+    for (const handle of splatHandlesRef.current) {
+      next.push({
+        id: handle.id,
+        label: handle.label,
+        splatCount: handle.splatCount ?? 0
+      });
+    }
+    setSplatItems(next);
   }, []);
 
   const syncTransformDraft = useCallback((object: THREE.Object3D | null) => {
@@ -595,24 +675,50 @@ export function UnifiedWorldViewer({
     }
   }, [isPersistableArtifact, manifest.artifactId]);
 
-  const setSelectedObject = useCallback((object: THREE.Object3D | null) => {
-    selectedRef.current = object;
-    setSelectedName(object ? object.name || object.uuid : null);
-    syncTransformDraft(object);
+  const clearSelectedHelper = useCallback(() => {
+    const helper = selectedBoxRef.current;
+    if (!helper) return;
     const scene = sceneRef.current;
-    if (selectedBoxRef.current) {
-      if (scene) scene.remove(selectedBoxRef.current);
-      selectedBoxRef.current.geometry.dispose();
-      const mat = selectedBoxRef.current.material as THREE.Material;
-      mat.dispose();
-      selectedBoxRef.current = null;
+    if (scene) scene.remove(helper);
+    const helperWithGeometry = helper as THREE.Object3D & { geometry?: THREE.BufferGeometry };
+    helperWithGeometry.geometry?.dispose?.();
+    const helperWithMaterial = helper as THREE.Object3D & {
+      material?: THREE.Material | THREE.Material[];
+    };
+    if (Array.isArray(helperWithMaterial.material)) {
+      helperWithMaterial.material.forEach((material) => material.dispose?.());
+    } else {
+      helperWithMaterial.material?.dispose?.();
     }
-    if (object) {
-      object.traverse((node: THREE.Object3D) => {
-        node.matrixAutoUpdate = true;
-      });
-      object.updateMatrixWorld(true);
-      const box = new THREE.BoxHelper(object, 0x34d399);
+    selectedBoxRef.current = null;
+  }, []);
+
+  const setSelectedObject = useCallback((object: THREE.Object3D | null, kind: SceneObjectKind | null = null) => {
+    selectedRef.current = object;
+    const splatHandle = object
+      ? [...splatHandlesRef.current].find((handle) => handle.object === object) ?? null
+      : null;
+    const resolvedKind: SceneObjectKind | null = object
+      ? kind ??
+        (meshRootsRef.current.includes(object)
+          ? "mesh"
+          : splatHandle
+            ? "splat"
+            : null)
+      : null;
+    setSelectedKind(resolvedKind);
+    setSelectedName(
+      object
+        ? resolvedKind === "splat"
+          ? (splatHandle?.id ?? object.name ?? object.uuid)
+          : object.name || object.uuid
+        : null
+    );
+    const scene = sceneRef.current;
+    clearSelectedHelper();
+    const attachMeshSelectionBox = (target: THREE.Object3D) => {
+      target.updateMatrixWorld(true);
+      const box = new THREE.BoxHelper(target, 0x34d399);
       box.renderOrder = 9998;
       const boxMaterial = box.material as THREE.Material;
       boxMaterial.depthTest = false;
@@ -621,8 +727,37 @@ export function UnifiedWorldViewer({
       boxMaterial.opacity = 0.95;
       if (scene) scene.add(box);
       selectedBoxRef.current = box;
+    };
+    const attachSplatSelectionBox = (target: THREE.Object3D, bounds?: THREE.Box3) => {
+      const box = bounds?.clone() ?? new THREE.Box3().setFromObject(target);
+      if (box.isEmpty()) return;
+      const helper = new THREE.Box3Helper(box, 0x34d399);
+      helper.renderOrder = 9998;
+      const helperMaterial = helper.material as THREE.Material;
+      helperMaterial.depthTest = false;
+      helperMaterial.depthWrite = false;
+      helperMaterial.transparent = true;
+      helperMaterial.opacity = 0.95;
+      if (scene) scene.add(helper);
+      selectedBoxRef.current = helper;
+    };
+    if (object && resolvedKind === "mesh") {
+      object.traverse((node: THREE.Object3D) => {
+        node.matrixAutoUpdate = true;
+      });
+      attachMeshSelectionBox(object);
+      syncTransformDraft(object);
+      return;
     }
-  }, [syncTransformDraft]);
+    if (object && resolvedKind === "splat") {
+      attachSplatSelectionBox(object, splatHandle?.bounds);
+      setTransformDraft(null);
+      setTransformDebug(`selected=${object.name || object.uuid} (splat)`);
+      return;
+    }
+    setTransformDraft(null);
+    setTransformDebug("No object selected");
+  }, [clearSelectedHelper, syncTransformDraft]);
 
   const updateTransformDraftValue = useCallback(
     (section: keyof TransformDraft, axisIndex: 0 | 1 | 2, value: string) => {
@@ -641,6 +776,10 @@ export function UnifiedWorldViewer({
   );
 
   const applyTransformDraft = useCallback(() => {
+    if (selectedKind !== "mesh") {
+      setTransformDebug("Transform editing is available only for mesh objects.");
+      return;
+    }
     const selectedId = selectedName;
     const object =
       (selectedId
@@ -708,7 +847,7 @@ export function UnifiedWorldViewer({
         ).toFixed(2)},${THREE.MathUtils.radToDeg(afterEuler.z).toFixed(2)})`
     );
     syncTransformDraft(object);
-  }, [schedulePersist, selectedName, syncTransformDraft, transformDraft]);
+  }, [schedulePersist, selectedKind, selectedName, syncTransformDraft, transformDraft]);
 
   const fitScene = useCallback(() => {
     const root = rootRef.current;
@@ -785,6 +924,8 @@ export function UnifiedWorldViewer({
     scene.background = new THREE.Color("#05070e");
     sceneRef.current = scene;
     meshRootsRef.current = [];
+    setMeshItems([]);
+    setSplatItems([]);
     setSelectedObject(null);
 
     const root = new THREE.Group();
@@ -878,7 +1019,7 @@ export function UnifiedWorldViewer({
         }
         current = current.parent;
       }
-      setSelectedObject(selected);
+      setSelectedObject(selected, "mesh");
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
 
@@ -951,6 +1092,20 @@ export function UnifiedWorldViewer({
       return { object, sceneFormatEnum };
     };
 
+    const buildSplatHandleId = (source: string) =>
+      `splat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${source.length.toString(36)}`;
+
+    const buildSplatLabel = (source: string) => {
+      const base = source.split("?")[0]?.split("/").pop() || source;
+      let decoded = base;
+      try {
+        decoded = decodeURIComponent(base);
+      } catch {
+        decoded = base;
+      }
+      return decoded.length > 0 ? decoded : "Splat";
+    };
+
     const createSplatHandleFromUrl = async (
       url: string,
       formatHint?: "ply" | "splat" | "ksplat" | "spz" | null
@@ -981,13 +1136,20 @@ export function UnifiedWorldViewer({
       }
 
       const handle: SplatHandle = {
+        id: buildSplatHandleId(url),
+        label: buildSplatLabel(url),
         object,
         dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
         update: typeof object.update === "function" ? () => object.update?.() : undefined,
         splatCount: 0
       };
+      object.name = handle.label;
       splatHandlesRef.current.add(handle);
+      refreshSplatItems();
       updateHudFromHandles();
+      if (!selectedRef.current && meshRootsRef.current.length === 0) {
+        setSelectedObject(handle.object, "splat");
+      }
       return handle;
     };
 
@@ -1004,6 +1166,7 @@ export function UnifiedWorldViewer({
       if (!geometry) {
         throw new Error("Failed to create PLY geometry.");
       }
+      geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
       const hasVertexColors = Boolean(geometry.getAttribute("color"));
@@ -1022,15 +1185,22 @@ export function UnifiedWorldViewer({
       root.add(points);
 
       const handle: SplatHandle = {
+        id: buildSplatHandleId(url),
+        label: buildSplatLabel(url),
         object: points,
         dispose: () => {
           points.geometry.dispose();
           material.dispose();
         },
-        splatCount: vertexCountHint ?? (geometry.getAttribute("position")?.count ?? 0)
+        splatCount: vertexCountHint ?? (geometry.getAttribute("position")?.count ?? 0),
+        bounds: geometry.boundingBox?.clone()
       };
       splatHandlesRef.current.add(handle);
+      refreshSplatItems();
       updateHudFromHandles();
+      if (!selectedRef.current && meshRootsRef.current.length === 0) {
+        setSelectedObject(handle.object, "splat");
+      }
       return handle;
     };
 
@@ -1045,18 +1215,24 @@ export function UnifiedWorldViewer({
         const keepFraction = Math.max(0.01, Math.min(sliderFraction, profileLimit));
         let gaussianUrl = url;
         let effectiveVertexCount = vertexCount;
+        let splatBounds = await compute3dgsBoundsFromUrl(url);
         if (keepFraction < 0.9999) {
           const downsampled = await buildDownsampled3dgsPlyBlob(url, keepFraction);
           if (downsampled) {
             gaussianUrl = downsampled.blobUrl;
             tempBlobUrlsRef.current.push(downsampled.blobUrl);
             effectiveVertexCount = downsampled.keptVertices;
+            if (!splatBounds) {
+              splatBounds = await compute3dgsBoundsFromUrl(gaussianUrl);
+            }
           }
         }
 
         try {
           const handle = await createSplatHandleFromUrl(gaussianUrl, "ply");
           handle.splatCount = effectiveVertexCount > 0 ? effectiveVertexCount : handle.splatCount;
+          handle.bounds = splatBounds ?? undefined;
+          refreshSplatItems();
           updateHudFromHandles();
           setError(null);
           return;
@@ -1223,12 +1399,15 @@ export function UnifiedWorldViewer({
           splatHandlesRef.current.delete(handle);
           root.remove(handle.object);
           handle.dispose?.();
+          refreshSplatItems();
           const message =
             updateError instanceof Error ? updateError.message : "Splat renderer update failed.";
           setError(`Splat update failed: ${message}`);
         }
       }
-      selectedBoxRef.current?.update();
+      if (selectedBoxRef.current instanceof THREE.BoxHelper) {
+        selectedBoxRef.current.update();
+      }
 
       renderer.render(scene, camera);
 
@@ -1263,13 +1442,7 @@ export function UnifiedWorldViewer({
       resizeObserver.disconnect();
 
       setSelectedObject(null);
-      if (selectedBoxRef.current) {
-        scene.remove(selectedBoxRef.current);
-        selectedBoxRef.current.geometry.dispose();
-        const mat = selectedBoxRef.current.material as THREE.Material;
-        mat.dispose();
-        selectedBoxRef.current = null;
-      }
+      clearSelectedHelper();
 
       orbit.dispose();
       draco.dispose();
@@ -1279,6 +1452,7 @@ export function UnifiedWorldViewer({
         handle.dispose?.();
       }
       splatHandlesRef.current.clear();
+      refreshSplatItems();
       updateHudFromHandles();
       for (const blobUrl of tempBlobUrlsRef.current) {
         URL.revokeObjectURL(blobUrl);
@@ -1300,7 +1474,9 @@ export function UnifiedWorldViewer({
     loadPersistedTransforms,
     manifest,
     refreshMeshItems,
+    refreshSplatItems,
     schedulePersist,
+    clearSelectedHelper,
     setSelectedObject,
     splatLoadProfile,
     splatDensityApplied,
@@ -1557,7 +1733,7 @@ export function UnifiedWorldViewer({
             <div>Triangles: {rendererRef.current?.info.render.triangles ?? 0}</div>
             <div>Draw calls: {rendererRef.current?.info.render.calls ?? 0}</div>
             <div>
-              Scene bundle: {meshItems.length}/{manifest.meshes.length} meshes • {splatHandlesRef.current.size}/
+              Scene bundle: {meshItems.length}/{manifest.meshes.length} meshes • {splatItems.length}/
               {directSplats.length} splats
             </div>
             <div>Loaded tiles: {hud.loadedTiles}</div>
@@ -1566,7 +1742,10 @@ export function UnifiedWorldViewer({
             <div>
               LOD: {hud.activeLodDistribution["0"]}/{hud.activeLodDistribution["1"]}/{hud.activeLodDistribution["2"]}
             </div>
-            <div>Selected: {selectedName ?? "none"}</div>
+            <div>
+              Selected: {selectedName ?? "none"}
+              {selectedKind ? ` (${selectedKind})` : ""}
+            </div>
           </div>
         </div>
       ) : null}
@@ -1575,22 +1754,30 @@ export function UnifiedWorldViewer({
         <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
           <div className="max-h-[280px] space-y-1 overflow-auto pr-1">
-            {meshItems.length === 0 ? (
-              <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No mesh objects</div>
+            {objectItems.length === 0 ? (
+              <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No scene objects</div>
             ) : (
-              meshItems.map((item) => (
+              objectItems.map((item) => (
                 <Button
                   key={item.id}
                   size="sm"
                   variant={selectedName === item.id ? "default" : "outline"}
-                  className="h-8 w-full justify-start truncate rounded-md"
+                  className="h-8 w-full justify-between gap-2 rounded-md"
                   onClick={() => {
-                    const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
-                    setSelectedObject(target);
+                    if (item.kind === "mesh") {
+                      const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
+                      setSelectedObject(target, "mesh");
+                    } else {
+                      const handle = [...splatHandlesRef.current].find((entry) => entry.id === item.id) ?? null;
+                      setSelectedObject(handle?.object ?? null, "splat");
+                    }
                     setOpenPanel("transform");
                   }}
                 >
-                  {item.label}
+                  <span className="truncate text-left text-xs">{item.label}</span>
+                  <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
+                    {item.kind === "mesh" ? "mesh" : "splat"}
+                  </span>
                 </Button>
               ))
             )}
@@ -1601,7 +1788,7 @@ export function UnifiedWorldViewer({
       {openPanel === "transform" ? (
         <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Transform</div>
-          {transformDraft ? (
+          {selectedKind === "mesh" && transformDraft ? (
             <div className="space-y-2">
               {(["position", "rotation", "scale"] as const).map((section) => (
                 <div key={section}>
@@ -1651,6 +1838,24 @@ export function UnifiedWorldViewer({
                   {persistMessage ? ` • ${persistMessage}` : ""}
                 </div>
               ) : null}
+            </div>
+          ) : selectedKind === "splat" ? (
+            <div className="space-y-2">
+              <div className="rounded-md border border-border/50 bg-background/20 p-2 text-[11px] text-zinc-400">
+                Splat selected. Transform editing is disabled for splats.
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 w-full rounded-md text-xs"
+                onClick={fitSelection}
+                disabled={!selectedRef.current}
+              >
+                Focus
+              </Button>
+              <div className="rounded-md border border-border/50 bg-background/20 p-1 text-[10px] text-zinc-400">
+                {transformDebug}
+              </div>
             </div>
           ) : (
             <div className="text-[11px] text-zinc-500">Select an object to edit transform.</div>
