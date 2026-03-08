@@ -1,15 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { FileUp, X } from "lucide-react";
 
 import { UnifiedWorldViewer } from "@/components/viewer/unified-world-viewer";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/hooks/use-toast";
 
 interface ViewerArtifact {
@@ -426,74 +420,7 @@ export function ViewerLoader({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-1">
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/70 panel-blur px-2 py-1.5">
-        {artifactPicker ? (
-          <>
-            <Badge className="rounded-full border border-border/70 bg-background/65">{artifactPicker.selectedKind}</Badge>
-            {artifactPicker.activeNodeScope ? (
-              <Badge className="rounded-full border border-border/70 bg-background/65">Node {artifactPicker.activeNodeScope}</Badge>
-            ) : null}
-            {artifactPicker.rendererLabel ? (
-              <Badge className="rounded-full border border-border/70 bg-background/65">{artifactPicker.rendererLabel}</Badge>
-            ) : null}
-            <span className="text-xs text-muted-foreground">{artifactPicker.selectedArtifactText}</span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline" className="rounded-xl">
-                  Select artifact
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-[340px] rounded-xl border-border/70 bg-background/95 p-1">
-                <ScrollArea className="h-[38vh]">
-                  {artifactPicker.options.map((option) => (
-                    <DropdownMenuItem key={option.id} asChild className="rounded-lg">
-                      <Link href={option.href}>
-                        <span className="inline-flex min-w-0 items-center gap-2">
-                          <Badge variant={option.selected ? "default" : "secondary"} className="rounded-full">
-                            {option.kind}
-                          </Badge>
-                          <span className="truncate text-xs text-muted-foreground">{option.label}</span>
-                        </span>
-                      </Link>
-                    </DropdownMenuItem>
-                  ))}
-                </ScrollArea>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
-        ) : null}
-
-        <Button size="sm" className="rounded-xl" onClick={onPickLocalFile}>
-          <FileUp className="mr-1 h-4 w-4" />
-          Open local file
-        </Button>
-        {localArtifact ? (
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={clearLocalArtifact}>
-            <X className="mr-1 h-4 w-4" />
-            Use run artifact
-          </Button>
-        ) : null}
-        <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
-          {localArtifact ? "Source: local file" : activeArtifact ? "Source: run artifact" : "No artifact selected"}
-        </Badge>
-        <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
-          Viewer: Unified
-        </Badge>
-        {canBuildTileset ? (
-          <Button size="sm" className="rounded-xl" onClick={onBuildTileset} disabled={buildTilesetLoading || Boolean(buildJobId)}>
-            {buildTilesetLoading || buildJobId ? "Building tileset..." : "Build Tileset"}
-          </Button>
-        ) : null}
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
-          className="hidden"
-          onChange={onFileChange}
-        />
-      </div>
-
+    <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
         {worldManifestLoading && !localArtifact ? (
           <Card className="rounded-2xl border-border/70 panel-blur">
@@ -509,7 +436,26 @@ export function ViewerLoader({
             <CardContent className="text-sm text-muted-foreground">{worldManifestError}</CardContent>
           </Card>
         ) : unifiedManifest ? (
-          <UnifiedWorldViewer manifest={unifiedManifest} />
+          <UnifiedWorldViewer
+            manifest={unifiedManifest}
+            fileMenu={{
+              selectedKind: artifactPicker?.selectedKind ?? null,
+              activeNodeScope: artifactPicker?.activeNodeScope ?? null,
+              rendererLabel: artifactPicker?.rendererLabel ?? "Unified",
+              selectedArtifactText:
+                artifactPicker?.selectedArtifactText ??
+                (activeArtifact ? `Artifact ${activeArtifact.id}` : "No artifact selected"),
+              options: artifactPicker?.options ?? [],
+              sourceLabel: localArtifact ? "local file" : activeArtifact ? "run artifact" : "none",
+              viewerLabel: "Unified",
+              canUseRunArtifact: Boolean(localArtifact),
+              canBuildTileset,
+              buildTilesetLoading: buildTilesetLoading || Boolean(buildJobId),
+              onPickLocalFile,
+              onUseRunArtifact: localArtifact ? clearLocalArtifact : undefined,
+              onBuildTileset: canBuildTileset ? onBuildTileset : undefined
+            }}
+          />
         ) : (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>
@@ -521,6 +467,13 @@ export function ViewerLoader({
           </Card>
         )}
       </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
+        className="hidden"
+        onChange={onFileChange}
+      />
     </div>
   );
 }

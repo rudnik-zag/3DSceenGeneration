@@ -33,7 +33,31 @@ interface WorldManifest {
 
 type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
-type FloatingPanel = "none" | "settings" | "hud" | "objects" | "transform";
+type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform";
+
+interface ViewerFileMenuOption {
+  id: string;
+  kind: string;
+  href: string;
+  label: string;
+  selected: boolean;
+}
+
+interface ViewerFileMenu {
+  selectedKind: string | null;
+  activeNodeScope: string | null;
+  rendererLabel: string | null;
+  selectedArtifactText: string;
+  options: ViewerFileMenuOption[];
+  sourceLabel: string;
+  viewerLabel: string;
+  canUseRunArtifact: boolean;
+  canBuildTileset: boolean;
+  buildTilesetLoading: boolean;
+  onPickLocalFile: () => void;
+  onUseRunArtifact?: () => void;
+  onBuildTileset?: () => void;
+}
 
 interface MeshTransformRecord {
   position: [number, number, number];
@@ -358,7 +382,13 @@ function disposeObjectTree(root: THREE.Object3D) {
   });
 }
 
-export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
+export function UnifiedWorldViewer({
+  manifest,
+  fileMenu
+}: {
+  manifest: WorldManifest;
+  fileMenu?: ViewerFileMenu | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -1330,6 +1360,16 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
           </Button>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
+          {fileMenu ? (
+            <Button
+              size="sm"
+              variant={openPanel === "file" ? "default" : "outline"}
+              className="rounded-xl"
+              onClick={() => setOpenPanel((prev) => (prev === "file" ? "none" : "file"))}
+            >
+              File
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant={openPanel === "settings" ? "default" : "outline"}
@@ -1364,6 +1404,88 @@ export function UnifiedWorldViewer({ manifest }: { manifest: WorldManifest }) {
           </Button>
         </div>
       </div>
+
+      {openPanel === "file" && fileMenu ? (
+        <div className="absolute left-3 top-16 z-30 w-[360px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">File</div>
+          <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+            {fileMenu.selectedKind ? (
+              <span className="rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-zinc-200">
+                {fileMenu.selectedKind}
+              </span>
+            ) : null}
+            {fileMenu.activeNodeScope ? (
+              <span className="rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-zinc-200">
+                Node {fileMenu.activeNodeScope}
+              </span>
+            ) : null}
+            {fileMenu.rendererLabel ? (
+              <span className="rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-zinc-200">
+                {fileMenu.rendererLabel}
+              </span>
+            ) : null}
+          </div>
+          <div className="mb-2 truncate text-xs text-zinc-400">{fileMenu.selectedArtifactText}</div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button size="sm" className="h-8 rounded-md text-xs" onClick={fileMenu.onPickLocalFile}>
+              Open local file
+            </Button>
+            {fileMenu.canUseRunArtifact ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 rounded-md text-xs"
+                onClick={() => fileMenu.onUseRunArtifact?.()}
+              >
+                Use run artifact
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" className="h-8 rounded-md text-xs" disabled>
+                Use run artifact
+              </Button>
+            )}
+            {fileMenu.canBuildTileset ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 rounded-md text-xs col-span-2"
+                onClick={() => fileMenu.onBuildTileset?.()}
+                disabled={fileMenu.buildTilesetLoading}
+              >
+                {fileMenu.buildTilesetLoading ? "Building tileset..." : "Build Tileset"}
+              </Button>
+            ) : null}
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
+            <span>Source: {fileMenu.sourceLabel}</span>
+            <span>•</span>
+            <span>Viewer: {fileMenu.viewerLabel}</span>
+          </div>
+          {fileMenu.options.length > 0 ? (
+            <div className="mt-3">
+              <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Select Artifact</div>
+              <div className="max-h-[220px] space-y-1 overflow-auto pr-1">
+                {fileMenu.options.map((option) => (
+                  <Button
+                    key={option.id}
+                    size="sm"
+                    variant={option.selected ? "default" : "outline"}
+                    className="h-8 w-full justify-start gap-2 rounded-md text-left"
+                    onClick={() => {
+                      window.location.assign(option.href);
+                    }}
+                  >
+                    <span className="shrink-0 rounded-full border border-border/60 bg-background/60 px-1.5 py-0.5 text-[10px]">
+                      {option.kind}
+                    </span>
+                    <span className="truncate text-[11px]">{option.label}</span>
+                  </Button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {openPanel === "settings" ? (
         <div className="absolute left-3 bottom-3 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
