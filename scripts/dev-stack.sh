@@ -20,6 +20,8 @@ MINIO_CONSOLE_ADDRESS="${MINIO_CONSOLE_ADDRESS:-:9101}"
 APP_PORT="${APP_PORT:-3000}"
 EXTRA_STOP_PORTS="${EXTRA_STOP_PORTS:-}"
 APP_PORT_SWEEP="${APP_PORT_SWEEP:-12}"
+REDIS_WAIT_TIMEOUT="${REDIS_WAIT_TIMEOUT:-30}"
+TRUNCATE_LOGS_ON_START="${TRUNCATE_LOGS_ON_START:-1}"
 CONDA_SH_PATH=""
 DOCKER_INFRA_ACTIVE=0
 
@@ -42,6 +44,8 @@ Environment variables:
   APP_PORT           Next.js port expected to be freed on stop/down (default: 3000)
   EXTRA_STOP_PORTS   Extra space-separated ports to free on stop/down
   APP_PORT_SWEEP     Number of consecutive app ports to free starting from APP_PORT (default: 12)
+  REDIS_WAIT_TIMEOUT Seconds to wait for Redis before failing startup (default: 30, 0=skip)
+  TRUNCATE_LOGS_ON_START 1=clear per-service log on start, 0=append (default: 1)
   COREPACK_HOME_DIR  Corepack home for pnpm fallback (default: /tmp/corepack)
 EOF
 }
@@ -194,6 +198,102 @@ stop_standalone_minio() {
   stop_service "minio-standalone"
 }
 
+resolve_redis_url() {
+  if [[ -n "${REDIS_URL:-}" ]]; then
+    echo "${REDIS_URL}"
+    return 0
+  fi
+
+  local env_file="${ROOT_DIR}/.env"
+  if [[ -f "${env_file}" ]]; then
+    local line
+    line="$(grep -E '^[[:space:]]*REDIS_URL=' "${env_file}" | tail -n 1 || true)"
+    if [[ -n "${line}" ]]; then
+      line="${line#*=}"
+      line="${line%\"}"
+      line="${line#\"}"
+      echo "${line}"
+      return 0
+    fi
+  fi
+
+  echo "redis://localhost:6379"
+}
+
+parse_redis_host_port() {
+  local redis_url="$1"
+  local host_port host port tmp
+
+  tmp="${redis_url#*://}"
+  tmp="${tmp#*@}"
+  host_port="${tmp%%/*}"
+
+  if [[ "${host_port}" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "${host_port}" =~ ^\[([^]]+)\]$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="6379"
+  elif [[ "${host_port}" == *":"* ]]; then
+    host="${host_port%%:*}"
+    port="${host_port##*:}"
+  else
+    host="${host_port}"
+    port="6379"
+  fi
+
+  if [[ -z "${host}" ]]; then
+    host="localhost"
+  fi
+  if [[ -z "${port}" ]]; then
+    port="6379"
+  fi
+
+  echo "${host}:${port}"
+}
+
+can_connect_tcp() {
+  local host="$1"
+  local port="$2"
+
+  if command -v nc >/dev/null 2>&1; then
+    nc -z "${host}" "${port}" >/dev/null 2>&1
+    return $?
+  fi
+
+  timeout 1 bash -lc ">/dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+wait_for_redis() {
+  if [[ "${REDIS_WAIT_TIMEOUT}" == "0" ]]; then
+    return 0
+  fi
+
+  local redis_url endpoint host port timeout_s elapsed
+  redis_url="$(resolve_redis_url)"
+  endpoint="$(parse_redis_host_port "${redis_url}")"
+  host="${endpoint%:*}"
+  port="${endpoint##*:}"
+  timeout_s="${REDIS_WAIT_TIMEOUT}"
+  elapsed=0
+
+  echo "[dev-stack] Waiting for Redis on ${host}:${port} (timeout ${timeout_s}s)"
+
+  while true; do
+    if can_connect_tcp "${host}" "${port}"; then
+      echo "[dev-stack] Redis reachable on ${host}:${port}"
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+    if (( elapsed >= timeout_s )); then
+      echo "[dev-stack] ERROR: Redis not reachable on ${host}:${port} after ${timeout_s}s."
+      echo "[dev-stack] Hint: start Redis locally, or enable Docker and keep USE_DOCKER_INFRA=1."
+      exit 1
+    fi
+  done
+}
+
 collect_stop_ports() {
   local minio_port console_port
   local detected_port=""
@@ -330,6 +430,9 @@ start_service() {
   fi
 
   echo "[dev-stack] Starting ${name}"
+  if [[ "${TRUNCATE_LOGS_ON_START}" == "1" ]]; then
+    : >"${log_file}"
+  fi
   (
     cd "${ROOT_DIR}"
     nohup bash -lc "${cmd}" >>"${log_file}" 2>&1 &
@@ -396,6 +499,7 @@ start_all() {
   stop_workspace_worker
   start_infra
   start_standalone_minio_if_needed
+  wait_for_redis
   start_service "next-dev" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && PORT='${APP_PORT}' ${PNPM_CMD[*]} dev"
   start_service "worker" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && ${PNPM_CMD[*]} worker"
 }
