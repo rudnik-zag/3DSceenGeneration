@@ -1,4 +1,6 @@
-export type ViewerRenderer = "three" | "babylon-gs" | null;
+import { getSplatRuntimePreference, isSparkRuntimeEnabled } from "@/lib/viewer/splat-runtime-config";
+
+export type ViewerRenderer = "three" | "babylon-gs" | "spark-gs" | null;
 
 const GS_KINDS = new Set(["splat", "ksplat", "spz", "gsplat", "splat_ksplat"]);
 const MESH_KINDS = new Set(["mesh_glb"]);
@@ -61,16 +63,19 @@ function getArtifactExtension(artifact: ViewerArtifactLike) {
 export function selectViewerRenderer(artifact: ViewerArtifactLike): ViewerRenderer {
   const kind = (artifact.kind ?? "").toLowerCase();
   const ext = getArtifactExtension(artifact);
+  const preference = getSplatRuntimePreference();
+  const preferSpark = isSparkRuntimeEnabled() && (preference === "auto" || preference === "spark");
+  const gsRenderer: ViewerRenderer = preferSpark ? "spark-gs" : "babylon-gs";
 
-  if (GS_KINDS.has(kind)) return "babylon-gs";
+  if (GS_KINDS.has(kind)) return gsRenderer;
   if (MESH_KINDS.has(kind)) return "three";
   if (POINT_KINDS.has(kind)) {
-    if (ext === ".compressed.ply") return "babylon-gs";
+    if (ext === ".compressed.ply") return gsRenderer;
     return "three";
   }
 
-  if (ext && GS_EXTENSIONS.includes(ext)) return "babylon-gs";
-  if (ext === ".ksplat") return "babylon-gs";
+  if (ext && GS_EXTENSIONS.includes(ext)) return gsRenderer;
+  if (ext === ".ksplat") return gsRenderer;
   if (ext && MESH_EXTENSIONS.includes(ext)) return "three";
   if (ext && POINT_EXTENSIONS.includes(ext)) return "three";
 

@@ -20,6 +20,7 @@
     "@aws-sdk/s3-request-presigner": "^3.750.0",
     "@babylonjs/core": "^8.22.2",
     "@babylonjs/loaders": "^8.22.2",
+    "@sparkjsdev/spark": "^0.1.10",
     "@mkkellogg/gaussian-splats-3d": "^0.4.7",
     "@prisma/client": "^5.20.0",
     "@radix-ui/react-dialog": "^1.1.2",

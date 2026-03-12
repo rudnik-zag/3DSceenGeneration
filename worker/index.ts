@@ -2,7 +2,7 @@ import { loadEnvConfig } from "@next/env";
 import { Worker } from "bullmq";
 
 import { executeWorkflowRun } from "@/lib/execution/run-workflow";
-import { redisConnection } from "@/lib/queue/connection";
+import { redisConnectionForBullMq } from "@/lib/queue/connection";
 import { BUILD_SPLAT_TILESET_QUEUE, RUN_WORKFLOW_QUEUE } from "@/lib/queue/queues";
 import { executeBuildSplatTilesetJob } from "@/lib/splats/build-tileset-job";
 
@@ -15,7 +15,7 @@ async function main() {
       await executeWorkflowRun(job.data);
     },
     {
-      connection: redisConnection,
+      connection: redisConnectionForBullMq,
       concurrency: 1
     }
   );
@@ -40,7 +40,7 @@ async function main() {
       await executeBuildSplatTilesetJob(job.data);
     },
     {
-      connection: redisConnection,
+      connection: redisConnectionForBullMq,
       concurrency: 1
     }
   );

@@ -248,8 +248,8 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const controlsRef = useRef<OrbitControls | null>(null);
-  const transformRef = useRef<TransformControls | null>(null);
+  const controlsRef = useRef<InstanceType<typeof OrbitControls> | null>(null);
+  const transformRef = useRef<InstanceType<typeof TransformControls> | null>(null);
   const rootObjectRef = useRef<THREE.Object3D | null>(null);
   const selectionHelperRef = useRef<THREE.BoxHelper | null>(null);
   const requestRef = useRef<number | null>(null);
@@ -453,8 +453,8 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     transform.setSpace("world");
     transform.setMode(gizmoMode);
     transform.addEventListener("change", requestRender);
-    transform.addEventListener("dragging-changed", (event) => {
-      controls.enabled = !event.value;
+    transform.addEventListener("dragging-changed", (event: { value?: boolean }) => {
+      controls.enabled = !(event.value ?? false);
     });
     scene.add(transform);
     transformRef.current = transform;
@@ -844,7 +844,14 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
                 <div className="space-y-2 text-xs">
                   <p className="font-medium text-white">Selected: {selectedNode.name}</p>
                   <p>Position: {selectedNode.object.position.toArray().map((v) => v.toFixed(2)).join(", ")}</p>
-                  <p>Rotation: {selectedNode.object.rotation.toArray().slice(0, 3).map((v) => v.toFixed(2)).join(", ")}</p>
+                  <p>
+                    Rotation:{" "}
+                    {selectedNode.object.rotation
+                      .toArray()
+                      .slice(0, 3)
+                      .map((v) => (typeof v === "number" ? v.toFixed(2) : "0.00"))
+                      .join(", ")}
+                  </p>
                   <p>Scale: {selectedNode.object.scale.toArray().map((v) => v.toFixed(2)).join(", ")}</p>
                   <p className="font-medium">Materials</p>
                   {selectedMaterialNames.length > 0 ? (
