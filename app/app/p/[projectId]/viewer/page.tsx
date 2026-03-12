@@ -293,7 +293,14 @@ export default async function ViewerPage({
           selectedKind: selectedArtifact.kind,
           selectedArtifactText: `Artifact ${selectedArtifact.id}`,
           activeNodeScope,
-          rendererLabel: selectedRenderer === "babylon-gs" ? "Babylon GS" : selectedRenderer === "three" ? "Three.js" : null,
+          rendererLabel:
+            selectedRenderer === "spark-gs"
+              ? "Spark GS"
+              : selectedRenderer === "babylon-gs"
+                ? "Legacy GS"
+                : selectedRenderer === "three"
+                  ? "Three.js"
+                  : null,
           options: artifactList.map((artifact) => ({
             id: artifact.id,
             kind: artifact.kind,

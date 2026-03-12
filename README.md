@@ -12,7 +12,7 @@ Full-stack workflow platform for AI/geometry pipelines:
 - TailwindCSS + shadcn/ui
 - Framer Motion
 - React Flow
-- Three.js (GLB/PLY) + Babylon.js Gaussian Splatting renderer
+- Three.js (GLB/PLY) + Spark Gaussian Splatting runtime (with legacy fallback)
 - BullMQ + Redis
 - PostgreSQL + Prisma
 - S3-compatible storage (MinIO in local dev)
@@ -28,7 +28,7 @@ Full-stack workflow platform for AI/geometry pipelines:
 - Edge-drop UX: drag connection to empty canvas -> add-node menu opens and auto-connects.
 - Viewer renderer switch:
   - GLB/PLY -> Three.js
-  - `.splat/.spz/.compressed.ply/.ksplat` and GS kinds -> Babylon GS
+  - `.splat/.spz/.compressed.ply/.ksplat` and GS kinds -> Spark GS (fallback to legacy runtime if Spark load fails)
 - Local file open in viewer (`.glb/.gltf/.ply/.splat/.spz/.ksplat`).
 - Project deletion now deletes DB rows and related storage objects under `projects/{projectId}/`.
 - Storage fallback when S3/MinIO is unreachable: uses `.local-storage/`.
@@ -81,6 +81,14 @@ S3_BUCKET=artifacts
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=true
 NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_SPLAT_RUNTIME=auto
+NEXT_PUBLIC_SPARK_ENABLED=true
+```
+
+Splat runtime env flags:
+```env
+NEXT_PUBLIC_SPLAT_RUNTIME=auto   # auto | spark | legacy
+NEXT_PUBLIC_SPARK_ENABLED=true   # false forces legacy runtime
 ```
 
 ## One-command Local Stack (Recommended)

@@ -1,4 +1,5 @@
 import IORedis from "ioredis";
+import type { ConnectionOptions } from "bullmq";
 
 import { env } from "@/lib/env";
 
@@ -17,3 +18,7 @@ export const redisConnection =
 if (process.env.NODE_ENV !== "production") {
   global.workflowRedisConnection = redisConnection;
 }
+
+// BullMQ's bundled ioredis type can drift from our direct ioredis version.
+// Runtime compatibility is maintained, but we cast here to keep TS stable.
+export const redisConnectionForBullMq = redisConnection as unknown as ConnectionOptions;

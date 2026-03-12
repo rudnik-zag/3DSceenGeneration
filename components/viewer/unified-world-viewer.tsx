@@ -21,6 +21,7 @@ import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } fr
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { getSplatRuntimePreference, isSparkRuntimeEnabled } from "@/lib/viewer/splat-runtime-config";
 import { cn } from "@/lib/utils";
 
 interface WorldManifest {
@@ -43,6 +44,8 @@ type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
 type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform";
 type BundleMode = "same_node" | "project_fallback";
+type SplatRuntimeName = "legacy" | "spark";
+type LoadedSplatRuntime = SplatRuntimeName | "points";
 
 interface ViewerFileMenuOption {
   id: string;
@@ -106,6 +109,7 @@ interface SplatHandle {
   id: string;
   label: string;
   object: THREE.Object3D;
+  runtime: LoadedSplatRuntime;
   dispose?: () => void;
   update?: () => void;
   splatCount?: number;
@@ -459,6 +463,52 @@ async function getGaussianSplatsModule() {
   return import("@mkkellogg/gaussian-splats-3d");
 }
 
+let sparkModulePromise: Promise<Record<string, unknown>> | null = null;
+
+async function importSparkModuleDynamic() {
+  return import("@sparkjsdev/spark");
+}
+
+async function getSparkModule() {
+  if (!sparkModulePromise) {
+    sparkModulePromise = importSparkModuleDynamic().then((module) => module as Record<string, unknown>);
+  }
+  return sparkModulePromise;
+}
+
+function getRuntimeOrderForPreference(preference: "auto" | "spark" | "legacy"): SplatRuntimeName[] {
+  const sparkEnabled = isSparkRuntimeEnabled();
+  if (!sparkEnabled) return ["legacy"];
+  if (preference === "legacy") return ["legacy"];
+  if (preference === "spark") return ["spark", "legacy"];
+  return ["spark", "legacy"];
+}
+
+async function waitForSparkSplatReady(instance: Record<string, unknown>) {
+  const promiseCandidates = [
+    instance.initializedPromise,
+    instance.readyPromise,
+    instance.loadPromise
+  ] as Array<unknown>;
+  for (const candidate of promiseCandidates) {
+    if (candidate && typeof (candidate as Promise<unknown>).then === "function") {
+      await candidate;
+      return;
+    }
+  }
+  if (typeof instance.waitUntilReady === "function") {
+    await (instance.waitUntilReady as () => Promise<void>)();
+    return;
+  }
+  if (typeof instance.initialize === "function") {
+    await (instance.initialize as () => Promise<void>)();
+    return;
+  }
+  if (typeof instance.load === "function") {
+    await (instance.load as () => Promise<void>)();
+  }
+}
+
 function disposeObjectTree(root: THREE.Object3D) {
   root.traverse((object: THREE.Object3D) => {
     const mesh = object as THREE.Mesh;
@@ -491,7 +541,7 @@ export function UnifiedWorldViewer({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const orbitRef = useRef<OrbitControls | null>(null);
+  const orbitRef = useRef<InstanceType<typeof OrbitControls> | null>(null);
   const selectedRef = useRef<THREE.Object3D | null>(null);
   const selectedBoxRef = useRef<THREE.Object3D | null>(null);
   const requestRef = useRef<number | null>(null);
@@ -527,6 +577,13 @@ export function UnifiedWorldViewer({
   const [persistState, setPersistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [persistMessage, setPersistMessage] = useState<string | null>(null);
   const [openPanel, setOpenPanel] = useState<FloatingPanel>("none");
+  const [activeSplatRuntimes, setActiveSplatRuntimes] = useState<LoadedSplatRuntime[]>([]);
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
+
+  const preferredRuntimeOrder = useMemo(
+    () => getRuntimeOrderForPreference(getSplatRuntimePreference()),
+    []
+  );
 
   const directSplats = useMemo(
     () =>
@@ -555,6 +612,16 @@ export function UnifiedWorldViewer({
     ],
     [meshItems, splatItems]
   );
+
+  const configuredRuntimeLabel = useMemo(() => {
+    if (preferredRuntimeOrder.length === 0) return "legacy";
+    return preferredRuntimeOrder.join(" -> ");
+  }, [preferredRuntimeOrder]);
+
+  const activeRuntimeLabel = useMemo(() => {
+    if (activeSplatRuntimes.length === 0) return "none";
+    return activeSplatRuntimes.join(", ");
+  }, [activeSplatRuntimes]);
 
   const isPersistableArtifact = Boolean(
     typeof manifest.artifactId === "string" &&
@@ -597,7 +664,9 @@ export function UnifiedWorldViewer({
 
   const refreshSplatItems = useCallback(() => {
     const next: SplatListItem[] = [];
+    const runtimeSet = new Set<LoadedSplatRuntime>();
     for (const handle of splatHandlesRef.current) {
+      runtimeSet.add(handle.runtime);
       next.push({
         id: handle.id,
         label: handle.label,
@@ -605,6 +674,7 @@ export function UnifiedWorldViewer({
       });
     }
     setSplatItems(next);
+    setActiveSplatRuntimes([...runtimeSet.values()]);
   }, []);
 
   const syncTransformDraft = useCallback((object: THREE.Object3D | null) => {
@@ -1018,6 +1088,8 @@ export function UnifiedWorldViewer({
     meshRootsRef.current = [];
     setMeshItems([]);
     setSplatItems([]);
+    setActiveSplatRuntimes([]);
+    setRuntimeNotice(null);
     setSelectedObject(null);
 
     const root = new THREE.Group();
@@ -1137,6 +1209,10 @@ export function UnifiedWorldViewer({
       dispose?: () => void;
       update?: () => void;
     };
+    type SparkRendererObject = {
+      update?: (args: { scene: THREE.Scene; viewToWorld?: THREE.Matrix4 }) => void;
+      dispose?: () => void;
+    };
 
     const inferSceneFormat = (
       sceneFormatEnum: Record<string, number>,
@@ -1157,7 +1233,7 @@ export function UnifiedWorldViewer({
       return undefined;
     };
 
-    const createDropInViewerObject = async (): Promise<{
+    const createLegacyDropInViewerObject = async (): Promise<{
       object: DropInViewerObject;
       sceneFormatEnum: Record<string, number>;
     }> => {
@@ -1185,6 +1261,7 @@ export function UnifiedWorldViewer({
     };
 
     let persistedSplatTransforms: Record<string, MeshTransformRecord> = {};
+    let sparkRendererBridge: SparkRendererObject | null = null;
 
     const buildSplatHandleId = (source: string) => {
       const normalized = source.split("?")[0] ?? source;
@@ -1209,12 +1286,47 @@ export function UnifiedWorldViewer({
       return decoded.length > 0 ? decoded : "Splat";
     };
 
-    const createSplatHandleFromUrl = async (
+    const registerSplatHandle = (handle: SplatHandle) => {
+      handle.object.name = handle.label;
+      splatHandlesRef.current.add(handle);
+      const persisted = persistedSplatTransforms[handle.id];
+      if (persisted) {
+        applyTransformRecord(handle.object, persisted);
+      }
+      refreshSplatItems();
+      updateHudFromHandles();
+      if (!selectedRef.current && meshRootsRef.current.length === 0) {
+        setSelectedObject(handle.object, "splat");
+      }
+      return handle;
+    };
+
+    const ensureSparkRendererBridge = async (): Promise<SparkRendererObject | null> => {
+      if (sparkRendererBridge) return sparkRendererBridge;
+      const module = await getSparkModule();
+      const SparkRendererCtor = module.SparkRenderer as (new (...args: unknown[]) => SparkRendererObject) | undefined;
+      if (!SparkRendererCtor) return null;
+      const constructorCandidates: Array<unknown[]> = [[{ renderer }]];
+      for (const args of constructorCandidates) {
+        try {
+          sparkRendererBridge = new SparkRendererCtor(...args);
+          if ((sparkRendererBridge as unknown as THREE.Object3D).parent !== root) {
+            root.add(sparkRendererBridge as unknown as THREE.Object3D);
+          }
+          return sparkRendererBridge;
+        } catch {
+          sparkRendererBridge = null;
+        }
+      }
+      return null;
+    };
+
+    const createLegacySplatHandleFromUrl = async (
       url: string,
       formatHint?: "ply" | "splat" | "ksplat" | "spz" | null,
       idSource?: string
     ): Promise<SplatHandle> => {
-      const { object, sceneFormatEnum } = await createDropInViewerObject();
+      const { object, sceneFormatEnum } = await createLegacyDropInViewerObject();
       const sceneFormat = inferSceneFormat(sceneFormatEnum, url, formatHint);
       const addOptions: Record<string, unknown> = {
         showLoadingUI: false,
@@ -1243,22 +1355,126 @@ export function UnifiedWorldViewer({
         id: buildSplatHandleId(idSource ?? url),
         label: buildSplatLabel(idSource ?? url),
         object,
+        runtime: "legacy",
         dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
         update: typeof object.update === "function" ? () => object.update?.() : undefined,
         splatCount: 0
       };
-      object.name = handle.label;
-      splatHandlesRef.current.add(handle);
-      const persisted = persistedSplatTransforms[handle.id];
-      if (persisted) {
-        applyTransformRecord(handle.object, persisted);
+      return registerSplatHandle(handle);
+    };
+
+    const createSparkSplatHandleFromUrl = async (
+      url: string,
+      formatHint?: "ply" | "splat" | "ksplat" | "spz" | null,
+      idSource?: string
+    ): Promise<SplatHandle> => {
+      const module = await getSparkModule();
+      const SplatMeshCtor = (module.SplatMesh ?? module.GaussianSplatMesh) as
+        | (new (...args: unknown[]) => Record<string, unknown>)
+        | undefined;
+      if (!SplatMeshCtor) {
+        throw new Error("Spark module does not expose SplatMesh.");
       }
-      refreshSplatItems();
-      updateHudFromHandles();
-      if (!selectedRef.current && meshRootsRef.current.length === 0) {
-        setSelectedObject(handle.object, "splat");
+
+      const constructorCandidates: Array<unknown[]> = [
+        [{ url, format: formatHint ?? undefined, progressiveLoad: true }],
+        [{ url, formatHint: formatHint ?? undefined }],
+        [{ src: url, format: formatHint ?? undefined }],
+        [url]
+      ];
+
+      let instance: Record<string, unknown> | null = null;
+      let object: THREE.Object3D | null = null;
+
+      for (const args of constructorCandidates) {
+        try {
+          const candidate = new SplatMeshCtor(...args);
+          const objectCandidate =
+            candidate instanceof THREE.Object3D
+              ? candidate
+              : candidate.object3d instanceof THREE.Object3D
+                ? candidate.object3d
+                : candidate.object instanceof THREE.Object3D
+                  ? candidate.object
+                  : null;
+          if (!objectCandidate) {
+            continue;
+          }
+          instance = candidate;
+          object = objectCandidate;
+          break;
+        } catch {
+          instance = null;
+          object = null;
+        }
       }
-      return handle;
+
+      if (!instance || !object) {
+        throw new Error("Unable to construct Spark SplatMesh for this asset.");
+      }
+
+      object.renderOrder = 1;
+      root.add(object);
+      try {
+        await waitForSparkSplatReady(instance);
+        const bridge = await ensureSparkRendererBridge();
+        if (!bridge) {
+          throw new Error("SparkRenderer is not available in this environment.");
+        }
+      } catch (error) {
+        root.remove(object);
+        const dispose = instance.dispose;
+        if (typeof dispose === "function") {
+          (dispose as () => void).call(instance);
+        }
+        throw error;
+      }
+
+      const disposeFn =
+        typeof instance.dispose === "function"
+          ? () => {
+              (instance?.dispose as () => void).call(instance);
+            }
+          : undefined;
+
+      const handle: SplatHandle = {
+        id: buildSplatHandleId(idSource ?? url),
+        label: buildSplatLabel(idSource ?? url),
+        object,
+        runtime: "spark",
+        dispose: disposeFn,
+        update: undefined,
+        splatCount: 0
+      };
+      return registerSplatHandle(handle);
+    };
+
+    const createSplatHandleFromUrl = async (
+      url: string,
+      formatHint?: "ply" | "splat" | "ksplat" | "spz" | null,
+      idSource?: string
+    ): Promise<SplatHandle> => {
+      const runtimeErrors: string[] = [];
+      for (const runtimeName of preferredRuntimeOrder) {
+        try {
+          if (runtimeName === "spark") {
+            return await createSparkSplatHandleFromUrl(url, formatHint, idSource);
+          }
+          const handle = await createLegacySplatHandleFromUrl(url, formatHint, idSource);
+          if (
+            runtimeErrors.some((entry) => entry.startsWith("spark:")) &&
+            !disposed &&
+            !cancelled
+          ) {
+            setRuntimeNotice("Spark load failed for one or more splats. Legacy runtime fallback is active.");
+          }
+          return handle;
+        } catch (runtimeError) {
+          const message = runtimeError instanceof Error ? runtimeError.message : String(runtimeError);
+          runtimeErrors.push(`${runtimeName}: ${message}`);
+        }
+      }
+      throw new Error(runtimeErrors.join(" | "));
     };
 
     const createPointCloudHandleFromPly = async (
@@ -1300,6 +1516,7 @@ export function UnifiedWorldViewer({
         id: buildSplatHandleId(idSource ?? url),
         label: buildSplatLabel(idSource ?? url),
         object: points,
+        runtime: "points",
         dispose: () => {
           points.geometry.dispose();
           material.dispose();
@@ -1307,17 +1524,7 @@ export function UnifiedWorldViewer({
         splatCount: vertexCountHint ?? (geometry.getAttribute("position")?.count ?? 0),
         bounds: geometry.boundingBox?.clone()
       };
-      splatHandlesRef.current.add(handle);
-      const persisted = persistedSplatTransforms[handle.id];
-      if (persisted) {
-        applyTransformRecord(handle.object, persisted);
-      }
-      refreshSplatItems();
-      updateHudFromHandles();
-      if (!selectedRef.current && meshRootsRef.current.length === 0) {
-        setSelectedObject(handle.object, "splat");
-      }
-      return handle;
+      return registerSplatHandle(handle);
     };
 
     const loadDirectPlyWithPolicy = async (url: string): Promise<void> => {
@@ -1356,6 +1563,7 @@ export function UnifiedWorldViewer({
           const message =
             gaussianError instanceof Error ? gaussianError.message : "Unknown gaussian load error";
           console.warn(`[viewer] Gaussian PLY load failed, falling back to point-cloud: ${message}`);
+          setRuntimeNotice(`Gaussian runtime failed for a PLY asset. Falling back to point cloud. (${message})`);
           setError(`Gaussian load failed, using point fallback: ${message}`);
         }
       }
@@ -1529,7 +1737,24 @@ export function UnifiedWorldViewer({
       if (selectedBoxRef.current instanceof THREE.BoxHelper) {
         selectedBoxRef.current.update();
       }
-
+      const hasSparkRuntime = [...splatHandlesRef.current].some((handle) => handle.runtime === "spark");
+      if (hasSparkRuntime && sparkRendererBridge?.update) {
+        try {
+          sparkRendererBridge.update({
+            scene,
+            viewToWorld: camera.matrixWorld
+          });
+        } catch (sparkUpdateError) {
+          const message =
+            sparkUpdateError instanceof Error ? sparkUpdateError.message : "Unknown Spark update error";
+          setRuntimeNotice(`Spark update failed. Falling back to Three.js render path. (${message})`);
+        }
+      }
+      if (!hasSparkRuntime && sparkRendererBridge && (sparkRendererBridge as unknown as THREE.Object3D).parent) {
+        root.remove(sparkRendererBridge as unknown as THREE.Object3D);
+      } else if (hasSparkRuntime && sparkRendererBridge && (sparkRendererBridge as unknown as THREE.Object3D).parent !== root) {
+        root.add(sparkRendererBridge as unknown as THREE.Object3D);
+      }
       renderer.render(scene, camera);
 
       fpsCounterRef.current.acc += dt;
@@ -1572,6 +1797,11 @@ export function UnifiedWorldViewer({
       for (const handle of splatHandlesRef.current) {
         handle.dispose?.();
       }
+      if (sparkRendererBridge && (sparkRendererBridge as unknown as THREE.Object3D).parent) {
+        root.remove(sparkRendererBridge as unknown as THREE.Object3D);
+      }
+      sparkRendererBridge?.dispose?.();
+      sparkRendererBridge = null;
       splatHandlesRef.current.clear();
       refreshSplatItems();
       updateHudFromHandles();
@@ -1599,6 +1829,7 @@ export function UnifiedWorldViewer({
     schedulePersist,
     clearSelectedHelper,
     setSelectedObject,
+    preferredRuntimeOrder,
     splatLoadProfile,
     splatDensityApplied,
     updateHudFromHandles
@@ -1661,6 +1892,9 @@ export function UnifiedWorldViewer({
             Save Transforms
           </Button>
         ) : null}
+        <div className="rounded-full border border-border/70 bg-background/40 px-2 py-1 text-[11px] text-zinc-300">
+          Runtime: {activeRuntimeLabel} ({configuredRuntimeLabel})
+        </div>
         <div className="ml-auto flex items-center gap-2">
           {fileMenu ? (
             <Button
@@ -1860,6 +2094,8 @@ export function UnifiedWorldViewer({
             <div>Loaded tiles: {hud.loadedTiles}</div>
             <div>Loaded splats: {hud.loadedSplats.toLocaleString()}</div>
             <div>Loaded MB: {hud.loadedMB.toFixed(1)}</div>
+            <div>Splat runtime: {activeRuntimeLabel}</div>
+            <div>Runtime policy: {configuredRuntimeLabel}</div>
             <div>
               LOD: {hud.activeLodDistribution["0"]}/{hud.activeLodDistribution["1"]}/{hud.activeLodDistribution["2"]}
             </div>
@@ -2027,6 +2263,15 @@ export function UnifiedWorldViewer({
       {error ? (
         <div className={cn("absolute left-3 top-20 z-30 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200")}>
           {error}
+        </div>
+      ) : null}
+      {runtimeNotice ? (
+        <div
+          className={cn(
+            "absolute left-3 top-32 z-30 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+          )}
+        >
+          {runtimeNotice}
         </div>
       ) : null}
 
