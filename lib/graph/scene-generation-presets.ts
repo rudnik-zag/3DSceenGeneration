@@ -169,9 +169,12 @@ export function applySceneGenerationPreset(
   }
 
   const preset = SCENE_GENERATION_PRESETS[presetName] ?? SCENE_GENERATION_PRESETS.Default;
+  // Preserve explicit mask execution mode across preset changes.
+  const preservedMaskMode = normalized.runAllMasksInOneProcess;
   return {
     ...normalized,
     ...preset,
+    runAllMasksInOneProcess: preservedMaskMode,
     configPreset: presetName
   };
 }

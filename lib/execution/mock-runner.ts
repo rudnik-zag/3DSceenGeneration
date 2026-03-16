@@ -47,6 +47,8 @@ export class MockModelRunner implements NodeExecutor {
         return executeSam2Node(ctx);
       case "model.sam3d_objects":
         return executeSceneGenerationNode(ctx);
+      case "pipeline.scene_generation":
+        throw new Error("SceneGeneration pipeline nodes are executed via template expansion in run-workflow.");
       case "input.image": {
         const sourceMode = ctx.params.sourceMode === "generate" ? "generate" : "upload";
         if (sourceMode === "generate") {

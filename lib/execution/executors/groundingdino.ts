@@ -351,15 +351,18 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
 
   const outputs: ExecutorOutputArtifact[] = [
     {
-      outputId: "boxes",
+      outputId: "descriptor",
       kind: "json",
       mimeType: "application/json",
       extension: "json",
-      hidden: true,
       buffer: boxesBuffer,
+      preview: {
+        extension: path.extname(overlayPath).replace(".", "") || "jpg",
+        mimeType: mimeFromExtension(overlayPath),
+        buffer: overlayBuffer
+      },
       meta: {
-        outputKey: "boxes",
-        hidden: true,
+        outputKey: "descriptor",
         sourceImageArtifactId: sourceImage.artifactId,
         sourceImageHash: sourceImage.hash,
         sourceImageStorageKey: sourceImage.storageKey,
@@ -371,26 +374,6 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
         prompt: resolvedPrompt,
         threshold,
         configFormat: configJsonPath.endsWith("detections_full.json") ? "detections_full" : "detections_web"
-      }
-    },
-    {
-      outputId: "overlay",
-      kind: "image",
-      mimeType: mimeFromExtension(overlayPath),
-      extension: path.extname(overlayPath).replace(".", "") || "jpg",
-      buffer: overlayBuffer,
-      preview: {
-        extension: path.extname(overlayPath).replace(".", "") || "jpg",
-        mimeType: mimeFromExtension(overlayPath),
-        buffer: overlayBuffer
-      },
-      meta: {
-        outputKey: "overlay",
-        sourceImageArtifactId: sourceImage.artifactId,
-        sourceImageHash: sourceImage.hash,
-        prompt: resolvedPrompt,
-        threshold,
-        boxesCount: normalizedBoxes.length
       }
     }
   ];

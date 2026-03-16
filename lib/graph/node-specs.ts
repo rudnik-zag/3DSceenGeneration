@@ -17,7 +17,6 @@ const imageInput = z.object({
   filename: z.string().default("image.png")
 });
 const cameraPathInput = z.object({ json: z.string().default("[]") });
-const thresholdParams = z.object({ threshold: z.number().min(0).max(1).default(0.35) });
 const groundingDinoParams = z.object({
   prompt: z.string().default(""),
   threshold: z.number().min(0).max(1).default(0.35)
@@ -51,6 +50,12 @@ const sceneGenerationParams = z.object({
   autocastPreferBf16: z.boolean().default(false),
   storeOnCpu: z.boolean().default(true)
 });
+const sceneGenerationTemplateParams = z.object({
+  objectPrompt: z.string().default(""),
+  SceneDetailedOption: z.enum(["Default", "HighQuality", "FastPreview", "Custom"]).default("Default"),
+  SceneOutputFormat: z.enum(["mesh_glb", "point_ply"]).default("mesh_glb"),
+  SceneMaskExecution: z.enum(["all_masks", "per_mask"]).default("all_masks")
+});
 const modelPrompt = z.object({ prompt: z.string().default("") });
 const depthParams = z.object({ model: z.string().default("fast-depth") });
 const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
@@ -71,7 +76,7 @@ export const nodeSpecEntries = [
     icon: "Image",
     description: "Upload or reference a source image.",
     inputPorts: [],
-    outputPorts: [{ id: "image", label: "Image", payload: "Image" }],
+    outputPorts: [{ id: "image", label: "Image", artifactType: "Image" }],
     paramSchema: imageInput,
     paramFields: [
       { key: "sourceMode", label: "Source Mode", input: "select", options: ["upload", "generate"] },
@@ -93,7 +98,7 @@ export const nodeSpecEntries = [
     icon: "Type",
     description: "Prompt or instructions.",
     inputPorts: [],
-    outputPorts: [{ id: "text", label: "Text", payload: "Text" }],
+    outputPorts: [{ id: "text", label: "Text", artifactType: "JsonData" }],
     paramSchema: textInput,
     paramFields: [{ key: "value", label: "Text", input: "textarea" }],
     defaultParams: { value: "Describe a stylized courtyard." }
@@ -105,7 +110,7 @@ export const nodeSpecEntries = [
     icon: "Camera",
     description: "JSON camera trajectory.",
     inputPorts: [],
-    outputPorts: [{ id: "path", label: "Path", payload: "Json" }],
+    outputPorts: [{ id: "path", label: "Path", artifactType: "JsonData" }],
     paramSchema: cameraPathInput,
     paramFields: [{ key: "json", label: "Camera JSON", input: "json" }],
     defaultParams: { json: "[]" }
@@ -116,11 +121,8 @@ export const nodeSpecEntries = [
     title: "ObjectDetection",
     icon: "Scan",
     description: "Open-vocabulary detection.",
-    inputPorts: [{ id: "image", label: "Image", payload: "Image", required: true }],
-    outputPorts: [
-      { id: "boxes", label: "Boxes JSON", payload: "BoxesJson", hidden: true, advancedOnly: true },
-      { id: "overlay", label: "Overlay", payload: "OverlayImage" }
-    ],
+    inputPorts: [{ id: "image", label: "Image", artifactType: "Image", required: true }],
+    outputPorts: [{ id: "descriptor", label: "descriptor", artifactType: "Descriptor" }],
     paramSchema: groundingDinoParams,
     paramFields: [
       {
@@ -133,9 +135,7 @@ export const nodeSpecEntries = [
     ],
     defaultParams: { prompt: "", threshold: 0.35 },
     ui: {
-      previewOutputIds: ["overlay"],
-      hiddenOutputIds: ["boxes"],
-      advancedOutputIds: ["boxes"],
+      previewOutputIds: ["descriptor"],
       nodeRunEnabled: true
     }
   }),
@@ -146,15 +146,15 @@ export const nodeSpecEntries = [
     icon: "Layers",
     description: "Segmentation masks from prompts.",
     inputPorts: [
-      { id: "image", label: "Image", payload: "Image" },
-      { id: "boxes", label: "BoxesConfig JSON", payload: "BoxesJson", advancedOnly: true }
+      { id: "image", label: "Image", artifactType: "Image", required: true },
+      { id: "descriptor", label: "descriptor", artifactType: "Descriptor", advancedOnly: true }
     ],
     outputPorts: [
-      { id: "config", label: "Config", payload: "JsonMeta" },
-      { id: "image", label: "Input Image", payload: "Image", hidden: true, advancedOnly: true },
-      { id: "masksDir", label: "Masks Dir", payload: "MaskDir", hidden: true, advancedOnly: true },
-      { id: "overlay", label: "Overlay", payload: "OverlayImage", hidden: true, advancedOnly: true },
-      { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
+      { id: "config", label: "MaskSet", artifactType: "MaskSet" },
+      { id: "image", label: "Input Image", artifactType: "Image", hidden: true, advancedOnly: true },
+      { id: "masksDir", label: "Masks Dir", artifactType: "MaskSet", hidden: true, advancedOnly: true },
+      { id: "overlay", label: "Overlay", artifactType: "Image", hidden: true, advancedOnly: true },
+      { id: "meta", label: "JSON Meta", artifactType: "JsonData", hidden: true, advancedOnly: true }
     ],
     paramSchema: sam2Params,
     paramFields: [
@@ -183,16 +183,16 @@ export const nodeSpecEntries = [
   makeSpec("model.sam3d_objects", {
     type: "model.sam3d_objects",
     category: "Models",
-    title: "SceneGeneration",
+    title: "CustomSceneGen",
     icon: "Box",
-    description: "Generate scene output from SegmentScene config (GLB mesh or Gaussian PLY).",
+    description: "Low-level scene generation from SegmentScene outputs.",
     inputPorts: [
-      { id: "config", label: "SegmentScene Config", payload: "JsonMeta" },
-      { id: "masksDir", label: "Masks Dir (legacy)", payload: "MaskDir", hidden: true, advancedOnly: true }
+      { id: "config", label: "MaskSet", artifactType: "MaskSet", required: true },
+      { id: "masksDir", label: "Masks Dir (legacy)", artifactType: "MaskSet", hidden: true, advancedOnly: true }
     ],
     outputPorts: [
-      { id: "scene", label: "Scene", payload: "Scene" },
-      { id: "meta", label: "JSON Meta", payload: "JsonMeta", hidden: true, advancedOnly: true }
+      { id: "scene", label: "Scene", artifactType: "SceneAsset" },
+      { id: "meta", label: "JSON Meta", artifactType: "JsonData", hidden: true, advancedOnly: true }
     ],
     paramSchema: sceneGenerationParams,
     paramFields: [
@@ -223,6 +223,32 @@ export const nodeSpecEntries = [
       nodeRunEnabled: true
     }
   }),
+  makeSpec("pipeline.scene_generation", {
+    type: "pipeline.scene_generation",
+    category: "Models",
+    title: "SceneGeneration",
+    icon: "Workflow",
+    description: "High-level hidden pipeline: ObjectDetection -> SegmentScene -> CustomSceneGen.",
+    inputPorts: [{ id: "image", label: "image", artifactType: "Image", required: true }],
+    outputPorts: [{ id: "generatedScene", label: "GeneratedScene", artifactType: "SceneAsset" }],
+    paramSchema: sceneGenerationTemplateParams,
+    paramFields: [
+      { key: "objectPrompt", label: "objectPrompt", input: "textarea", placeholder: "chair, house, car, tree" },
+      { key: "SceneDetailedOption", label: "SceneDetailedOption", input: "select", options: getSceneGenerationPresetNames() },
+      { key: "SceneOutputFormat", label: "SceneOutputFormat", input: "select", options: ["mesh_glb", "point_ply"] },
+      { key: "SceneMaskExecution", label: "SceneMaskExecution", input: "select", options: ["all_masks", "per_mask"] }
+    ],
+    defaultParams: {
+      objectPrompt: "",
+      SceneDetailedOption: "Default",
+      SceneOutputFormat: "mesh_glb",
+      SceneMaskExecution: "all_masks"
+    },
+    ui: {
+      previewOutputIds: ["generatedScene"],
+      nodeRunEnabled: true
+    }
+  }),
   makeSpec("model.qwen_vl", {
     type: "model.qwen_vl",
     category: "Models",
@@ -230,10 +256,10 @@ export const nodeSpecEntries = [
     icon: "MessageSquare",
     description: "Vision-language reasoning.",
     inputPorts: [
-      { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "text", label: "Prompt", payload: "Text" }
+      { id: "image", label: "Image", artifactType: "Image", required: true },
+      { id: "text", label: "Prompt", artifactType: "JsonData" }
     ],
-    outputPorts: [{ id: "json", label: "Analysis", payload: "Json" }],
+    outputPorts: [{ id: "json", label: "Analysis", artifactType: "JsonData" }],
     paramSchema: modelPrompt,
     paramFields: [{ key: "prompt", label: "Prompt", input: "textarea" }],
     defaultParams: { prompt: "Describe composition and salient objects." }
@@ -245,10 +271,10 @@ export const nodeSpecEntries = [
     icon: "Wand",
     description: "Prompt-guided image edit.",
     inputPorts: [
-      { id: "image", label: "Image", payload: "Image", required: true },
-      { id: "text", label: "Prompt", payload: "Text" }
+      { id: "image", label: "Image", artifactType: "Image", required: true },
+      { id: "text", label: "Prompt", artifactType: "JsonData" }
     ],
-    outputPorts: [{ id: "image", label: "Edited", payload: "Image" }],
+    outputPorts: [{ id: "image", label: "Edited", artifactType: "Image" }],
     paramSchema: modelPrompt,
     paramFields: [{ key: "prompt", label: "Edit Prompt", input: "textarea" }],
     defaultParams: { prompt: "Enhance texture details." }
@@ -260,10 +286,10 @@ export const nodeSpecEntries = [
     icon: "Paintbrush",
     description: "Generate texture set for mesh.",
     inputPorts: [
-      { id: "mesh", label: "Mesh", payload: "Mesh", required: true },
-      { id: "text", label: "Style", payload: "Text" }
+      { id: "mesh", label: "Mesh", artifactType: "Mesh", required: true },
+      { id: "text", label: "Style", artifactType: "JsonData" }
     ],
-    outputPorts: [{ id: "textures", label: "Texture Set", payload: "TextureSet" }],
+    outputPorts: [{ id: "textures", label: "Texture Set", artifactType: "TextureSet" }],
     paramSchema: z.object({ style: z.string().default("photoreal") }),
     paramFields: [{ key: "style", label: "Style", input: "text" }],
     defaultParams: { style: "photoreal" }
@@ -274,8 +300,8 @@ export const nodeSpecEntries = [
     title: "Depth Estimation",
     icon: "Mountain",
     description: "Estimate depth from RGB image.",
-    inputPorts: [{ id: "image", label: "Image", payload: "Image", required: true }],
-    outputPorts: [{ id: "depth", label: "Depth", payload: "Depth" }],
+    inputPorts: [{ id: "image", label: "Image", artifactType: "Image", required: true }],
+    outputPorts: [{ id: "depth", label: "Depth", artifactType: "DepthMap" }],
     paramSchema: depthParams,
     paramFields: [{ key: "model", label: "Model", input: "text" }],
     defaultParams: { model: "fast-depth" }
@@ -287,10 +313,10 @@ export const nodeSpecEntries = [
     icon: "Sparkles",
     description: "Back-project depth map into point cloud.",
     inputPorts: [
-      { id: "depth", label: "Depth", payload: "Depth", required: true },
-      { id: "image", label: "Color", payload: "Image" }
+      { id: "depth", label: "Depth", artifactType: "DepthMap", required: true },
+      { id: "image", label: "Color", artifactType: "Image" }
     ],
-    outputPorts: [{ id: "pointcloud", label: "Point Cloud", payload: "PointCloud" }],
+    outputPorts: [{ id: "pointcloud", label: "Point Cloud", artifactType: "PointCloud" }],
     paramSchema: pointcloudParams,
     paramFields: [{ key: "density", label: "Density", input: "number" }],
     defaultParams: { density: 1 }
@@ -301,8 +327,8 @@ export const nodeSpecEntries = [
     title: "Mesh Reconstruction",
     icon: "Cube",
     description: "Build watertight mesh from points.",
-    inputPorts: [{ id: "pointcloud", label: "Point Cloud", payload: "PointCloud", required: true }],
-    outputPorts: [{ id: "mesh", label: "Mesh", payload: "Mesh" }],
+    inputPorts: [{ id: "pointcloud", label: "Point Cloud", artifactType: "PointCloud", required: true }],
+    outputPorts: [{ id: "mesh", label: "Mesh", artifactType: "Mesh" }],
     paramSchema: meshReconstructionParams,
     paramFields: [
       { key: "quality", label: "Quality", input: "select", options: ["fast", "balanced", "quality"] }
@@ -315,8 +341,8 @@ export const nodeSpecEntries = [
     title: "UV Unwrap",
     icon: "WrapText",
     description: "Compute UV layout.",
-    inputPorts: [{ id: "mesh", label: "Mesh", payload: "Mesh", required: true }],
-    outputPorts: [{ id: "mesh", label: "UV Mesh", payload: "Mesh" }],
+    inputPorts: [{ id: "mesh", label: "Mesh", artifactType: "Mesh", required: true }],
+    outputPorts: [{ id: "mesh", label: "UV Mesh", artifactType: "Mesh" }],
     paramSchema: uvParams,
     paramFields: [{ key: "padding", label: "Padding", input: "number" }],
     defaultParams: { padding: 8 }
@@ -328,10 +354,10 @@ export const nodeSpecEntries = [
     icon: "Palette",
     description: "Bake mesh textures.",
     inputPorts: [
-      { id: "mesh", label: "Mesh", payload: "Mesh", required: true },
-      { id: "textures", label: "Textures", payload: "TextureSet" }
+      { id: "mesh", label: "Mesh", artifactType: "Mesh", required: true },
+      { id: "textures", label: "Textures", artifactType: "TextureSet" }
     ],
-    outputPorts: [{ id: "textures", label: "Baked Textures", payload: "TextureSet" }],
+    outputPorts: [{ id: "textures", label: "Baked Textures", artifactType: "TextureSet" }],
     paramSchema: bakeParams,
     paramFields: [{ key: "resolution", label: "Resolution", input: "number" }],
     defaultParams: { resolution: 1024 }
@@ -343,11 +369,11 @@ export const nodeSpecEntries = [
     icon: "Download",
     description: "Export to GLB, PLY, or splat.",
     inputPorts: [
-      { id: "mesh", label: "Mesh", payload: "Mesh" },
-      { id: "pointcloud", label: "Point Cloud", payload: "PointCloud" },
-      { id: "textures", label: "Textures", payload: "TextureSet" }
+      { id: "mesh", label: "Mesh", artifactType: "Mesh" },
+      { id: "pointcloud", label: "Point Cloud", artifactType: "PointCloud" },
+      { id: "textures", label: "Textures", artifactType: "TextureSet" }
     ],
-    outputPorts: [{ id: "scene", label: "Scene", payload: "Scene" }],
+    outputPorts: [{ id: "scene", label: "Scene", artifactType: "SceneAsset" }],
     paramSchema: exportParams,
     paramFields: [{ key: "format", label: "Format", input: "select", options: ["mesh_glb", "point_ply", "splat_ksplat"] }],
     defaultParams: { format: "mesh_glb" }
@@ -358,8 +384,8 @@ export const nodeSpecEntries = [
     title: "Open In Viewer",
     icon: "ExternalLink",
     description: "Emit viewer link payload.",
-    inputPorts: [{ id: "scene", label: "Scene", payload: "Scene", required: true }],
-    outputPorts: [{ id: "json", label: "Viewer Link", payload: "Json" }],
+    inputPorts: [{ id: "scene", label: "Scene", artifactType: "SceneAsset", required: true }],
+    outputPorts: [{ id: "json", label: "Viewer Link", artifactType: "JsonData" }],
     paramSchema: z.object({}),
     paramFields: [],
     defaultParams: {}

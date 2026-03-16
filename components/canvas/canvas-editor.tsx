@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
+  Connection,
   Edge,
   MiniMap,
   Node,
@@ -60,12 +61,15 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
+import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib/graph/connection-rules";
+import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
   mergeNodeParamsWithDefaults,
   nodeGroups,
   nodeSpecRegistry
 } from "@/lib/graph/node-specs";
 import { applySceneGenerationPreset } from "@/lib/graph/scene-generation-presets";
+import { workflowPresets } from "@/lib/graph/workflow-presets";
 import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
@@ -124,6 +128,7 @@ const nodeTypes = {
   "model.groundingdino": WorkflowNode,
   "model.sam2": WorkflowNode,
   "model.sam3d_objects": WorkflowNode,
+  "pipeline.scene_generation": WorkflowNode,
   "model.qwen_vl": WorkflowNode,
   "model.qwen_image_edit": WorkflowNode,
   "model.texturing": WorkflowNode,
@@ -143,6 +148,7 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "model.groundingdino": "G",
   "model.sam2": "S",
   "model.sam3d_objects": "3",
+  "pipeline.scene_generation": "W",
   "model.qwen_vl": "Q",
   "model.qwen_image_edit": "E",
   "model.texturing": "X",
@@ -168,6 +174,7 @@ function getContextRowIcon(type: WorkflowNodeType) {
   if (type.startsWith("input.cameraPath")) return Camera;
   if (type.startsWith("model.groundingdino")) return Scan;
   if (type.startsWith("model.sam")) return Boxes;
+  if (type.startsWith("pipeline.scene_generation")) return Boxes;
   if (type.startsWith("model.")) return WandSparkles;
   if (type.startsWith("out.")) return ExternalLink;
   if (type.startsWith("geo.")) return Sparkles;
@@ -265,8 +272,9 @@ function withStyledEdge(edge: Edge): Edge {
 
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
-  const wrappedNodes = initialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
-  const wrappedEdges = initialGraph.edges.map((edge) => withStyledEdge(edge as Edge));
+  const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
+  const wrappedNodes = migratedInitialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
+  const wrappedEdges = migratedInitialGraph.edges.map((edge) => withStyledEdge(edge as Edge));
 
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNodeData>(wrappedNodes as Node<GraphNodeData>[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState(wrappedEdges);
@@ -345,7 +353,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   useEffect(() => {
     setNodes((prev) => {
       const byId = new Map(prev.map((node) => [node.id, node]));
-      const hasBoxesConfigByNode = new Set<string>();
+      const hasDescriptorByNode = new Set<string>();
       const hasImageByNode = new Set<string>();
 
       for (const edge of edges) {
@@ -355,8 +363,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         const targetSpec = nodeSpecRegistry[targetType];
         const inferredTargetHandle = edge.targetHandle ?? targetSpec.inputPorts[0]?.id;
 
-        if (inferredTargetHandle === "boxes" || inferredTargetHandle === "boxesConfig") {
-          hasBoxesConfigByNode.add(edge.target);
+        if (inferredTargetHandle === "descriptor" || inferredTargetHandle === "boxes" || inferredTargetHandle === "boxesConfig") {
+          hasDescriptorByNode.add(edge.target);
         }
         if (inferredTargetHandle === "image") {
           hasImageByNode.add(edge.target);
@@ -368,7 +376,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         if (node.type !== "model.sam2") {
           return node;
         }
-        const nextHasBoxes = hasBoxesConfigByNode.has(node.id);
+        const nextHasBoxes = hasDescriptorByNode.has(node.id);
         const nextHasImage = hasImageByNode.has(node.id);
         if (
           node.data.hasBoxesConfigConnection === nextHasBoxes &&
@@ -457,15 +465,16 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       };
       const graph = parsed?.graph;
       if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+      const migratedGraph = migrateGraphDocument(graph);
 
-      const restoredNodes = graph.nodes.map((node) => {
+      const restoredNodes = migratedGraph.nodes.map((node) => {
         // Always use fresh artifact-backed URLs. Signed preview URLs from local draft can be stale after restart.
         const hydrated = buildNodeData(node as Node<GraphNodeData>, nodeArtifacts) as Node<GraphNodeData>;
         return hydrated;
       }) as Node<GraphNodeData>[];
 
       setNodes(restoredNodes);
-      setEdges(graph.edges.map((edge) => withStyledEdge(edge as Edge)));
+      setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
       const restoredPreset = restoredNodes[0]?.data.uiScale;
       if (restoredPreset === "compact" || restoredPreset === "balanced" || restoredPreset === "cinematic") {
         setNodeScalePreset(restoredPreset);
@@ -598,8 +607,30 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     };
   }, [selectedNode?.data.latestArtifactId, selectedNode?.data.previewUrl, selectedNode?.data.latestArtifactKind]);
 
+  const isConnectionValid = useCallback(
+    (connection: Connection | Edge) => {
+      if (!connection.source || !connection.target) return false;
+      const sourceNode = nodes.find((node) => node.id === connection.source);
+      const targetNode = nodes.find((node) => node.id === connection.target);
+      if (!sourceNode || !targetNode) return false;
+
+      const result = validateConnectionByNodeTypes({
+        sourceNodeType: sourceNode.type as WorkflowNodeType,
+        targetNodeType: targetNode.type as WorkflowNodeType,
+        sourceHandleId: connection.sourceHandle,
+        targetHandleId: connection.targetHandle
+      });
+      return result.valid;
+    },
+    [nodes]
+  );
+
   const onConnect = useCallback<OnConnect>(
     (params) => {
+      if (!isConnectionValid(params as Connection)) {
+        toast({ title: "Invalid connection", description: "Port artifact types are not compatible." });
+        return;
+      }
       setPendingConnect(null);
       setEdges((eds) =>
         addEdge(
@@ -611,7 +642,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         )
       );
     },
-    [setEdges]
+    [isConnectionValid, setEdges]
   );
 
   const onConnectStart = useCallback((_event: unknown, params: { nodeId?: string | null; handleId?: string | null; handleType?: "source" | "target" | null }) => {
@@ -870,33 +901,69 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (!paneMenu) return;
       const newNodeId = addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
       if (pendingConnect) {
+        const pendingNode = nodes.find((node) => node.id === pendingConnect.nodeId);
+        if (!pendingNode) {
+          setPendingConnect(null);
+          setPaneMenu(null);
+          return;
+        }
         if (pendingConnect.handleType === "source") {
-          const targetHandle = nodeSpecRegistry[nodeType].inputPorts[0]?.id;
-          if (targetHandle) {
+          const pendingSourceType = pendingNode.type as WorkflowNodeType;
+          const sourceHandle = pendingConnect.handleId ?? undefined;
+          const compatible =
+            sourceHandle
+              ? nodeSpecRegistry[nodeType].inputPorts
+                  .map((port) =>
+                    validateConnectionByNodeTypes({
+                      sourceNodeType: pendingSourceType,
+                      targetNodeType: nodeType,
+                      sourceHandleId: sourceHandle,
+                      targetHandleId: port.id
+                    })
+                  )
+                  .find((result) => result.valid)
+              : findFirstCompatibleHandles(pendingSourceType, nodeType);
+
+          if (compatible) {
             setEdges((prev) =>
               addEdge(
                 withStyledEdge({
                   id: `${pendingConnect.nodeId}-${newNodeId}-${Date.now()}`,
                   source: pendingConnect.nodeId,
-                  sourceHandle: pendingConnect.handleId ?? undefined,
+                  sourceHandle: compatible.sourceHandleId ?? sourceHandle,
                   target: newNodeId,
-                  targetHandle
+                  targetHandle: compatible.targetHandleId
                 } as Edge),
                 prev
               )
             );
           }
         } else {
-          const sourceHandle = nodeSpecRegistry[nodeType].outputPorts[0]?.id;
-          if (sourceHandle) {
+          const pendingTargetType = pendingNode.type as WorkflowNodeType;
+          const targetHandle = pendingConnect.handleId ?? undefined;
+          const compatible =
+            targetHandle
+              ? nodeSpecRegistry[nodeType].outputPorts
+                  .map((port) =>
+                    validateConnectionByNodeTypes({
+                      sourceNodeType: nodeType,
+                      targetNodeType: pendingTargetType,
+                      sourceHandleId: port.id,
+                      targetHandleId: targetHandle
+                    })
+                  )
+                  .find((result) => result.valid)
+              : findFirstCompatibleHandles(nodeType, pendingTargetType);
+
+          if (compatible) {
             setEdges((prev) =>
               addEdge(
                 withStyledEdge({
                   id: `${newNodeId}-${pendingConnect.nodeId}-${Date.now()}`,
                   source: newNodeId,
-                  sourceHandle,
+                  sourceHandle: compatible.sourceHandleId,
                   target: pendingConnect.nodeId,
-                  targetHandle: pendingConnect.handleId ?? undefined
+                  targetHandle: compatible.targetHandleId ?? targetHandle
                 } as Edge),
                 prev
               )
@@ -907,7 +974,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       setPendingConnect(null);
       setPaneMenu(null);
     },
-    [addNode, paneMenu, pendingConnect, setEdges]
+    [addNode, nodes, paneMenu, pendingConnect, setEdges]
   );
 
   useEffect(() => {
@@ -981,87 +1048,60 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     openPaneMenuAtScreenPoint(rect.left + 92, rect.top + 72, { x: flow.x, y: flow.y });
   }, [openPaneMenuAtScreenPoint, paneMenu, reactFlow]);
 
-  const insertImagePromptTemplate = useCallback(() => {
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    const anchor = rect
-      ? reactFlow.screenToFlowPosition({
-          x: rect.left + rect.width * 0.42,
-          y: rect.top + rect.height * 0.5
-        })
-      : { x: 120, y: 120 };
+  const resolvePresetAnchor = useCallback(
+    (baseAnchor: { x: number; y: number }) => {
+      let candidate = { ...baseAnchor };
+      const collides = (anchor: { x: number; y: number }) =>
+        nodes.some((node) => Math.abs(node.position.x - anchor.x) < 340 && Math.abs(node.position.y - anchor.y) < 220);
 
-    const imageId = `input.image-${Date.now().toString(36)}`;
-    const textId = `input.text-${(Date.now() + 1).toString(36)}`;
-    const modelId = `model.qwen_image_edit-${(Date.now() + 2).toString(36)}`;
-
-    const imageSpec = nodeSpecRegistry["input.image"];
-    const textSpec = nodeSpecRegistry["input.text"];
-    const modelSpec = nodeSpecRegistry["model.qwen_image_edit"];
-
-    const templateNodes: Node<GraphNodeData>[] = [
-      {
-        id: imageId,
-        type: "input.image",
-        position: { x: anchor.x - 360, y: anchor.y - 130 },
-        data: {
-          label: imageSpec.title,
-          params: { ...imageSpec.defaultParams },
-          status: "idle",
-          uiScale: nodeScalePreset
-        }
-      },
-      {
-        id: textId,
-        type: "input.text",
-        position: { x: anchor.x - 360, y: anchor.y + 80 },
-        data: {
-          label: textSpec.title,
-          params: {
-            ...textSpec.defaultParams,
-            value:
-              "Create a cinematic environment image from this prompt.\nStyle: high detail, soft global illumination, dramatic sky."
-          },
-          status: "idle",
-          uiScale: nodeScalePreset
-        }
-      },
-      {
-        id: modelId,
-        type: "model.qwen_image_edit",
-        position: { x: anchor.x, y: anchor.y - 20 },
-        data: {
-          label: modelSpec.title,
-          params: {
-            ...modelSpec.defaultParams,
-            prompt: "Transform to a stylized scene with richer color contrast and cleaner composition."
-          },
-          status: "idle",
-          uiScale: nodeScalePreset
-        }
+      let attempts = 0;
+      while (attempts < 16 && collides(candidate)) {
+        candidate = {
+          x: candidate.x + (attempts % 2 === 0 ? 34 : -22),
+          y: candidate.y + 210
+        };
+        attempts += 1;
       }
-    ];
+      return candidate;
+    },
+    [nodes]
+  );
 
-    const templateEdges: Edge[] = [
-      withStyledEdge({
-        id: `e-${imageId}-${modelId}`,
-        source: imageId,
-        target: modelId,
-        sourceHandle: "image",
-        targetHandle: "image"
-      } as Edge),
-      withStyledEdge({
-        id: `e-${textId}-${modelId}`,
-        source: textId,
-        target: modelId,
-        sourceHandle: "text",
-        targetHandle: "text"
-      } as Edge)
-    ];
+  const insertWorkflowPreset = useCallback(
+    (presetId: string) => {
+      const preset = workflowPresets.find((entry) => entry.id === presetId);
+      if (!preset) return;
 
-    setNodes((prev) => [...prev, ...templateNodes]);
-    setEdges((prev) => [...prev, ...templateEdges]);
-    toast({ title: "Template inserted", description: "Added text + image + Qwen Image Edit starter nodes." });
-  }, [nodeScalePreset, reactFlow, setEdges, setNodes]);
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const viewportCenter = rect
+        ? reactFlow.screenToFlowPosition({
+            x: rect.left + rect.width * 0.5,
+            y: rect.top + rect.height * 0.5
+          })
+        : { x: 120, y: 120 };
+      const anchor = resolvePresetAnchor(viewportCenter);
+
+      const stamp = Date.now();
+      let serial = 0;
+      const createNodeId = (nodeType: WorkflowNodeType) => {
+        serial += 1;
+        return `${nodeType}-${(stamp + serial).toString(36)}`;
+      };
+
+      const built = preset.buildNodesAndEdges({
+        anchor,
+        createNodeId,
+        uiScale: nodeScalePreset
+      });
+
+      const builtNodes = built.nodes.map((node) => node as unknown as Node<GraphNodeData>);
+      const builtEdges = built.edges.map((edge) => withStyledEdge(edge as Edge));
+      setNodes((prev) => [...prev, ...builtNodes]);
+      setEdges((prev) => [...prev, ...builtEdges]);
+      toast({ title: "Workflow inserted", description: `${preset.label} starter added to canvas.` });
+    },
+    [nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes]
+  );
 
   const updateNodeParamById = useCallback(
     (nodeId: string, key: string, value: string | number | boolean) => {
@@ -1847,9 +1887,27 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
           </Button>
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={insertImagePromptTemplate}>
-            <WandSparkles className="mr-1 h-4 w-4" /> Image Prompt Flow
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" className="rounded-xl">
+                <WandSparkles className="mr-1 h-4 w-4" /> Workflow
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow</DropdownMenuLabel>
+              {workflowPresets.map((preset) => (
+                <DropdownMenuItem
+                  key={`workflow-preset-${preset.id}`}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    insertWorkflowPreset(preset.id);
+                  }}
+                >
+                  {preset.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -1870,8 +1928,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
                   SegmentScene
                 </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam3d_objects")}>
-                  SceneGen
+                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("pipeline.scene_generation")}>
+                  SceneGeneration
                 </Button>
               </div>
               <ScrollArea className="h-[62vh] pr-2">
@@ -2035,7 +2093,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           )}
                           {(selectedNode.type === "model.groundingdino" ||
                             selectedNode.type === "model.sam2" ||
-                            selectedNode.type === "model.sam3d_objects") &&
+                            selectedNode.type === "model.sam3d_objects" ||
+                            selectedNode.type === "pipeline.scene_generation") &&
                           selectedNodeArtifacts.length > 0 ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
@@ -2056,7 +2115,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           {groundingDinoJsonArtifact ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <div className="mb-2 flex items-center justify-between gap-2">
-                                <p className="text-xs font-medium text-zinc-300">ObjectDetection JSON</p>
+                                <p className="text-xs font-medium text-zinc-300">ObjectDetection descriptor</p>
                                 <div className="flex items-center gap-2">
                                   <Button
                                     size="sm"
@@ -2079,7 +2138,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                   </Button>
                                 </div>
                               </div>
-                              <p className="mb-2 text-[11px] text-zinc-500">Detection boxes/config generated by ObjectDetection.</p>
+                              <p className="mb-2 text-[11px] text-zinc-500">Detection descriptor JSON generated by ObjectDetection.</p>
                               {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
                                 <p className="text-xs text-rose-300">{inspectedJsonError}</p>
                               ) : null}
@@ -2235,9 +2294,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 setSelectedVersionId(value);
                 const version = versions.find((v) => v.id === value);
                 if (!version) return;
-                const loadedNodes = version.graphJson.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
+                const migratedGraph = migrateGraphDocument(version.graphJson);
+                const loadedNodes = migratedGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
                 setNodes(loadedNodes);
-                setEdges(version.graphJson.edges.map((edge) => withStyledEdge(edge as Edge)));
+                setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
                 const loadedPreset = loadedNodes[0]?.data.uiScale;
                 if (loadedPreset === "compact" || loadedPreset === "balanced" || loadedPreset === "cinematic") {
                   setNodeScalePreset(loadedPreset);
@@ -2298,6 +2358,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            isValidConnection={isConnectionValid}
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
             onEdgeDoubleClick={(_, edge) => deleteEdgesByIds([edge.id])}
@@ -2362,10 +2423,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                   </button>
                   <button
                     type="button"
-                    onClick={() => addNodeFromContextMenu("model.sam3d_objects")}
+                    onClick={() => addNodeFromContextMenu("pipeline.scene_generation")}
                     className="rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200 transition hover:bg-cyan-400/20"
                   >
-                    SceneGen
+                    SceneGeneration
                   </button>
                 </div>
               </div>

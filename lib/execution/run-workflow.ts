@@ -5,13 +5,15 @@ import path from "path";
 import { prisma } from "@/lib/db";
 import { ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { MockModelRunner, stableHashForOutput } from "@/lib/execution/mock-runner";
+import { artifactTypeFromArtifactKind, normalizeArtifactType } from "@/lib/graph/artifact-types";
 import { makeCacheKey, makeOutputCacheKey } from "@/lib/graph/cache";
 import { mergeNodeParamsWithDefaults, nodeSpecRegistry } from "@/lib/graph/node-specs";
+import { getPipelineTemplateByNodeType, getPipelineTemplateExecutionOrder } from "@/lib/graph/pipeline-templates";
 import { buildExecutionPlan, parseGraphDocument } from "@/lib/graph/plan";
 import { artifactPreviewStorageKey, artifactStorageKey } from "@/lib/storage/keys";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { getObjectBuffer, putObjectToStorage } from "@/lib/storage/s3";
-import { WorkflowNodeType } from "@/types/workflow";
+import { ArtifactType, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
 
 export interface RunWorkflowInput {
   projectId: string;
@@ -67,16 +69,29 @@ function mapArtifact(artifact: {
     ? (artifact.meta as Record<string, unknown>)
     : {};
   const outputId = typeof meta.outputKey === "string" ? meta.outputKey : "default";
+  const artifactType = artifactTypeFromArtifactKind(artifact.kind, meta);
+  const ref: NodeArtifactRef = {
+    id: artifact.id,
+    type: artifactType,
+    name: outputId,
+    mimeType: artifact.mimeType,
+    storageKey: artifact.storageKey,
+    metadata: meta,
+    producerNodeId: artifact.nodeId,
+    createdAt: artifact.createdAt.toISOString()
+  };
   return {
     artifactId: artifact.id,
     nodeId: artifact.nodeId,
     outputId,
     kind: artifact.kind,
+    artifactType,
     hash: artifact.hash,
     mimeType: artifact.mimeType,
     storageKey: artifact.storageKey,
     byteSize: artifact.byteSize,
     meta,
+    ref,
     createdAt: artifact.createdAt,
     previewStorageKey: artifact.previewStorageKey
   };
@@ -118,13 +133,13 @@ function requiredInputPorts(nodeType: WorkflowNodeType) {
   return spec.inputPorts.filter((port) => port.required).map((port) => port.id);
 }
 
-function orderedInputHashes(nodeType: WorkflowNodeType, inputsByPort: Record<string, RuntimeArtifactRef[]>) {
+function orderedInputSignatures(nodeType: WorkflowNodeType, inputsByPort: Record<string, RuntimeArtifactRef[]>) {
   const spec = nodeSpecRegistry[nodeType];
   const ordered: string[] = [];
   for (const port of spec.inputPorts) {
     const entries = [...(inputsByPort[port.id] ?? [])].sort((a, b) => a.artifactId.localeCompare(b.artifactId));
     for (const entry of entries) {
-      ordered.push(entry.hash);
+      ordered.push(`${entry.artifactId}:${entry.hash}`);
     }
   }
   return ordered;
@@ -145,7 +160,7 @@ function formatInputSummary(inputsByPort: Record<string, RuntimeArtifactRef[]>) 
     .join(" ");
 }
 
-function parseBoxesMeta(artifact?: RuntimeArtifactRef | null) {
+function parseDescriptorMeta(artifact?: RuntimeArtifactRef | null) {
   if (!artifact) {
     return {
       sourceImageArtifactId: null as string | null,
@@ -168,7 +183,7 @@ function parseBoxesMeta(artifact?: RuntimeArtifactRef | null) {
   return { sourceImageArtifactId, sourceImageHash, sourceImagePath, sourceImageStorageKey };
 }
 
-async function parseBoxesPayload(artifact: RuntimeArtifactRef | null) {
+async function parseDescriptorPayload(artifact: RuntimeArtifactRef | null) {
   if (!artifact || artifact.kind !== "json") return null;
   try {
     const raw = await getObjectBuffer(artifact.storageKey);
@@ -189,18 +204,35 @@ async function createRuntimeArtifactFromLocalPath(params: {
   const hash = stableHashForOutput(buffer);
   const mimeType = inferImageMimeTypeFromPath(params.filePath);
   const kind = inferArtifactKindFromMime(mimeType);
+  const artifactType: ArtifactType = kind === "image" ? "Image" : "JsonData";
   return {
     artifactId: `${params.fallbackArtifactIdPrefix}-${hash.slice(0, 10)}`,
     nodeId: params.nodeId,
     outputId: params.outputId,
     kind,
+    artifactType,
     hash,
     mimeType,
     storageKey: params.filePath,
     byteSize: buffer.length,
     meta: {
       outputKey: params.outputId,
+      artifactType,
       sourcePath: params.filePath
+    },
+    ref: {
+      id: `${params.fallbackArtifactIdPrefix}-${hash.slice(0, 10)}`,
+      type: artifactType,
+      name: params.outputId,
+      mimeType,
+      storageKey: params.filePath,
+      metadata: {
+        outputKey: params.outputId,
+        artifactType,
+        sourcePath: params.filePath
+      },
+      producerNodeId: params.nodeId,
+      createdAt: new Date().toISOString()
     },
     createdAt: new Date(),
     previewStorageKey: null
@@ -281,14 +313,31 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
               nodeId: binding.sourceNodeId,
               outputId: "image",
               kind: "image",
+              artifactType: "Image",
               hash: sourceHash,
               mimeType: inferImageMimeTypeFromPath(filename),
               storageKey: sourceStorageKey,
               byteSize: sourceBuffer.length,
               meta: {
                 outputKey: "image",
+                artifactType: "Image",
                 filename,
                 sourceStorageKey
+              },
+              ref: {
+                id: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
+                type: "Image",
+                name: "image",
+                mimeType: inferImageMimeTypeFromPath(filename),
+                storageKey: sourceStorageKey,
+                metadata: {
+                  outputKey: "image",
+                  artifactType: "Image",
+                  filename,
+                  sourceStorageKey
+                },
+                producerNodeId: binding.sourceNodeId,
+                createdAt: new Date().toISOString()
               },
               createdAt: new Date(),
               previewStorageKey: null
@@ -312,39 +361,56 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const runtimeWarnings: string[] = [];
       if (task.nodeType === "model.sam2") {
         const directImage = inputsByPort.image?.[0] ?? null;
-        const boxesInput = inputsByPort.boxes?.[0] ?? inputsByPort.boxesConfig?.[0] ?? null;
+        const descriptorInput =
+          inputsByPort.descriptor?.[0] ?? inputsByPort.boxes?.[0] ?? inputsByPort.boxesConfig?.[0] ?? null;
         const modeParam =
           typeof resolvedParams.mode === "string" && ["guided", "full", "auto"].includes(resolvedParams.mode)
             ? resolvedParams.mode
             : "auto";
-        runtimeMode = modeParam === "auto" ? (boxesInput ? "guided" : "full") : modeParam;
+        runtimeMode = modeParam === "auto" ? (descriptorInput ? "guided" : "full") : modeParam;
 
-        if (runtimeMode === "guided" && !boxesInput) {
-          throw new Error("Requires ObjectDetection config JSON input.");
+        if (runtimeMode === "guided" && !descriptorInput) {
+          throw new Error("Requires ObjectDetection descriptor JSON input.");
         }
 
         let effectiveImage = directImage;
         let sourceImageHash: string | null = null;
-        if (boxesInput) {
-          const boxesMeta = parseBoxesMeta(boxesInput);
-          sourceImageHash = boxesMeta.sourceImageHash;
+        if (descriptorInput) {
+          const descriptorMeta = parseDescriptorMeta(descriptorInput);
+          sourceImageHash = descriptorMeta.sourceImageHash;
 
-          if (!effectiveImage && boxesMeta.sourceImageStorageKey) {
+          if (!effectiveImage && descriptorMeta.sourceImageStorageKey) {
             try {
-              const sourceBuffer = await getObjectBuffer(boxesMeta.sourceImageStorageKey);
+              const sourceBuffer = await getObjectBuffer(descriptorMeta.sourceImageStorageKey);
               const sourceHash = stableHashForOutput(sourceBuffer);
               effectiveImage = {
                 artifactId: `source-storage-${task.nodeId}-${sourceHash.slice(0, 10)}`,
                 nodeId: task.nodeId,
                 outputId: "image",
                 kind: "image",
+                artifactType: "Image",
                 hash: sourceHash,
-                mimeType: inferImageMimeTypeFromPath(boxesMeta.sourceImageStorageKey),
-                storageKey: boxesMeta.sourceImageStorageKey,
+                mimeType: inferImageMimeTypeFromPath(descriptorMeta.sourceImageStorageKey),
+                storageKey: descriptorMeta.sourceImageStorageKey,
                 byteSize: sourceBuffer.length,
                 meta: {
                   outputKey: "image",
-                  sourceStorageKey: boxesMeta.sourceImageStorageKey
+                  artifactType: "Image",
+                  sourceStorageKey: descriptorMeta.sourceImageStorageKey
+                },
+                ref: {
+                  id: `source-storage-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+                  type: "Image",
+                  name: "image",
+                  mimeType: inferImageMimeTypeFromPath(descriptorMeta.sourceImageStorageKey),
+                  storageKey: descriptorMeta.sourceImageStorageKey,
+                  metadata: {
+                    outputKey: "image",
+                    artifactType: "Image",
+                    sourceStorageKey: descriptorMeta.sourceImageStorageKey
+                  },
+                  producerNodeId: task.nodeId,
+                  createdAt: new Date().toISOString()
                 },
                 createdAt: new Date(),
                 previewStorageKey: null
@@ -354,23 +420,23 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             }
           }
 
-          if (!effectiveImage && boxesMeta.sourceImageArtifactId) {
+          if (!effectiveImage && descriptorMeta.sourceImageArtifactId) {
             const sourcedImage =
-              producedByArtifactId.get(boxesMeta.sourceImageArtifactId) ??
-              (await findArtifactById(input.projectId, boxesMeta.sourceImageArtifactId));
+              producedByArtifactId.get(descriptorMeta.sourceImageArtifactId) ??
+              (await findArtifactById(input.projectId, descriptorMeta.sourceImageArtifactId));
             if (sourcedImage) {
               producedByArtifactId.set(sourcedImage.artifactId, sourcedImage);
               effectiveImage = sourcedImage;
             }
           }
 
-          if (!effectiveImage && boxesMeta.sourceImagePath) {
+          if (!effectiveImage && descriptorMeta.sourceImagePath) {
             try {
-              await fs.access(boxesMeta.sourceImagePath);
+              await fs.access(descriptorMeta.sourceImagePath);
               effectiveImage = await createRuntimeArtifactFromLocalPath({
                 nodeId: task.nodeId,
                 outputId: "image",
-                filePath: boxesMeta.sourceImagePath,
+                filePath: descriptorMeta.sourceImagePath,
                 fallbackArtifactIdPrefix: "source-path"
               });
             } catch {
@@ -379,7 +445,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
 
           if (!effectiveImage) {
-            const boxesPayload = await parseBoxesPayload(boxesInput);
+            const boxesPayload = await parseDescriptorPayload(descriptorInput);
             const imagePath =
               boxesPayload && typeof boxesPayload.image_path === "string"
                 ? boxesPayload.image_path
@@ -404,12 +470,13 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             }
           }
 
-          inputsByPort.boxes = [boxesInput];
-          inputsByPort.boxesConfig = [boxesInput];
+          inputsByPort.descriptor = [descriptorInput];
+          inputsByPort.boxes = [descriptorInput];
+          inputsByPort.boxesConfig = [descriptorInput];
         }
 
         if (directImage && sourceImageHash && directImage.hash !== sourceImageHash) {
-          runtimeWarnings.push("Boxes input image hash differs from direct image input. Using direct image input.");
+          runtimeWarnings.push("Descriptor input image hash differs from direct image input. Using direct image input.");
         }
 
         if (!effectiveImage) {
@@ -441,14 +508,31 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             nodeId: task.nodeId,
             outputId: "image",
             kind: "image",
+            artifactType: "Image",
             hash: sourceHash,
             mimeType: inferImageMimeTypeFromPath(filename),
             storageKey,
             byteSize: sourceBuffer.length,
             meta: {
               outputKey: "image",
+              artifactType: "Image",
               filename,
               sourceStorageKey: storageKey
+            },
+            ref: {
+              id: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+              type: "Image",
+              name: "image",
+              mimeType: inferImageMimeTypeFromPath(filename),
+              storageKey,
+              metadata: {
+                outputKey: "image",
+                artifactType: "Image",
+                filename,
+                sourceStorageKey: storageKey
+              },
+              producerNodeId: task.nodeId,
+              createdAt: new Date().toISOString()
             },
             createdAt: new Date(),
             previewStorageKey: null
@@ -474,7 +558,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const nodeBaseCacheKey = makeCacheKey(
         task.nodeType,
         resolvedParams,
-        orderedInputHashes(task.nodeType, inputsByPort),
+        orderedInputSignatures(task.nodeType, inputsByPort),
         runtimeMode
       );
 
@@ -527,6 +611,344 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         });
       }
 
+      const template = getPipelineTemplateByNodeType(task.nodeType);
+      if (template) {
+        const debugInternalExecution = process.env.WORKFLOW_DEBUG_INTERNAL === "true";
+        const internalProduced = new Map<string, RuntimeArtifactRef>();
+        const internalNodeById = new Map(template.internalGraph.nodes.map((node) => [node.id, node]));
+        const internalExecutionOrder = getPipelineTemplateExecutionOrder(template);
+        const wrapperOutputs: RuntimeArtifactRef[] = [];
+
+        for (const internalNodeId of internalExecutionOrder) {
+          const internalNode = internalNodeById.get(internalNodeId);
+          if (!internalNode) {
+            throw new Error(`Template ${template.id} missing internal node ${internalNodeId}`);
+          }
+          const internalNodeRuntimeId = `${task.nodeId}::${template.id}::${internalNodeId}`;
+          const internalSpec = nodeSpecRegistry[internalNode.type];
+          const internalParams = mergeNodeParamsWithDefaults(internalNode.type, internalNode.params ?? {});
+
+          for (const paramBinding of template.exposedParams) {
+            if (paramBinding.internalNodeId !== internalNodeId) continue;
+            const value = resolvedParams[paramBinding.exposedParamKey];
+            if (value !== undefined) {
+              let mappedValue: unknown = value;
+              if (
+                paramBinding.exposedParamKey === "SceneMaskExecution" &&
+                paramBinding.internalParamKey === "runAllMasksInOneProcess"
+              ) {
+                if (typeof value === "boolean") {
+                  mappedValue = value;
+                } else if (value === "per_mask" || value === "Per mask") {
+                  mappedValue = false;
+                } else {
+                  mappedValue = true;
+                }
+              }
+              internalParams[paramBinding.internalParamKey] = mappedValue;
+            }
+          }
+
+          const internalInputsByPort: Record<string, RuntimeArtifactRef[]> = {};
+
+          for (const inputBinding of template.exposedInputs) {
+            if (inputBinding.internalNodeId !== internalNodeId) continue;
+            const exposedInputs = inputsByPort[inputBinding.exposedInputId] ?? [];
+            if (exposedInputs.length === 0) continue;
+            internalInputsByPort[inputBinding.internalInputId] = [
+              ...(internalInputsByPort[inputBinding.internalInputId] ?? []),
+              ...exposedInputs
+            ];
+          }
+
+          for (const edge of template.internalGraph.edges) {
+            if (edge.targetNodeId !== internalNodeId) continue;
+            const produced = internalProduced.get(`${edge.sourceNodeId}:${edge.sourceOutputId}`);
+            if (!produced) continue;
+            internalInputsByPort[edge.targetInputId] = [...(internalInputsByPort[edge.targetInputId] ?? []), produced];
+          }
+
+          let internalRuntimeMode: string | undefined;
+          const internalWarnings: string[] = [];
+          if (internalNode.type === "model.sam2") {
+            const directImage = internalInputsByPort.image?.[0] ?? null;
+            const descriptor =
+              internalInputsByPort.descriptor?.[0] ??
+              internalInputsByPort.boxes?.[0] ??
+              internalInputsByPort.boxesConfig?.[0] ??
+              null;
+            const modeParam =
+              typeof internalParams.mode === "string" && ["guided", "full", "auto"].includes(internalParams.mode)
+                ? internalParams.mode
+                : "auto";
+            internalRuntimeMode = modeParam === "auto" ? (descriptor ? "guided" : "full") : modeParam;
+
+            if (internalRuntimeMode === "guided" && !descriptor) {
+              throw new Error("Template SegmentScene requires ObjectDetection descriptor input in guided mode.");
+            }
+            if (descriptor) {
+              internalInputsByPort.descriptor = [descriptor];
+              internalInputsByPort.boxes = [descriptor];
+              internalInputsByPort.boxesConfig = [descriptor];
+            }
+            if (!directImage) {
+              throw new Error("Template SegmentScene requires image input.");
+            }
+            internalInputsByPort.image = [directImage];
+          }
+
+          for (const requiredPort of requiredInputPorts(internalNode.type)) {
+            if (!internalInputsByPort[requiredPort] || internalInputsByPort[requiredPort].length === 0) {
+              throw new Error(`Template node ${internalNodeId} missing required input "${requiredPort}"`);
+            }
+          }
+
+          const internalCacheBaseKey = makeCacheKey(
+            internalNode.type,
+            internalParams,
+            orderedInputSignatures(internalNode.type, internalInputsByPort),
+            internalRuntimeMode
+          );
+          const internalCacheHits = new Map<string, RuntimeArtifactRef>();
+          let internalAllCached = !shouldBypassCache;
+
+          if (!shouldBypassCache) {
+            for (const outputPort of internalSpec.outputPorts) {
+              const outputCacheKey = makeOutputCacheKey(internalCacheBaseKey, outputPort.id);
+              const hit = await prisma.cacheEntry.findUnique({
+                where: { cacheKey: outputCacheKey },
+                include: { artifact: true }
+              });
+              if (!hit?.artifact) {
+                internalAllCached = false;
+                break;
+              }
+              internalCacheHits.set(outputPort.id, mapArtifact(hit.artifact));
+            }
+          }
+
+          if (internalAllCached && internalCacheHits.size > 0 && !shouldBypassCache) {
+            for (const [outputId, artifact] of internalCacheHits.entries()) {
+              internalProduced.set(`${internalNodeId}:${outputId}`, artifact);
+              producedByArtifactId.set(artifact.artifactId, artifact);
+            }
+            if (debugInternalExecution) {
+              const latest = await prisma.run.findUnique({ where: { id: input.runId } });
+              await updateRun(input.runId, {
+                logs: appendLog(
+                  latest?.logs ?? "",
+                  `[${now}] ${task.nodeId} template-cache-hit internal=${internalNodeId} outputs=${[
+                    ...internalCacheHits.keys()
+                  ].join(",")}`
+                )
+              });
+            }
+            continue;
+          }
+
+          const internalResult = await runner.executeNode({
+            projectId: input.projectId,
+            projectSlug,
+            runId: input.runId,
+            nodeId: internalNodeRuntimeId,
+            nodeType: internalNode.type,
+            params: internalParams,
+            inputs: internalInputsByPort,
+            mode: internalRuntimeMode,
+            warnings: internalWarnings,
+            loadInputBuffer: async (artifact) => {
+              if (path.isAbsolute(artifact.storageKey)) {
+                try {
+                  return await fs.readFile(artifact.storageKey);
+                } catch {
+                  // Fall back to object storage.
+                }
+              }
+              return getObjectBuffer(artifact.storageKey);
+            }
+          });
+
+          const internalOutputs = internalResult.outputs.filter((output) =>
+            internalSpec.outputPorts.some((port) => port.id === output.outputId)
+          );
+          if (internalOutputs.length === 0) {
+            throw new Error(`Template internal node ${internalNodeId} produced no outputs`);
+          }
+
+          for (const output of internalOutputs) {
+            const outputPort = internalSpec.outputPorts.find((port) => port.id === output.outputId);
+            const outputArtifactType = normalizeArtifactType(
+              output.artifactType ?? outputPort?.artifactType,
+              artifactTypeFromArtifactKind(output.kind)
+            );
+            const outputHidden = true;
+            const outputHash = stableHashForOutput(output.buffer);
+            const created = await prisma.artifact.create({
+              data: {
+                runId: input.runId,
+                projectId: input.projectId,
+                nodeId: internalNodeRuntimeId,
+                kind: output.kind,
+                mimeType: output.mimeType,
+                byteSize: output.buffer.length,
+                hash: outputHash,
+                storageKey: "pending",
+                previewStorageKey: null,
+                meta: {
+                  ...(output.meta ?? {}),
+                  outputKey: output.outputId,
+                  artifactType: outputArtifactType,
+                  hidden: outputHidden,
+                  templateId: template.id,
+                  templateNodeId: internalNodeId,
+                  mode: internalResult.mode ?? internalRuntimeMode ?? null,
+                  warnings: internalResult.warnings ?? internalWarnings
+                } as Prisma.InputJsonValue
+              }
+            });
+
+            const key = artifactStorageKey({
+              projectSlug,
+              projectId: input.projectId,
+              runId: input.runId,
+              nodeId: internalNodeRuntimeId,
+              artifactId: created.id,
+              extension: output.extension
+            });
+
+            await putObjectToStorage({
+              key,
+              body: output.buffer,
+              contentType: output.mimeType
+            });
+
+            let previewKey: string | null = null;
+            if (output.preview) {
+              previewKey = artifactPreviewStorageKey({
+                projectSlug,
+                projectId: input.projectId,
+                runId: input.runId,
+                nodeId: internalNodeRuntimeId,
+                artifactId: created.id,
+                extension: output.preview.extension
+              });
+              await putObjectToStorage({
+                key: previewKey,
+                body: output.preview.buffer,
+                contentType: output.preview.mimeType
+              });
+            }
+
+            const artifact = await prisma.artifact.update({
+              where: { id: created.id },
+              data: {
+                storageKey: key,
+                previewStorageKey: previewKey,
+                byteSize: output.buffer.length,
+                hash: outputHash
+              }
+            });
+            const mapped = mapArtifact(artifact);
+            internalProduced.set(`${internalNodeId}:${output.outputId}`, mapped);
+            producedByArtifactId.set(mapped.artifactId, mapped);
+
+            const internalOutputCacheKey = makeOutputCacheKey(internalCacheBaseKey, output.outputId);
+            await prisma.cacheEntry.upsert({
+              where: { cacheKey: internalOutputCacheKey },
+              create: {
+                projectId: input.projectId,
+                cacheKey: internalOutputCacheKey,
+                artifactId: artifact.id
+              },
+              update: {
+                artifactId: artifact.id
+              }
+            });
+          }
+
+          if (debugInternalExecution) {
+            const latest = await prisma.run.findUnique({ where: { id: input.runId } });
+            await updateRun(input.runId, {
+              logs: appendLog(
+                latest?.logs ?? "",
+                `[${now}] ${task.nodeId} template-executed internal=${internalNodeId} outputs=${internalOutputs
+                  .map((output) => output.outputId)
+                  .join(",")}`
+              )
+            });
+          }
+        }
+
+        for (const outputBinding of template.exposedOutputs) {
+          const internalOutput = internalProduced.get(
+            `${outputBinding.internalNodeId}:${outputBinding.internalOutputId}`
+          );
+          if (!internalOutput) {
+            throw new Error(
+              `Template ${template.id} missing output ${outputBinding.internalNodeId}.${outputBinding.internalOutputId}`
+            );
+          }
+
+          const outputPort = spec.outputPorts.find((port) => port.id === outputBinding.exposedOutputId);
+          const outputArtifactType = normalizeArtifactType(
+            outputPort?.artifactType,
+            internalOutput.artifactType
+          );
+          const alias = await prisma.artifact.create({
+            data: {
+              runId: input.runId,
+              projectId: input.projectId,
+              nodeId: task.nodeId,
+              kind: internalOutput.kind,
+              mimeType: internalOutput.mimeType,
+              byteSize: internalOutput.byteSize,
+              hash: internalOutput.hash,
+              storageKey: internalOutput.storageKey,
+              previewStorageKey: internalOutput.previewStorageKey,
+              meta: {
+                ...(internalOutput.meta ?? {}),
+                outputKey: outputBinding.exposedOutputId,
+                artifactType: outputArtifactType,
+                hidden: false,
+                templateId: template.id,
+                templateOutputSource: `${outputBinding.internalNodeId}.${outputBinding.internalOutputId}`,
+                mode: runtimeMode ?? null
+              } as Prisma.InputJsonValue
+            }
+          });
+          const aliasMapped = mapArtifact(alias);
+          wrapperOutputs.push(aliasMapped);
+          producedByOutput.set(mapKey(task.nodeId, outputBinding.exposedOutputId), aliasMapped);
+          producedByArtifactId.set(aliasMapped.artifactId, aliasMapped);
+
+          const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, outputBinding.exposedOutputId);
+          await prisma.cacheEntry.upsert({
+            where: { cacheKey: outputCacheKey },
+            create: {
+              projectId: input.projectId,
+              cacheKey: outputCacheKey,
+              artifactId: alias.id
+            },
+            update: {
+              artifactId: alias.id
+            }
+          });
+        }
+
+        const progress = Math.round(((i + 1) / total) * 100);
+        const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
+        await updateRun(input.runId, {
+          progress,
+          logs: appendLog(
+            latestRun?.logs ?? "",
+            `[${now}] ${task.nodeId} executed mode=template outputs=${wrapperOutputs
+              .map((output) => output.outputId)
+              .join(",")} inputs=${inputSummary}`
+          )
+        });
+        continue;
+      }
+
       const result = await runner.executeNode({
         projectId: input.projectId,
         projectSlug,
@@ -558,6 +980,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       for (const output of outputs) {
         const outputPort = spec.outputPorts.find((port) => port.id === output.outputId);
         const outputHidden = Boolean(output.hidden ?? outputPort?.hidden);
+        const outputArtifactType = normalizeArtifactType(
+          output.artifactType ?? outputPort?.artifactType,
+          artifactTypeFromArtifactKind(output.kind)
+        );
         const outputHash = stableHashForOutput(output.buffer);
         const created = await prisma.artifact.create({
           data: {
@@ -573,6 +999,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             meta: {
               ...(output.meta ?? {}),
               outputKey: output.outputId,
+              artifactType: outputArtifactType,
               hidden: outputHidden,
               mode: result.mode ?? runtimeMode ?? null,
               warnings: result.warnings ?? runtimeWarnings
@@ -623,7 +1050,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
         });
         const mapped = mapArtifact(artifact);
-        storedOutputs.push(`${output.outputId}:${output.kind}:${key}`);
+        storedOutputs.push(`${output.outputId}:${output.kind}:${outputArtifactType}:${key}`);
         producedByOutput.set(mapKey(task.nodeId, output.outputId), mapped);
         producedByArtifactId.set(mapped.artifactId, mapped);
 

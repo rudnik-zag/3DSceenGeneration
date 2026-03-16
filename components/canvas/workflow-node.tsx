@@ -49,6 +49,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
   "model.groundingdino": Boxes,
   "model.sam2": Layers,
   "model.sam3d_objects": Boxes,
+  "pipeline.scene_generation": Boxes,
   "model.qwen_vl": Sparkles,
   "model.qwen_image_edit": WandSparkles,
   "model.texturing": WandSparkles,
@@ -66,7 +67,8 @@ const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.image": "Reference",
   "model.groundingdino": "ObjectDetection",
   "model.sam2": "SegmentScene",
-  "model.sam3d_objects": "SceneGen",
+  "model.sam3d_objects": "CustomSceneGen",
+  "pipeline.scene_generation": "SceneGeneration",
   "model.qwen_vl": "Qwen-VL",
   "model.qwen_image_edit": "Flux 2",
   "model.texturing": "Texturing",
@@ -148,7 +150,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
   const isSam2Node = nodeType === "model.sam2";
-  const isSceneGenerationNode = nodeType === "model.sam3d_objects";
+  const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
+  const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
+  const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
@@ -205,23 +209,42 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ? data.params.sam2Cfg.trim()
       : "sam2.1_hiera_l.yaml";
   const sceneConfig =
-    isSceneGenerationNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
+    isCustomSceneGenNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
       ? data.params.config.trim()
       : "hf";
   const scenePreset =
-    isSceneGenerationNode &&
+    isCustomSceneGenNode &&
     typeof data.params?.configPreset === "string" &&
     getSceneGenerationPresetNames().includes(data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
       ? (data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
+      : isSceneGenerationPipelineNode &&
+          typeof data.params?.SceneDetailedOption === "string" &&
+          getSceneGenerationPresetNames().includes(
+            data.params.SceneDetailedOption as "Default" | "HighQuality" | "FastPreview" | "Custom"
+          )
+        ? (data.params.SceneDetailedOption as "Default" | "HighQuality" | "FastPreview" | "Custom")
       : "Default";
   const sceneFormat =
-    isSceneGenerationNode &&
+    isCustomSceneGenNode &&
     typeof data.params?.format === "string" &&
     (data.params.format === "mesh_glb" || data.params.format === "point_ply")
       ? data.params.format
+      : isSceneGenerationPipelineNode &&
+          typeof data.params?.SceneOutputFormat === "string" &&
+          (data.params.SceneOutputFormat === "mesh_glb" || data.params.SceneOutputFormat === "point_ply")
+        ? data.params.SceneOutputFormat
       : "mesh_glb";
-  const sceneRunAllMasksInOneProcess =
-    isSceneGenerationNode ? data.params?.runAllMasksInOneProcess !== false : true;
+  const sceneRunAllMasksInOneProcess = isCustomSceneGenNode
+    ? data.params?.runAllMasksInOneProcess !== false
+    : isSceneGenerationPipelineNode
+      ? typeof data.params?.SceneMaskExecution === "string"
+        ? data.params.SceneMaskExecution !== "per_mask"
+        : data.params?.runAllMasksInOneProcess !== false
+      : true;
+  const sceneObjectPrompt =
+    isSceneGenerationPipelineNode && typeof data.params?.objectPrompt === "string"
+      ? data.params.objectPrompt
+      : "";
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -236,7 +259,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   }, [isSam2Node]);
 
   useEffect(() => {
-    if (!isSceneGenerationNode) return;
+    if (!isCustomSceneGenNode) return;
     let mounted = true;
     fetchSam3dConfigs().then((configs) => {
       if (!mounted) return;
@@ -245,7 +268,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     return () => {
       mounted = false;
     };
-  }, [isSceneGenerationNode]);
+  }, [isCustomSceneGenNode]);
 
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
@@ -262,7 +285,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         selected && "border-primary/60 shadow-[0_0_0_2px_rgba(74,222,128,0.35),0_24px_50px_rgba(0,0,0,0.55)]"
       )}
     >
-      {(isSceneGenerationNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
+      {(isCustomSceneGenNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
         return (
           <div key={`${port.id}-${idx}`}>
@@ -331,7 +354,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <option
                 value="guided"
                 disabled={!hasSam2BoxesConfig}
-                title={!hasSam2BoxesConfig ? "Requires ObjectDetection config JSON input." : undefined}
+                title={!hasSam2BoxesConfig ? "Requires ObjectDetection descriptor JSON input." : undefined}
               >
                 Guided (DINO config)
               </option>
@@ -356,7 +379,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         </div>
       ) : null}
 
-      {isSceneGenerationNode ? (
+      {isCustomSceneGenNode ? (
         <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Config Preset</p>
@@ -417,6 +440,76 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 <button
                   type="button"
                   onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    !sceneRunAllMasksInOneProcess
+                      ? "border border-amber-400/40 bg-amber-500/15 text-amber-200"
+                      : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                  )}
+                  title="Run one process per mask to reduce OOM risk."
+                >
+                  Per mask
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : isSceneGenerationPipelineNode ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">objectPrompt</p>
+            <input
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sceneObjectPrompt}
+              onChange={(event) => data.onUpdateParam?.(id, "objectPrompt", event.target.value)}
+              placeholder="chair, house, car, tree ..."
+            />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">SceneDetailedOption</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={scenePreset}
+              onChange={(event) => data.onUpdateParam?.(id, "SceneDetailedOption", event.target.value)}
+            >
+              {getSceneGenerationPresetNames().map((preset) => (
+                <option key={preset} value={preset}>
+                  {preset}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">SceneOutputFormat</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              value={sceneFormat}
+              onChange={(event) => data.onUpdateParam?.(id, "SceneOutputFormat", event.target.value)}
+            >
+              <option value="mesh_glb">mesh_glb</option>
+              <option value="point_ply">point_ply</option>
+            </select>
+          </div>
+          {sceneFormat === "mesh_glb" ? (
+            <div className="space-y-1">
+              <p className="text-[10px] text-zinc-400">Mask Execution</p>
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-black/35 p-1">
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "SceneMaskExecution", "all_masks")}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    sceneRunAllMasksInOneProcess
+                      ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+                      : "border border-transparent text-zinc-300 hover:bg-white/[0.06]"
+                  )}
+                  title="One process handles all masks."
+                >
+                  All masks
+                </button>
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "SceneMaskExecution", "per_mask")}
                   className={cn(
                     "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
                     !sceneRunAllMasksInOneProcess
@@ -509,7 +602,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             {data.latestArtifactId ? (
               <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{data.latestArtifactId.slice(0, 8)}</p>
             ) : (
-              <p className="mt-1 text-[10px] text-zinc-500">Run SceneGeneration to create scene assets.</p>
+              <p className="mt-1 text-[10px] text-zinc-500">
+                {isCustomSceneGenNode ? "Run CustomSceneGen to create scene assets." : "Run SceneGeneration to create scene assets."}
+              </p>
             )}
           </div>
           <button

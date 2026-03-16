@@ -44,32 +44,17 @@ export async function POST() {
           },
           {
             id: "n2",
-            type: "model.groundingdino",
-            position: { x: 320, y: -40 },
-            data: { label: "ObjectDetection", params: { prompt: "person, shoes", threshold: 0.35 }, status: "idle" }
-          },
-          {
-            id: "n3",
-            type: "model.sam2",
-            position: { x: 680, y: -30 },
-            data: { label: "SegmentScene", params: { mode: "auto", sam2Cfg: "sam2.1_hiera_l.yaml" }, status: "idle" }
-          },
-          {
-            id: "n4",
-            type: "model.sam3d_objects",
-            position: { x: 1020, y: -30 },
+            type: "pipeline.scene_generation",
+            position: { x: 360, y: -20 },
             data: {
               label: "SceneGeneration",
-              params: { format: "mesh_glb", config: "hf", maxObjects: 0 },
+              params: { objectPrompt: "person, shoes", SceneDetailedOption: "Default", SceneOutputFormat: "mesh_glb" },
               status: "idle"
             }
           }
         ],
         edges: [
-          { id: "e1", source: "n1", target: "n2", sourceHandle: "image", targetHandle: "image" },
-          { id: "e2", source: "n1", target: "n3", sourceHandle: "image", targetHandle: "image" },
-          { id: "e3", source: "n2", target: "n3", sourceHandle: "boxes", targetHandle: "boxes" },
-          { id: "e4", source: "n3", target: "n4", sourceHandle: "config", targetHandle: "config" }
+          { id: "e1", source: "n1", target: "n2", sourceHandle: "image", targetHandle: "image" }
         ],
         viewport: { x: 0, y: 0, zoom: 0.9 }
       }

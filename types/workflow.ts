@@ -2,22 +2,20 @@ import { z } from "zod";
 
 export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 
-export type PayloadKind =
+export type ArtifactType =
   | "Image"
-  | "Mask"
-  | "MaskDir"
-  | "Boxes"
-  | "BoxesJson"
-  | "MaskImage"
-  | "OverlayImage"
-  | "JsonMeta"
-  | "Text"
-  | "Json"
-  | "Depth"
+  | "Descriptor"
+  | "MaskSet"
+  | "SceneAsset"
+  | "JsonData"
+  | "DepthMap"
   | "PointCloud"
   | "Mesh"
   | "TextureSet"
-  | "Scene";
+  | "GaussianSplat";
+
+// Legacy alias kept for backwards compatibility with older code paths.
+export type PayloadKind = ArtifactType;
 
 export type WorkflowNodeType =
   | "input.image"
@@ -26,6 +24,7 @@ export type WorkflowNodeType =
   | "model.groundingdino"
   | "model.sam2"
   | "model.sam3d_objects"
+  | "pipeline.scene_generation"
   | "model.qwen_vl"
   | "model.qwen_image_edit"
   | "model.texturing"
@@ -43,7 +42,7 @@ export type NodeUiScale = "compact" | "balanced" | "cinematic";
 export interface PortSpec {
   id: string;
   label: string;
-  payload: PayloadKind;
+  artifactType: ArtifactType;
   required?: boolean;
   hidden?: boolean;
   advancedOnly?: boolean;
@@ -163,5 +162,16 @@ export interface ArtifactRef {
   hash: string;
   meta?: Record<string, unknown>;
 }
+
+export type NodeArtifactRef = {
+  id: string;
+  type: ArtifactType;
+  name: string;
+  mimeType?: string;
+  storageKey?: string;
+  metadata?: Record<string, unknown>;
+  producerNodeId: string;
+  createdAt: string;
+};
 
 export type GraphJson = GraphDocument;

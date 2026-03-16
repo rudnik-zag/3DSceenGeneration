@@ -1,4 +1,6 @@
 import { GraphDocument, GraphEdge, GraphNode, WorkflowNodeType, ExecutionPlan } from "@/types/workflow";
+import { validateConnectionForEdge } from "@/lib/graph/connection-rules";
+import { migrateGraphDocument } from "@/lib/graph/migrations";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 
 function byId<T extends { id: string }>(items: T[]) {
@@ -10,7 +12,31 @@ export function parseGraphDocument(raw: unknown): GraphDocument {
   if (!doc || !Array.isArray(doc.nodes) || !Array.isArray(doc.edges) || !doc.viewport) {
     throw new Error("Invalid graph document");
   }
-  return doc;
+  const migrated = migrateGraphDocument(doc);
+  const nodesById = byId(migrated.nodes);
+  const validEdges = migrated.edges.reduce<GraphEdge[]>((acc, edge) => {
+    const result = validateConnectionForEdge({
+      nodesById,
+      sourceNodeId: edge.source,
+      targetNodeId: edge.target,
+      sourceHandleId: edge.sourceHandle,
+      targetHandleId: edge.targetHandle
+    });
+    if (!result.valid) {
+      return acc;
+    }
+    acc.push({
+      ...edge,
+      sourceHandle: result.sourceHandleId ?? edge.sourceHandle,
+      targetHandle: result.targetHandleId ?? edge.targetHandle
+    });
+    return acc;
+  }, []);
+
+  return {
+    ...migrated,
+    edges: validEdges
+  };
 }
 
 function buildOutgoing(edges: GraphEdge[]) {
