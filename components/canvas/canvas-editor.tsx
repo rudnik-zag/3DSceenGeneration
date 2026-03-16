@@ -1918,7 +1918,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <DropdownMenuContent align="start" className="w-[360px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
               <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">Node Palette</p>
               <p className="mb-2 text-xs text-zinc-500">Right-click on canvas to add at cursor, or add at viewport center below.</p>
-              <div className="mb-2 grid grid-cols-4 gap-1">
+              <div className="mb-2 grid grid-cols-2 gap-1.5">
                 <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("input.image")}>
                   Input Image
                 </Button>
@@ -2399,7 +2399,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </div>
               <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.015] p-2">
                 <p className="mb-1 text-xs text-zinc-500">Quick Add</p>
-                <div className="grid grid-cols-4 gap-1">
+                <div className="grid grid-cols-2 gap-1.5">
                   <button
                     type="button"
                     onClick={() => addNodeFromContextMenu("input.image")}
