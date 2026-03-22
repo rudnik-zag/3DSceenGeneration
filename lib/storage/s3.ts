@@ -399,6 +399,14 @@ async function deleteLocalPrefix(prefix: string) {
   await fs.rm(dirPath, { recursive: true, force: true });
 }
 
+async function deleteLocalObject(key: string) {
+  const normalized = normalizeStoragePrefix(key);
+  if (!normalized) return;
+  const { filePath, metaPath } = toSafeStoragePath(normalized);
+  await fs.rm(filePath, { force: true });
+  await fs.rm(metaPath, { force: true });
+}
+
 async function deleteS3Prefix(prefix: string) {
   await ensureBucket();
   const client = getClient();
@@ -431,6 +439,52 @@ async function deleteS3Prefix(prefix: string) {
 
     continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
   } while (continuationToken);
+}
+
+async function deleteS3Object(key: string) {
+  await ensureBucket();
+  const client = getClient();
+  const normalized = normalizeStoragePrefix(key);
+  if (!normalized) return;
+  await client.send(
+    new DeleteObjectsCommand({
+      Bucket: env.S3_BUCKET,
+      Delete: {
+        Quiet: true,
+        Objects: [{ Key: normalized }]
+      }
+    })
+  );
+}
+
+export async function deleteStorageObject(key: string) {
+  const normalized = normalizeStoragePrefix(key);
+  if (!normalized) return;
+
+  try {
+    await deleteLocalObject(normalized);
+  } catch (error) {
+    throttledLog(
+      "delete-local-object",
+      "warn",
+      `[storage] Failed to delete local storage key "${normalized}"${describeStorageError(error)}`
+    );
+  }
+
+  if (isS3TemporarilyDisabled()) {
+    return;
+  }
+
+  try {
+    await deleteS3Object(normalized);
+  } catch (error) {
+    markS3TemporarilyUnavailable(error, "deleteObject");
+    throttledLog(
+      "delete-s3-object",
+      "warn",
+      `[storage] Failed to delete S3 object "${normalized}"${describeStorageError(error)}`
+    );
+  }
 }
 
 export async function deleteStoragePrefix(prefix: string) {

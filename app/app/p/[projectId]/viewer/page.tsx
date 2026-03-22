@@ -81,9 +81,12 @@ function toUniqueSignedUrlsByAssetPath(values: string[]) {
     if (!rawValue || rawValue.length === 0) continue;
     let key = rawValue;
     try {
-      const parsed = new URL(rawValue);
+      const parsed = new URL(rawValue, "http://localhost");
       const storageKey = parsed.searchParams.get("key");
-      key = storageKey && storageKey.length > 0 ? `key:${storageKey}` : `path:${parsed.origin}${parsed.pathname}`;
+      key =
+        parsed.pathname === "/api/storage/object" && storageKey && storageKey.length > 0
+          ? `storage:${storageKey}`
+          : `path:${parsed.origin}${parsed.pathname}`;
     } catch {
       key = rawValue;
     }
@@ -274,11 +277,112 @@ export default async function ViewerPage({
 
   const scopedArtifacts = nodeId ? artifacts.filter((artifact) => artifact.nodeId === nodeId) : [];
   const artifactList = artifacts;
-  const selectedArtifact =
+  let selectedArtifact =
     artifacts.find((artifact) => artifact.id === artifactId) ??
     scopedArtifacts[0] ??
     artifacts[0] ??
     null;
+  let initialArtifact:
+    | {
+        id: string;
+        kind: string;
+        url: string;
+        mimeType: string;
+        meta: Record<string, unknown> | null;
+        byteSize: number;
+        storageKey: string;
+        filename: string;
+        additionalSceneUrls: string[];
+      }
+    | null = null;
+  let storageIssue:
+    | {
+        title: string;
+        description: string;
+      }
+    | null = null;
+  let firstMissingStorageKey: string | null = null;
+  let sawStorageUnavailable = false;
+  const hydrateInitialArtifact = async (candidate: (typeof artifactList)[number]) => {
+    const exists = await storageObjectExists(candidate.storageKey);
+    if (!exists) {
+      if (!firstMissingStorageKey) {
+        firstMissingStorageKey = candidate.storageKey;
+      }
+      return null;
+    }
+
+    const signedUrl = await safeGetSignedDownloadUrl(candidate.storageKey);
+    if (!signedUrl) {
+      sawStorageUnavailable = true;
+      return null;
+    }
+
+    const artifactMeta = candidate.meta as Record<string, unknown> | null;
+    const metadataAdditionalSceneKeys =
+      artifactMeta && Array.isArray(artifactMeta.meshObjectStorageKeys)
+        ? artifactMeta.meshObjectStorageKeys.filter(
+            (value): value is string => typeof value === "string" && value.length > 0
+          )
+        : [];
+    const manifestAdditionalSceneUrls =
+      candidate.kind === "mesh_glb"
+        ? await resolveAdditionalSceneUrlsFromManifest({
+            projectId: project.id,
+            projectName: project.name,
+            runId: candidate.runId,
+            nodeId: candidate.nodeId
+          })
+        : [];
+    const metadataAdditionalSceneUrls = (
+      await Promise.all(metadataAdditionalSceneKeys.map(async (key) => safeGetSignedDownloadUrl(key)))
+    ).filter((value): value is string => typeof value === "string" && value.length > 0);
+    const additionalSceneUrls = toUniqueSignedUrlsByAssetPath(
+      manifestAdditionalSceneUrls.length > 0 ? manifestAdditionalSceneUrls : metadataAdditionalSceneUrls
+    );
+
+    return {
+      id: candidate.id,
+      kind: candidate.kind,
+      url: signedUrl,
+      mimeType: candidate.mimeType,
+      meta: artifactMeta,
+      byteSize: candidate.byteSize,
+      storageKey: candidate.storageKey,
+      additionalSceneUrls,
+      filename:
+        (artifactMeta?.filename as string | undefined) ??
+        candidate.storageKey.split("/").pop() ??
+        candidate.id
+    };
+  };
+
+  const candidateArtifacts = selectedArtifact
+    ? [selectedArtifact, ...artifactList.filter((artifact) => artifact.id !== selectedArtifact?.id)]
+    : artifactList;
+  for (const candidate of candidateArtifacts) {
+    const hydrated = await hydrateInitialArtifact(candidate);
+    if (!hydrated) continue;
+    selectedArtifact = candidate;
+    initialArtifact = hydrated;
+    storageIssue = null;
+    break;
+  }
+
+  if (!initialArtifact) {
+    if (firstMissingStorageKey) {
+      storageIssue = {
+        title: "Artifact File Missing",
+        description: `storageKey=${firstMissingStorageKey}`
+      };
+    } else if (sawStorageUnavailable) {
+      storageIssue = {
+        title: "Artifact Storage Unavailable",
+        description: "Could not generate signed URL from configured S3/MinIO endpoint."
+      };
+    }
+  }
+
   const activeNodeScope = nodeId ?? selectedArtifact?.nodeId ?? null;
   const selectedRenderer = selectedArtifact
     ? selectViewerRenderer({
@@ -309,86 +413,10 @@ export default async function ViewerPage({
               bundleMode: selectedBundleMode
             }),
             label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.id}`,
-            selected: artifact.id === selectedArtifact.id
+            selected: artifact.id === selectedArtifact?.id
           }))
         }
       : null;
-  let initialArtifact:
-    | {
-        id: string;
-        kind: string;
-        url: string;
-        mimeType: string;
-        meta: Record<string, unknown> | null;
-        byteSize: number;
-        storageKey: string;
-        filename: string;
-        additionalSceneUrls: string[];
-      }
-    | null = null;
-  let storageIssue:
-    | {
-        title: string;
-        description: string;
-      }
-    | null = null;
-
-  if (selectedArtifact) {
-    const exists = await storageObjectExists(selectedArtifact.storageKey);
-
-    if (!exists) {
-      storageIssue = {
-        title: "Artifact File Missing",
-        description: `storageKey=${selectedArtifact.storageKey}`
-      };
-    } else {
-      const signedUrl = await safeGetSignedDownloadUrl(selectedArtifact.storageKey);
-      if (!signedUrl) {
-        storageIssue = {
-          title: "Artifact Storage Unavailable",
-          description: "Could not generate signed URL from configured S3/MinIO endpoint."
-        };
-      } else {
-        const artifactMeta = selectedArtifact.meta as Record<string, unknown> | null;
-        const metadataAdditionalSceneKeys =
-          artifactMeta && Array.isArray(artifactMeta.meshObjectStorageKeys)
-            ? artifactMeta.meshObjectStorageKeys.filter(
-                (value): value is string => typeof value === "string" && value.length > 0
-              )
-            : [];
-        const manifestAdditionalSceneUrls =
-          selectedArtifact.kind === "mesh_glb"
-            ? await resolveAdditionalSceneUrlsFromManifest({
-                projectId: project.id,
-                projectName: project.name,
-                runId: selectedArtifact.runId,
-                nodeId: selectedArtifact.nodeId
-              })
-            : [];
-        const metadataAdditionalSceneUrls = (
-          await Promise.all(metadataAdditionalSceneKeys.map(async (key) => safeGetSignedDownloadUrl(key)))
-        ).filter((value): value is string => typeof value === "string" && value.length > 0);
-        const additionalSceneUrls = toUniqueSignedUrlsByAssetPath(
-          manifestAdditionalSceneUrls.length > 0 ? manifestAdditionalSceneUrls : metadataAdditionalSceneUrls
-        );
-
-        initialArtifact = {
-          id: selectedArtifact.id,
-          kind: selectedArtifact.kind,
-          url: signedUrl,
-          mimeType: selectedArtifact.mimeType,
-          meta: artifactMeta,
-          byteSize: selectedArtifact.byteSize,
-          storageKey: selectedArtifact.storageKey,
-          additionalSceneUrls,
-          filename:
-            (artifactMeta?.filename as string | undefined) ??
-            selectedArtifact.storageKey.split("/").pop() ??
-            selectedArtifact.id
-        };
-      }
-    }
-  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

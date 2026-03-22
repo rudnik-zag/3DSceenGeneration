@@ -71,10 +71,10 @@ function uniqueStrings(values: Array<string | null | undefined>) {
 
 function normalizeUrlForDedup(url: string) {
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(url, "http://localhost");
     const key = parsed.searchParams.get("key");
     if (parsed.pathname === "/api/storage/object" && key) {
-      return `${parsed.origin}${parsed.pathname}?key=${key}`;
+      return `storage:${key}`;
     }
     return `${parsed.origin}${parsed.pathname}`;
   } catch {

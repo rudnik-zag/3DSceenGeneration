@@ -84,7 +84,7 @@ function normalizeAssetUrlForDedup(url: string): string {
     const parsed = new URL(url, "http://localhost");
     const keyParam = parsed.searchParams.get("key");
     if (parsed.pathname === "/api/storage/object" && keyParam) {
-      return `${parsed.origin}${parsed.pathname}?key=${keyParam}`;
+      return `storage:${keyParam}`;
     }
     return `${parsed.origin}${parsed.pathname}`;
   } catch {
@@ -223,12 +223,22 @@ export function ViewerLoader({
   const [worldManifestError, setWorldManifestError] = useState<string | null>(null);
   const [buildTilesetLoading, setBuildTilesetLoading] = useState(false);
   const [buildJobId, setBuildJobId] = useState<string | null>(null);
+  const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [viewerResetVersion, setViewerResetVersion] = useState(0);
   const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "project_fallback");
+  const [sceneCleared, setSceneCleared] = useState(false);
 
   const activeArtifact = useMemo(() => localArtifact ?? initialArtifact, [initialArtifact, localArtifact]);
 
   const unifiedManifest = useMemo<UnifiedManifest | null>(() => {
+    if (sceneCleared) {
+      return {
+        artifactId: activeArtifact?.id,
+        camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+        meshes: [],
+        splats: []
+      };
+    }
     if (localArtifact) {
       return buildSingleArtifactManifest(localArtifact);
     }
@@ -269,7 +279,7 @@ export function ViewerLoader({
       return buildSingleArtifactManifest(activeArtifact);
     }
     return null;
-  }, [activeArtifact, localArtifact, worldManifest]);
+  }, [activeArtifact, localArtifact, sceneCleared, worldManifest]);
 
   useEffect(() => {
     return () => {
@@ -280,7 +290,7 @@ export function ViewerLoader({
   }, [localArtifact]);
 
   useEffect(() => {
-    if (!activeArtifact || localArtifact) {
+    if (sceneCleared || !activeArtifact || localArtifact) {
       setWorldManifest(null);
       setWorldManifestError(null);
       setWorldManifestLoading(false);
@@ -316,7 +326,7 @@ export function ViewerLoader({
     return () => {
       cancelled = true;
     };
-  }, [activeArtifact, localArtifact, bundleMode]);
+  }, [activeArtifact, localArtifact, bundleMode, sceneCleared]);
 
   useEffect(() => {
     if (!buildJobId) return;
@@ -448,6 +458,7 @@ export function ViewerLoader({
     }
 
     const url = URL.createObjectURL(file);
+    setSceneCleared(false);
     setLocalArtifact((prev) => {
       if (prev?.url && isBlobUrl(prev.url)) {
         URL.revokeObjectURL(prev.url);
@@ -469,6 +480,7 @@ export function ViewerLoader({
   };
 
   const clearLocalArtifact = () => {
+    setSceneCleared(false);
     setLocalArtifact((prev) => {
       if (prev?.url && isBlobUrl(prev.url)) {
         URL.revokeObjectURL(prev.url);
@@ -478,6 +490,7 @@ export function ViewerLoader({
   };
 
   const onResetViewer = () => {
+    setSceneCleared(false);
     clearLocalArtifact();
     setWorldManifest(null);
     setWorldManifestError(null);
@@ -486,12 +499,64 @@ export function ViewerLoader({
     setBuildJobId(null);
     setViewerResetVersion((value) => value + 1);
   };
+  const onClearScene = () => {
+    clearLocalArtifact();
+    setWorldManifest(null);
+    setWorldManifestError(null);
+    setWorldManifestLoading(false);
+    setBuildTilesetLoading(false);
+    setBuildJobId(null);
+    setSceneCleared(true);
+    setViewerResetVersion((value) => value + 1);
+  };
   const onBundleModeChange = (nextMode: BundleMode) => {
     setBundleMode(nextMode);
     if (typeof window !== "undefined") {
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("bundleMode", nextMode);
       window.history.replaceState(null, "", nextUrl.toString());
+    }
+  };
+
+  const onDeleteArtifact = async (artifactId: string, label?: string) => {
+    if (!artifactId) return;
+    const confirmed = window.confirm(`Delete artifact ${label ?? artifactId}? This will remove it from storage and history.`);
+    if (!confirmed) return;
+
+    try {
+      setDeletingArtifactId(artifactId);
+      const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+        method: "DELETE"
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Delete failed (${response.status})`);
+      }
+
+      toast({
+        title: "Artifact Deleted",
+        description: label ?? artifactId
+      });
+
+      const remaining = (artifactPicker?.options ?? []).filter((option) => option.id !== artifactId);
+      if (remaining.length > 0) {
+        const nextOption = remaining.find((option) => option.selected) ?? remaining[0];
+        window.location.assign(withBundleModeHref(nextOption.href, bundleMode));
+        return;
+      }
+
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("artifactId");
+      nextUrl.searchParams.delete("nodeId");
+      nextUrl.searchParams.set("bundleMode", bundleMode);
+      window.location.assign(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    } catch (error) {
+      toast({
+        title: "Delete Failed",
+        description: error instanceof Error ? error.message : "Failed to delete artifact."
+      });
+    } finally {
+      setDeletingArtifactId(null);
     }
   };
 
@@ -538,6 +603,9 @@ export function ViewerLoader({
               onUseRunArtifact: localArtifact ? clearLocalArtifact : undefined,
               onBuildTileset: canBuildTileset ? onBuildTileset : undefined,
               onBundleModeChange,
+              onDeleteArtifact,
+              deletingArtifactId,
+              onClearScene,
               onResetViewer
             }}
           />

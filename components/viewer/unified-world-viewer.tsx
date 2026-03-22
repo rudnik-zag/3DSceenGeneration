@@ -72,6 +72,9 @@ interface ViewerFileMenu {
   onUseRunArtifact?: () => void;
   onBuildTileset?: () => void;
   onBundleModeChange?: (mode: BundleMode) => void;
+  onDeleteArtifact?: (artifactId: string, label?: string) => void;
+  deletingArtifactId?: string | null;
+  onClearScene?: () => void;
   onResetViewer?: () => void;
 }
 
@@ -104,16 +107,33 @@ interface TransformDraft {
   rotation: [string, string, string];
   scale: [string, string, string];
 }
+type EulerTriplet = [number, number, number];
 
 interface SplatHandle {
   id: string;
   label: string;
   object: THREE.Object3D;
   runtime: LoadedSplatRuntime;
+  sourceKey?: string;
   dispose?: () => void;
   update?: () => void;
   splatCount?: number;
   bounds?: THREE.Box3;
+}
+
+interface ObjectContextMenuState {
+  x: number;
+  y: number;
+  itemId: string;
+  kind: SceneObjectKind;
+  label: string;
+}
+
+interface ArtifactContextMenuState {
+  x: number;
+  y: number;
+  artifactId: string;
+  label: string;
 }
 
 interface ViewerHudStats {
@@ -156,6 +176,7 @@ const TRANSFORM_STEP_OPTIONS = [0.1, 1, 10] as const;
 
 const PLY_3DGS_RECORD_SIZE_BYTES = 68; // 17 float32 values
 const SH_C0 = 0.28209479177387814;
+const TWO_PI = Math.PI * 2;
 
 interface ParsedPlyHeader {
   vertexCount: number;
@@ -197,6 +218,59 @@ function clamp01(value: number): number {
   if (value < 0) return 0;
   if (value > 1) return 1;
   return value;
+}
+
+function normalizeRadiansSigned(value: number): number {
+  let normalized = value % TWO_PI;
+  if (normalized <= -Math.PI) normalized += TWO_PI;
+  if (normalized > Math.PI) normalized -= TWO_PI;
+  return normalized;
+}
+
+function unwrapRadiansNear(value: number, reference: number): number {
+  let unwrapped = normalizeRadiansSigned(value);
+  while (unwrapped - reference > Math.PI) {
+    unwrapped -= TWO_PI;
+  }
+  while (unwrapped - reference < -Math.PI) {
+    unwrapped += TWO_PI;
+  }
+  return unwrapped;
+}
+
+function stabilizeEulerXYZForDisplay(
+  quaternion: THREE.Quaternion,
+  previous: EulerTriplet | undefined
+): EulerTriplet {
+  const euler = new THREE.Euler().setFromQuaternion(quaternion, "XYZ");
+  const base: EulerTriplet = [euler.x, euler.y, euler.z];
+  if (!previous) return base;
+
+  const candidateBases: EulerTriplet[] = [
+    base,
+    [base[0] + Math.PI, Math.PI - base[1], base[2] + Math.PI],
+    [base[0] - Math.PI, Math.PI - base[1], base[2] - Math.PI]
+  ];
+
+  let best = candidateBases[0] as EulerTriplet;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of candidateBases) {
+    const stabilized: EulerTriplet = [
+      unwrapRadiansNear(candidate[0], previous[0]),
+      unwrapRadiansNear(candidate[1], previous[1]),
+      unwrapRadiansNear(candidate[2], previous[2])
+    ];
+    const score =
+      Math.abs(stabilized[0] - previous[0]) +
+      Math.abs(stabilized[1] - previous[1]) +
+      Math.abs(stabilized[2] - previous[2]);
+    if (score < bestScore) {
+      bestScore = score;
+      best = stabilized;
+    }
+  }
+
+  return best;
 }
 
 function parsePlyHeader(rawHeader: string): ParsedPlyHeader | null {
@@ -451,7 +525,7 @@ function normalizeMeshUrlForDedup(url: string): string {
     const parsed = new URL(url, "http://localhost");
     const keyParam = parsed.searchParams.get("key");
     if (parsed.pathname === "/api/storage/object" && keyParam) {
-      return `${parsed.origin}${parsed.pathname}?key=${keyParam}`;
+      return `storage:${keyParam}`;
     }
     return `${parsed.origin}${parsed.pathname}`;
   } catch {
@@ -557,6 +631,11 @@ export function UnifiedWorldViewer({
   const pausedRef = useRef(false);
   const navModeRef = useRef<NavigationMode>("orbit");
   const flySpeedRef = useRef(4);
+  const rotationDisplayRef = useRef<Map<string, EulerTriplet>>(new Map());
+  const removedMeshIdsRef = useRef<Set<string>>(new Set());
+  const removedSplatSourceKeysRef = useRef<Set<string>>(new Set());
+  const objectContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const artifactContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [flySpeed, setFlySpeed] = useState([4]);
@@ -579,6 +658,10 @@ export function UnifiedWorldViewer({
   const [openPanel, setOpenPanel] = useState<FloatingPanel>("none");
   const [activeSplatRuntimes, setActiveSplatRuntimes] = useState<LoadedSplatRuntime[]>([]);
   const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
+  const [removedMeshIds, setRemovedMeshIds] = useState<string[]>([]);
+  const [removedSplatSourceKeys, setRemovedSplatSourceKeys] = useState<string[]>([]);
+  const [objectContextMenu, setObjectContextMenu] = useState<ObjectContextMenuState | null>(null);
+  const [artifactContextMenu, setArtifactContextMenu] = useState<ArtifactContextMenuState | null>(null);
 
   const preferredRuntimeOrder = useMemo(
     () => getRuntimeOrderForPreference(getSplatRuntimePreference()),
@@ -637,6 +720,60 @@ export function UnifiedWorldViewer({
     flySpeedRef.current = flySpeed[0] ?? 4;
   }, [flySpeed]);
 
+  useEffect(() => {
+    removedMeshIdsRef.current = new Set(removedMeshIds);
+  }, [removedMeshIds]);
+
+  useEffect(() => {
+    removedSplatSourceKeysRef.current = new Set(removedSplatSourceKeys);
+  }, [removedSplatSourceKeys]);
+
+  useEffect(() => {
+    if (openPanel === "objects") return;
+    setObjectContextMenu(null);
+  }, [openPanel]);
+
+  useEffect(() => {
+    if (openPanel === "file") return;
+    setArtifactContextMenu(null);
+  }, [openPanel]);
+
+  useEffect(() => {
+    if (!objectContextMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && objectContextMenuRef.current?.contains(target)) return;
+      setObjectContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setObjectContextMenu(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [objectContextMenu]);
+
+  useEffect(() => {
+    if (!artifactContextMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && artifactContextMenuRef.current?.contains(target)) return;
+      setArtifactContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setArtifactContextMenu(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [artifactContextMenu]);
+
   const updateHudFromHandles = useCallback(() => {
     let loadedSplats = 0;
     for (const handle of splatHandlesRef.current) {
@@ -683,7 +820,10 @@ export function UnifiedWorldViewer({
       setTransformDebug("No object selected");
       return;
     }
-    const euler = new THREE.Euler().setFromQuaternion(object.quaternion, "XYZ");
+    const rotationKey = object.uuid;
+    const previousEuler = rotationDisplayRef.current.get(rotationKey);
+    const stabilizedEuler = stabilizeEulerXYZForDisplay(object.quaternion, previousEuler);
+    rotationDisplayRef.current.set(rotationKey, stabilizedEuler);
     const world = new THREE.Vector3();
     object.getWorldPosition(world);
     setTransformDraft({
@@ -693,9 +833,9 @@ export function UnifiedWorldViewer({
         object.position.z.toFixed(3)
       ],
       rotation: [
-        THREE.MathUtils.radToDeg(euler.x).toFixed(2),
-        THREE.MathUtils.radToDeg(euler.y).toFixed(2),
-        THREE.MathUtils.radToDeg(euler.z).toFixed(2)
+        THREE.MathUtils.radToDeg(stabilizedEuler[0]).toFixed(2),
+        THREE.MathUtils.radToDeg(stabilizedEuler[1]).toFixed(2),
+        THREE.MathUtils.radToDeg(stabilizedEuler[2]).toFixed(2)
       ],
       scale: [object.scale.x.toFixed(3), object.scale.y.toFixed(3), object.scale.z.toFixed(3)]
     });
@@ -875,6 +1015,87 @@ export function UnifiedWorldViewer({
     setTransformDebug("No object selected");
   }, [clearSelectedHelper, syncTransformDraft]);
 
+  const removeMeshFromScene = useCallback(
+    (meshId: string) => {
+      if (!meshId) return;
+      removedMeshIdsRef.current.add(meshId);
+      setRemovedMeshIds((current) => (current.includes(meshId) ? current : [...current, meshId]));
+
+      const targetIndex = meshRootsRef.current.findIndex((entry) => {
+        const sourceMeshId = (entry.userData?.sourceMeshId as string | undefined) ?? null;
+        return sourceMeshId === meshId || (entry.name || entry.uuid) === meshId;
+      });
+      if (targetIndex < 0) return;
+
+      const [target] = meshRootsRef.current.splice(targetIndex, 1);
+      rootRef.current?.remove(target);
+      if (selectedRef.current === target) {
+        setSelectedObject(null);
+      }
+      rotationDisplayRef.current.delete(target.uuid);
+      disposeObjectTree(target);
+      refreshMeshItems();
+      setTransformDebug(`removed mesh=${meshId}`);
+    },
+    [refreshMeshItems, setSelectedObject]
+  );
+
+  const removeSplatFromScene = useCallback(
+    (sourceKey: string) => {
+      if (!sourceKey) return;
+      removedSplatSourceKeysRef.current.add(sourceKey);
+      setRemovedSplatSourceKeys((current) => (current.includes(sourceKey) ? current : [...current, sourceKey]));
+
+      let removedAny = false;
+      for (const handle of [...splatHandlesRef.current]) {
+        if (handle.sourceKey !== sourceKey) continue;
+        splatHandlesRef.current.delete(handle);
+        rootRef.current?.remove(handle.object);
+        if (selectedRef.current === handle.object) {
+          setSelectedObject(null);
+        }
+        handle.dispose?.();
+        removedAny = true;
+      }
+      if (!removedAny) return;
+
+      refreshSplatItems();
+      updateHudFromHandles();
+      setTransformDebug(`removed splat=${sourceKey}`);
+    },
+    [refreshSplatItems, setSelectedObject, updateHudFromHandles]
+  );
+
+  const selectObjectItem = useCallback(
+    (kind: SceneObjectKind, itemId: string) => {
+      if (kind === "mesh") {
+        const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === itemId) ?? null;
+        setSelectedObject(target, "mesh");
+        return;
+      }
+      const handle = [...splatHandlesRef.current].find((entry) => entry.id === itemId) ?? null;
+      setSelectedObject(handle?.object ?? null, "splat");
+    },
+    [setSelectedObject]
+  );
+
+  const removeObjectItem = useCallback(
+    (kind: SceneObjectKind, itemId: string) => {
+      if (kind === "mesh") {
+        const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === itemId) ?? null;
+        const sourceMeshId = (target?.userData?.sourceMeshId as string | undefined) ?? itemId;
+        removeMeshFromScene(sourceMeshId);
+      } else {
+        const handle = [...splatHandlesRef.current].find((entry) => entry.id === itemId) ?? null;
+        if (handle?.sourceKey) {
+          removeSplatFromScene(handle.sourceKey);
+        }
+      }
+      setObjectContextMenu(null);
+    },
+    [removeMeshFromScene, removeSplatFromScene]
+  );
+
   const updateTransformDraftValue = useCallback(
     (section: keyof TransformDraft, axisIndex: 0 | 1 | 2, value: string) => {
       setTransformDraft((current) => {
@@ -927,23 +1148,27 @@ export function UnifiedWorldViewer({
       const px = read(draft.position[0], object.position.x);
       const py = read(draft.position[1], object.position.y);
       const pz = read(draft.position[2], object.position.z);
-      const rx = read(draft.rotation[0], THREE.MathUtils.radToDeg(object.rotation.x));
-      const ry = read(draft.rotation[1], THREE.MathUtils.radToDeg(object.rotation.y));
-      const rz = read(draft.rotation[2], THREE.MathUtils.radToDeg(object.rotation.z));
+      const currentEuler = rotationDisplayRef.current.get(object.uuid) ?? [
+        object.rotation.x,
+        object.rotation.y,
+        object.rotation.z
+      ];
+      const rx = read(draft.rotation[0], THREE.MathUtils.radToDeg(currentEuler[0]));
+      const ry = read(draft.rotation[1], THREE.MathUtils.radToDeg(currentEuler[1]));
+      const rz = read(draft.rotation[2], THREE.MathUtils.radToDeg(currentEuler[2]));
       const sx = read(draft.scale[0], object.scale.x);
       const sy = read(draft.scale[1], object.scale.y);
       const sz = read(draft.scale[2], object.scale.z);
+      const rxRad = THREE.MathUtils.degToRad(rx);
+      const ryRad = THREE.MathUtils.degToRad(ry);
+      const rzRad = THREE.MathUtils.degToRad(rz);
 
       object.position.set(px, py, pz);
-      object.rotation.set(
-        THREE.MathUtils.degToRad(rx),
-        THREE.MathUtils.degToRad(ry),
-        THREE.MathUtils.degToRad(rz),
-        "XYZ"
-      );
+      object.rotation.set(rxRad, ryRad, rzRad, "XYZ");
       object.scale.set(sx, sy, sz);
       object.updateWorldMatrix(true, true);
       sceneRef.current?.updateMatrixWorld(true);
+      rotationDisplayRef.current.set(object.uuid, [rxRad, ryRad, rzRad]);
 
       if (commit) {
         schedulePersist();
@@ -1005,6 +1230,7 @@ export function UnifiedWorldViewer({
     object.scale.set(1, 1, 1);
     object.updateMatrixWorld(true);
     sceneRef.current?.updateMatrixWorld(true);
+    rotationDisplayRef.current.set(object.uuid, [0, 0, 0]);
 
     schedulePersist();
     setTransformDebug(`reset id=${object.name || object.uuid} -> identity transform`);
@@ -1356,6 +1582,7 @@ export function UnifiedWorldViewer({
         label: buildSplatLabel(idSource ?? url),
         object,
         runtime: "legacy",
+        sourceKey: normalizeMeshUrlForDedup(idSource ?? url),
         dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
         update: typeof object.update === "function" ? () => object.update?.() : undefined,
         splatCount: 0
@@ -1442,6 +1669,7 @@ export function UnifiedWorldViewer({
         label: buildSplatLabel(idSource ?? url),
         object,
         runtime: "spark",
+        sourceKey: normalizeMeshUrlForDedup(idSource ?? url),
         dispose: disposeFn,
         update: undefined,
         splatCount: 0
@@ -1517,6 +1745,7 @@ export function UnifiedWorldViewer({
         label: buildSplatLabel(idSource ?? url),
         object: points,
         runtime: "points",
+        sourceKey: normalizeMeshUrlForDedup(idSource ?? url),
         dispose: () => {
           points.geometry.dispose();
           material.dispose();
@@ -1592,8 +1821,9 @@ export function UnifiedWorldViewer({
           const key = normalizeMeshUrlForDedup(mesh.url);
           return source.findIndex((candidate) => normalizeMeshUrlForDedup(candidate.url) === key) === index;
         });
+        const activeMeshes = dedupedMeshes.filter((mesh) => !removedMeshIdsRef.current.has(mesh.id));
 
-        for (const mesh of dedupedMeshes) {
+        for (const mesh of activeMeshes) {
           if (disposed || cancelled) break;
           try {
             const gltf = await loader.loadAsync(mesh.url);
@@ -1614,6 +1844,8 @@ export function UnifiedWorldViewer({
               else if (meshObj.material) applyState(meshObj.material);
             });
             gltf.scene.userData.transformRoot = true;
+            gltf.scene.userData.sourceMeshId = mesh.id;
+            gltf.scene.userData.sourceMeshKey = normalizeMeshUrlForDedup(mesh.url);
             gltf.scene.renderOrder = 0;
 
             const baseId = mesh.id || gltf.scene.name || "mesh";
@@ -1647,6 +1879,8 @@ export function UnifiedWorldViewer({
         if (directSplats.length > 0) {
           for (const splatEntry of directSplats) {
             if (disposed || cancelled) break;
+            const sourceKey = normalizeMeshUrlForDedup(splatEntry.url);
+            if (removedSplatSourceKeysRef.current.has(sourceKey)) continue;
             if (splatEntry.formatHint === "ply") {
               void loadDirectPlyWithPolicy(splatEntry.url).catch((splatError) => {
                 if (disposed || cancelled) return;
@@ -2016,6 +2250,14 @@ export function UnifiedWorldViewer({
               size="sm"
               variant="outline"
               className="h-8 rounded-md text-xs col-span-2"
+              onClick={() => fileMenu.onClearScene?.()}
+            >
+              Clear Scene
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs col-span-2"
               onClick={() => fileMenu.onResetViewer?.()}
             >
               Reset Viewer
@@ -2040,8 +2282,23 @@ export function UnifiedWorldViewer({
                     variant={option.selected ? "default" : "outline"}
                     className="h-8 w-full justify-start gap-2 rounded-md text-left"
                     onClick={() => {
+                      setArtifactContextMenu(null);
                       window.location.assign(option.href);
                     }}
+                    onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                      event.preventDefault();
+                      const menuWidth = 184;
+                      const menuHeight = 82;
+                      const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
+                      const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
+                      setArtifactContextMenu({
+                        x: Math.max(8, Math.min(event.clientX, maxX)),
+                        y: Math.max(8, Math.min(event.clientY, maxY)),
+                        artifactId: option.id,
+                        label: option.label
+                      });
+                    }}
+                    disabled={fileMenu.deletingArtifactId === option.id}
                   >
                     <span className="shrink-0 rounded-full border border-border/60 bg-background/60 px-1.5 py-0.5 text-[10px]">
                       {option.kind}
@@ -2050,6 +2307,7 @@ export function UnifiedWorldViewer({
                   </Button>
                 ))}
               </div>
+              <div className="mt-1 text-[10px] text-zinc-500">Right-click artifact for delete action.</div>
             </div>
           ) : null}
         </div>
@@ -2120,15 +2378,21 @@ export function UnifiedWorldViewer({
                   size="sm"
                   variant={selectedName === item.id ? "default" : "outline"}
                   className="h-8 w-full justify-between gap-2 rounded-md"
-                  onClick={() => {
-                    if (item.kind === "mesh") {
-                      const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === item.id) ?? null;
-                      setSelectedObject(target, "mesh");
-                    } else {
-                      const handle = [...splatHandlesRef.current].find((entry) => entry.id === item.id) ?? null;
-                      setSelectedObject(handle?.object ?? null, "splat");
-                    }
-                    setOpenPanel("transform");
+                  onClick={() => selectObjectItem(item.kind, item.id)}
+                  onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                    event.preventDefault();
+                    selectObjectItem(item.kind, item.id);
+                    const menuWidth = 168;
+                    const menuHeight = 78;
+                    const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
+                    const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
+                    setObjectContextMenu({
+                      x: Math.max(8, Math.min(event.clientX, maxX)),
+                      y: Math.max(8, Math.min(event.clientY, maxY)),
+                      itemId: item.id,
+                      kind: item.kind,
+                      label: item.label
+                    });
                   }}
                 >
                   <span className="truncate text-left text-xs">{item.label}</span>
@@ -2139,6 +2403,62 @@ export function UnifiedWorldViewer({
               ))
             )}
           </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2 h-8 w-full rounded-md text-xs"
+            onClick={() => setOpenPanel("transform")}
+            disabled={!selectedRef.current}
+          >
+            Open Transform
+          </Button>
+          <div className="mt-1 text-[10px] text-zinc-500">Right-click object for delete action.</div>
+        </div>
+      ) : null}
+
+      {objectContextMenu ? (
+        <div
+          ref={objectContextMenuRef}
+          className="fixed z-[120] w-[168px] rounded-md border border-border/70 bg-[#090d18]/95 p-1.5 shadow-lg backdrop-blur-md"
+          style={{ left: objectContextMenu.x, top: objectContextMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="mb-1 truncate px-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+            {objectContextMenu.kind}
+          </div>
+          <div className="mb-1 truncate px-1 text-[11px] text-zinc-300">{objectContextMenu.label}</div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 w-full justify-start rounded-md px-2 text-xs"
+            onClick={() => removeObjectItem(objectContextMenu.kind, objectContextMenu.itemId)}
+          >
+            Delete From Scene
+          </Button>
+        </div>
+      ) : null}
+
+      {artifactContextMenu ? (
+        <div
+          ref={artifactContextMenuRef}
+          className="fixed z-[120] w-[184px] rounded-md border border-border/70 bg-[#090d18]/95 p-1.5 shadow-lg backdrop-blur-md"
+          style={{ left: artifactContextMenu.x, top: artifactContextMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="mb-1 truncate px-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">artifact</div>
+          <div className="mb-1 truncate px-1 text-[11px] text-zinc-300">{artifactContextMenu.label}</div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 w-full justify-start rounded-md px-2 text-xs"
+            onClick={() => {
+              fileMenu?.onDeleteArtifact?.(artifactContextMenu.artifactId, artifactContextMenu.label);
+              setArtifactContextMenu(null);
+            }}
+            disabled={!fileMenu?.onDeleteArtifact || fileMenu.deletingArtifactId === artifactContextMenu.artifactId}
+          >
+            {fileMenu?.deletingArtifactId === artifactContextMenu.artifactId ? "Deleting..." : "Delete Artifact"}
+          </Button>
         </div>
       ) : null}
 
