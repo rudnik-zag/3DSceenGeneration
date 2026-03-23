@@ -181,6 +181,110 @@ function getContextRowIcon(type: WorkflowNodeType) {
   return Sparkles;
 }
 
+type OutputArtifactView = NonNullable<GraphNodeData["outputArtifacts"]>[string];
+type ScenePreviewStageView = NonNullable<GraphNodeData["scenePreviewStages"]>[string];
+
+function parseTemplateHostNodeId(artifact: NodeArtifact) {
+  const meta = artifact.meta;
+  if (meta && typeof meta.templateHostNodeId === "string" && meta.templateHostNodeId.trim().length > 0) {
+    return meta.templateHostNodeId.trim();
+  }
+  const marker = "::template.";
+  const markerIndex = artifact.nodeId.indexOf(marker);
+  if (markerIndex > 0) {
+    return artifact.nodeId.slice(0, markerIndex);
+  }
+  return null;
+}
+
+function parseTemplateNodeId(artifact: NodeArtifact) {
+  const meta = artifact.meta;
+  if (!meta || typeof meta.templateNodeId !== "string") return "";
+  return meta.templateNodeId.trim();
+}
+
+function mapArtifactView(artifact: NodeArtifact): OutputArtifactView {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    hidden: Boolean(artifact.hidden),
+    url: artifact.url ?? null,
+    previewUrl: artifact.previewUrl ?? null,
+    createdAt: artifact.createdAt
+  };
+}
+
+function pickLatestOutputArtifacts(artifacts: NodeArtifact[]) {
+  return artifacts.reduce<Record<string, OutputArtifactView>>((acc, artifact) => {
+    const outputKey = artifact.outputKey ?? "default";
+    if (!acc[outputKey]) {
+      acc[outputKey] = mapArtifactView(artifact);
+    }
+    return acc;
+  }, {});
+}
+
+function toScenePreviewStage(label: string, artifact: NodeArtifact): ScenePreviewStageView {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    label,
+    hidden: Boolean(artifact.hidden),
+    outputKey: artifact.outputKey ?? "default",
+    url: artifact.url ?? null,
+    previewUrl: artifact.previewUrl ?? null,
+    createdAt: artifact.createdAt
+  };
+}
+
+function buildSceneGenerationPreviewStages(nodeId: string, artifacts: NodeArtifact[]) {
+  const relevant = artifacts
+    .filter((artifact) => artifact.nodeId === nodeId || parseTemplateHostNodeId(artifact) === nodeId)
+    .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
+  if (relevant.length === 0) return null;
+
+  const directArtifacts = relevant.filter((artifact) => artifact.nodeId === nodeId);
+  const internalArtifacts = relevant.filter((artifact) => artifact.nodeId !== nodeId);
+
+  const finalCandidate =
+    directArtifacts.find((artifact) => (artifact.outputKey ?? "default") === "generatedScene") ??
+    directArtifacts.find((artifact) => (artifact.outputKey ?? "default") === "scene") ??
+    internalArtifacts.find(
+      (artifact) =>
+        parseTemplateNodeId(artifact) === "custom" &&
+        ((artifact.outputKey ?? "default") === "scene" || (artifact.outputKey ?? "default") === "generatedScene")
+    ) ??
+    directArtifacts.find((artifact) => !artifact.hidden) ??
+    directArtifacts[0] ??
+    null;
+
+  const detectionCandidate =
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "detect" && (artifact.outputKey ?? "default") === "descriptor"
+    ) ?? null;
+
+  const segmentationCandidate =
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "segment" && (artifact.outputKey ?? "default") === "overlay"
+    ) ??
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "segment" && (artifact.outputKey ?? "default") === "config"
+    ) ??
+    null;
+
+  const stages: Record<string, ScenePreviewStageView> = {};
+  if (finalCandidate) {
+    stages.final = toScenePreviewStage("Final scene", finalCandidate);
+  }
+  if (detectionCandidate) {
+    stages.detection = toScenePreviewStage("Detection", detectionCandidate);
+  }
+  if (segmentationCandidate) {
+    stages.segmentation = toScenePreviewStage("Segmentation", segmentationCandidate);
+  }
+  return Object.keys(stages).length > 0 ? stages : null;
+}
+
 function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
   const nodeType = base.type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
@@ -189,20 +293,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
     .filter((a) => a.nodeId === base.id)
     .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
 
-  const outputArtifacts = matched.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>((acc, artifact) => {
-    const outputKey = artifact.outputKey ?? "default";
-    if (!acc[outputKey]) {
-      acc[outputKey] = {
-        id: artifact.id,
-        kind: artifact.kind,
-        hidden: Boolean(artifact.hidden),
-        url: artifact.url ?? null,
-        previewUrl: artifact.previewUrl ?? null,
-        createdAt: artifact.createdAt
-      };
-    }
-    return acc;
-  }, {});
+  const outputArtifacts = pickLatestOutputArtifacts(matched);
 
   const previewOutputIds = spec.ui?.previewOutputIds ?? [];
   const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
@@ -214,6 +305,19 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       .filter(([key, artifact]) => !artifact.hidden && !hiddenOutputIds.has(key))
       .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
     Object.values(outputArtifacts)[0];
+  const scenePreviewStages =
+    nodeType === "pipeline.scene_generation"
+      ? buildSceneGenerationPreviewStages(base.id, artifacts)
+      : null;
+  const selectedScenePreviewStage =
+    nodeType === "pipeline.scene_generation" && typeof mergedParams.ScenePreviewStage === "string"
+      ? mergedParams.ScenePreviewStage
+      : "final";
+  const selectedScenePreview =
+    scenePreviewStages?.[selectedScenePreviewStage] ??
+    scenePreviewStages?.final ??
+    null;
+  const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
 
   const runtimeMetaCandidate = matched.find((artifact) => artifact.outputKey === "meta")?.meta ?? matched[0]?.meta ?? null;
   const runtimeMode = runtimeMetaCandidate && typeof runtimeMetaCandidate.mode === "string" ? runtimeMetaCandidate.mode : undefined;
@@ -241,14 +345,15 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       label: typeof base.data.label === "string" && base.data.label.trim().length > 0 ? base.data.label : spec.title,
       params: mergedParams,
       status: base.data.status ?? "idle",
-      latestArtifactId: previewArtifact?.id,
-      latestArtifactKind: previewArtifact?.kind,
+      latestArtifactId: resolvedPreviewArtifact?.id,
+      latestArtifactKind: resolvedPreviewArtifact?.kind,
       previewUrl:
-        previewArtifact?.previewUrl ??
-        previewArtifact?.url ??
+        resolvedPreviewArtifact?.previewUrl ??
+        resolvedPreviewArtifact?.url ??
         inputNodePreviewUrl ??
         (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
       outputArtifacts,
+      scenePreviewStages: scenePreviewStages ?? undefined,
       runtimeMode: typeof base.data.runtimeMode === "string" ? base.data.runtimeMode : runtimeMode,
       runtimeWarning: base.data.runtimeWarning ?? runtimeWarning,
       uiScale: base.data.uiScale ?? "balanced",
@@ -355,6 +460,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const byId = new Map(prev.map((node) => [node.id, node]));
       const hasDescriptorByNode = new Set<string>();
       const hasImageByNode = new Set<string>();
+      const previewArtifactByNode = new Map<
+        string,
+        {
+          id: string;
+          kind: string;
+          previewUrl: string | null;
+          url: string | null;
+          hidden?: boolean;
+          createdAt?: string;
+        }
+      >();
 
       for (const edge of edges) {
         const targetNode = byId.get(edge.target);
@@ -369,34 +485,115 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         if (inferredTargetHandle === "image") {
           hasImageByNode.add(edge.target);
         }
+
+        if (targetType === "out.open_in_viewer") {
+          const sourceNode = byId.get(edge.source);
+          if (!sourceNode) continue;
+          const sourceType = sourceNode.type as WorkflowNodeType;
+          const sourceSpec = nodeSpecRegistry[sourceType];
+          const sourceOutputHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+          const sourcePortArtifact = sourceOutputHandle
+            ? sourceNode.data.outputArtifacts?.[sourceOutputHandle]
+            : undefined;
+          const fallbackArtifact =
+            !sourcePortArtifact && sourceNode.data.latestArtifactId && sourceNode.data.latestArtifactKind
+              ? {
+                  id: sourceNode.data.latestArtifactId,
+                  kind: sourceNode.data.latestArtifactKind,
+                  previewUrl: sourceNode.data.previewUrl ?? null,
+                  url: sourceNode.data.previewUrl ?? null,
+                  hidden: false,
+                  createdAt: sourceNode.data.lastRunAt
+                }
+              : undefined;
+          const resolved = sourcePortArtifact ?? fallbackArtifact;
+          if (!resolved?.id) continue;
+          previewArtifactByNode.set(edge.target, {
+            id: resolved.id,
+            kind: resolved.kind,
+            previewUrl: resolved.previewUrl ?? null,
+            url: resolved.url ?? null,
+            hidden: resolved.hidden,
+            createdAt: resolved.createdAt
+          });
+        }
       }
 
       let changed = false;
       const next = prev.map((node) => {
-        if (node.type !== "model.sam2") {
-          return node;
-        }
-        const nextHasBoxes = hasDescriptorByNode.has(node.id);
-        const nextHasImage = hasImageByNode.has(node.id);
-        if (
-          node.data.hasBoxesConfigConnection === nextHasBoxes &&
-          node.data.hasImageConnection === nextHasImage
-        ) {
-          return node;
-        }
-        changed = true;
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            hasBoxesConfigConnection: nextHasBoxes,
-            hasImageConnection: nextHasImage
+        if (node.type === "model.sam2") {
+          const nextHasBoxes = hasDescriptorByNode.has(node.id);
+          const nextHasImage = hasImageByNode.has(node.id);
+          if (
+            node.data.hasBoxesConfigConnection === nextHasBoxes &&
+            node.data.hasImageConnection === nextHasImage
+          ) {
+            return node;
           }
-        };
+          changed = true;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              hasBoxesConfigConnection: nextHasBoxes,
+              hasImageConnection: nextHasImage
+            }
+          };
+        }
+
+        if (node.type === "out.open_in_viewer") {
+          const previewArtifact = previewArtifactByNode.get(node.id);
+          const nextLatestArtifactId = previewArtifact?.id;
+          const nextLatestArtifactKind = previewArtifact?.kind;
+          const nextPreviewUrl = previewArtifact?.previewUrl ?? previewArtifact?.url ?? null;
+          const nextOutputArtifacts = previewArtifact
+            ? ({
+                artifact: {
+                  id: previewArtifact.id,
+                  kind: previewArtifact.kind,
+                  hidden: Boolean(previewArtifact.hidden),
+                  url: previewArtifact.url,
+                  previewUrl: previewArtifact.previewUrl,
+                  createdAt: previewArtifact.createdAt
+                }
+              } as NonNullable<GraphNodeData["outputArtifacts"]>)
+            : undefined;
+
+          const currentArtifactEntry = node.data.outputArtifacts?.artifact;
+          const outputArtifactsUnchanged = previewArtifact
+            ? currentArtifactEntry?.id === previewArtifact.id &&
+              currentArtifactEntry?.kind === previewArtifact.kind &&
+              (currentArtifactEntry?.previewUrl ?? null) === (previewArtifact.previewUrl ?? null) &&
+              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null)
+            : !node.data.outputArtifacts || Object.keys(node.data.outputArtifacts).length === 0;
+
+          if (
+            (node.data.latestArtifactId ?? undefined) === nextLatestArtifactId &&
+            (node.data.latestArtifactKind ?? undefined) === nextLatestArtifactKind &&
+            (node.data.previewUrl ?? null) === nextPreviewUrl &&
+            outputArtifactsUnchanged
+          ) {
+            return node;
+          }
+
+          changed = true;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              latestArtifactId: nextLatestArtifactId,
+              latestArtifactKind: nextLatestArtifactKind,
+              previewUrl: nextPreviewUrl,
+              outputArtifacts: nextOutputArtifacts
+            }
+          };
+        }
+
+        return node;
       });
       return changed ? next : prev;
     });
-  }, [edges, setNodes]);
+  }, [edges, nodes, setNodes]);
 
   useEffect(() => {
     return () => {
@@ -1427,23 +1624,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
           (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
         );
-        const artifactByOutput = nodeArtifacts.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>(
-          (acc, artifact) => {
-            const outputKey = artifact.outputKey ?? "default";
-            if (!acc[outputKey]) {
-              acc[outputKey] = {
-                id: artifact.id,
-                kind: artifact.kind,
-                hidden: Boolean(artifact.hidden),
-                url: artifact.url ?? null,
-                previewUrl: artifact.previewUrl ?? null,
-                createdAt: artifact.createdAt
-              };
-            }
-            return acc;
-          },
-          {}
-        );
+        const artifactByOutput = pickLatestOutputArtifacts(nodeArtifacts);
 
         const previewArtifact =
           (spec.ui?.previewOutputIds ?? [])
@@ -1451,6 +1632,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             .find((artifact) => Boolean(artifact?.id)) ??
           Object.values(artifactByOutput).find((artifact) => !artifact.hidden) ??
           Object.values(artifactByOutput)[0];
+        const scenePreviewStages =
+          nodeType === "pipeline.scene_generation"
+            ? buildSceneGenerationPreviewStages(node.id, artifactPairs)
+            : null;
+        const selectedScenePreviewStage =
+          nodeType === "pipeline.scene_generation" && typeof node.data.params?.ScenePreviewStage === "string"
+            ? node.data.params.ScenePreviewStage
+            : "final";
+        const selectedScenePreview =
+          scenePreviewStages?.[selectedScenePreviewStage] ??
+          scenePreviewStages?.final ??
+          null;
+        const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
 
         const metaArtifact = nodeArtifacts.find((artifact) => artifact.outputKey === "meta");
         const runtimeMode =
@@ -1478,10 +1672,14 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             ...node.data,
             status: runtimeStatus,
             runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
-            latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
-            latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
-            previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null,
+            latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
+            latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+            previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null,
             outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
+            scenePreviewStages:
+              scenePreviewStages && Object.keys(scenePreviewStages).length > 0
+                ? scenePreviewStages
+                : node.data.scenePreviewStages,
             isCacheHit: runtimeStatus === "cache-hit",
             lastRunAt:
               runtimeStatus === "success" || runtimeStatus === "cache-hit" || runtimeStatus === "error"

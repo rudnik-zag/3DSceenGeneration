@@ -49,6 +49,12 @@ function migrateEdge(edge: GraphEdge, nodesById: Map<string, GraphNode>): GraphE
   ) {
     targetHandle = "descriptor";
   }
+  if (
+    targetNode?.type === "out.open_in_viewer" &&
+    (targetHandle === "scene" || targetHandle === "json")
+  ) {
+    targetHandle = "artifact";
+  }
 
   return {
     ...edge,

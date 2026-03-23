@@ -31,6 +31,14 @@ function normalizeHandleId(nodeType: WorkflowNodeType, handleId: string | null |
     return "descriptor";
   }
 
+  if (
+    nodeType === "out.open_in_viewer" &&
+    direction === "target" &&
+    (handleId === "scene" || handleId === "json")
+  ) {
+    return "artifact";
+  }
+
   return handleId;
 }
 
@@ -61,6 +69,15 @@ export function validateConnectionByNodeTypes(candidate: ConnectionCandidate): C
 
   if (!sourcePort || !targetPort) {
     return { valid: false, reason: "Missing source/target handle" };
+  }
+
+  // Preview sink accepts any connected artifact type on its single input.
+  if (candidate.targetNodeType === "out.open_in_viewer" && targetPort.id === "artifact") {
+    return {
+      valid: true,
+      sourceHandleId: sourcePort.id,
+      targetHandleId: targetPort.id
+    };
   }
 
   if (!areArtifactTypesCompatible(sourcePort.artifactType, targetPort.artifactType)) {

@@ -54,7 +54,8 @@ const sceneGenerationTemplateParams = z.object({
   objectPrompt: z.string().default(""),
   SceneDetailedOption: z.enum(["Default", "HighQuality", "FastPreview", "Custom"]).default("Default"),
   SceneOutputFormat: z.enum(["mesh_glb", "point_ply"]).default("mesh_glb"),
-  SceneMaskExecution: z.enum(["all_masks", "per_mask"]).default("all_masks")
+  SceneMaskExecution: z.enum(["all_masks", "per_mask"]).default("all_masks"),
+  ScenePreviewStage: z.enum(["final", "detection", "segmentation"]).default("final")
 });
 const modelPrompt = z.object({ prompt: z.string().default("") });
 const depthParams = z.object({ model: z.string().default("fast-depth") });
@@ -236,13 +237,15 @@ export const nodeSpecEntries = [
       { key: "objectPrompt", label: "objectPrompt", input: "textarea", placeholder: "chair, house, car, tree" },
       { key: "SceneDetailedOption", label: "SceneDetailedOption", input: "select", options: getSceneGenerationPresetNames() },
       { key: "SceneOutputFormat", label: "SceneOutputFormat", input: "select", options: ["mesh_glb", "point_ply"] },
-      { key: "SceneMaskExecution", label: "SceneMaskExecution", input: "select", options: ["all_masks", "per_mask"] }
+      { key: "SceneMaskExecution", label: "SceneMaskExecution", input: "select", options: ["all_masks", "per_mask"] },
+      { key: "ScenePreviewStage", label: "ScenePreviewStage", input: "select", options: ["final", "detection", "segmentation"] }
     ],
     defaultParams: {
       objectPrompt: "",
       SceneDetailedOption: "Default",
       SceneOutputFormat: "mesh_glb",
-      SceneMaskExecution: "all_masks"
+      SceneMaskExecution: "all_masks",
+      ScenePreviewStage: "final"
     },
     ui: {
       previewOutputIds: ["generatedScene"],
@@ -381,11 +384,11 @@ export const nodeSpecEntries = [
   makeSpec("out.open_in_viewer", {
     type: "out.open_in_viewer",
     category: "Outputs",
-    title: "Open In Viewer",
+    title: "Preview",
     icon: "ExternalLink",
-    description: "Emit viewer link payload.",
-    inputPorts: [{ id: "scene", label: "Scene", artifactType: "SceneAsset", required: true }],
-    outputPorts: [{ id: "json", label: "Viewer Link", artifactType: "JsonData" }],
+    description: "Connect any node output to preview its latest artifact.",
+    inputPorts: [{ id: "artifact", label: "Artifact", artifactType: "JsonData", required: true }],
+    outputPorts: [],
     paramSchema: z.object({}),
     paramFields: [],
     defaultParams: {}

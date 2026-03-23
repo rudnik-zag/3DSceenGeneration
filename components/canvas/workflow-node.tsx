@@ -75,7 +75,8 @@ const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "geo.depth_estimation": "Depth",
   "geo.pointcloud_from_depth": "Points",
   "geo.mesh_reconstruction": "Mesher",
-  "out.export_scene": "Exporter"
+  "out.export_scene": "Exporter",
+  "out.open_in_viewer": "Preview"
 };
 
 function pickPromptText(data: GraphNodeData) {
@@ -153,6 +154,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
   const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
+  const isPreviewNode = nodeType === "out.open_in_viewer";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
@@ -167,8 +169,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ? data.params.prompt
       : "";
   const isImageGenerationNode = isInputImageNode && inputImageSourceMode === "generate";
-  const isTextNode = nodeType === "input.text" || (spec.category === "Models" && "prompt" in (data.params ?? {}));
-  const isImageNode = nodeType === "input.image" || nodeType === "model.sam2" || data.latestArtifactKind === "image";
+  const isTextNode = nodeType === "input.text";
+  const effectivePreviewUrl = data.previewUrl ?? null;
+  const effectiveArtifactKind = data.latestArtifactKind;
+  const isImageNode = nodeType === "input.image" || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
@@ -196,7 +200,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
-  const hasOpenablePreview = Boolean(data.previewUrl);
+  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
     isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
@@ -245,6 +249,16 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     isSceneGenerationPipelineNode && typeof data.params?.objectPrompt === "string"
       ? data.params.objectPrompt
       : "";
+  const sceneViewerArtifactId = isSceneGenerationPipelineNode
+    ? data.outputArtifacts?.generatedScene?.id ?? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+    : isCustomSceneGenNode
+      ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+      : data.latestArtifactId;
+  const previewViewerArtifactId =
+    isPreviewNode &&
+    (effectiveArtifactKind === "mesh_glb" || effectiveArtifactKind === "point_ply" || effectiveArtifactKind === "splat_ksplat")
+      ? data.latestArtifactId
+      : undefined;
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -599,30 +613,32 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <div className="mb-2 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/15 to-cyan-500/10 p-2.5">
           <div className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-2">
             <p className="text-[11px] text-zinc-300">Output format: {sceneFormat}</p>
-            {data.latestArtifactId ? (
-              <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{data.latestArtifactId.slice(0, 8)}</p>
+            {sceneViewerArtifactId ? (
+              <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{sceneViewerArtifactId.slice(0, 8)}</p>
             ) : (
               <p className="mt-1 text-[10px] text-zinc-500">
                 {isCustomSceneGenNode ? "Run CustomSceneGen to create scene assets." : "Run SceneGeneration to create scene assets."}
               </p>
             )}
           </div>
-          <button
-            type="button"
-            className="mt-2 inline-flex h-8 items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 text-[11px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={() => data.onOpenViewer?.({ artifactId: data.latestArtifactId, nodeId: id })}
-            disabled={!data.latestArtifactId}
-            title={data.latestArtifactId ? "Open scene in viewer" : "No scene artifact yet"}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Scene Viewer
-          </button>
+          <div className="mt-2">
+            <button
+              type="button"
+              className="inline-flex h-8 w-full items-center justify-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 text-[11px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => data.onOpenViewer?.({ artifactId: sceneViewerArtifactId, nodeId: id })}
+              disabled={!sceneViewerArtifactId}
+              title={sceneViewerArtifactId ? "Open scene in viewer" : "No scene artifact yet"}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Scene Viewer
+            </button>
+          </div>
         </div>
       ) : isImageNode ? (
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br p-2",
-            previewTint[data.latestArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+            previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
           )}
           onDragOver={
             isInputImageNode
@@ -658,10 +674,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               </div>
             ) : data.status === "running" ? (
               <div className="h-full w-full animate-pulse bg-white/10" />
-            ) : data.previewUrl ? (
+            ) : effectivePreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={data.previewUrl}
+                src={effectivePreviewUrl}
                 alt={`${spec.title} preview`}
                 className="nodrag h-full w-full cursor-zoom-in object-contain"
                 onDoubleClick={openPreviewModal}
@@ -670,7 +686,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ) : (
               <div className="grid h-full w-full place-items-center bg-black/35">
                 <p className="px-3 text-center text-[10px] text-zinc-400">
-                  {isImageGenerationNode ? "Choose prompt and run to generate preview." : "Upload an image."}
+                  {isImageGenerationNode
+                    ? "Choose prompt and run to generate preview."
+                    : isPreviewNode
+                      ? "Connect an artifact to preview."
+                      : "Upload an image."}
                 </p>
               </div>
             )}
@@ -697,8 +717,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               ? `${inputImageModel || "Z-Image-Turbo"}${inputImagePrompt ? ` • ${inputImagePrompt}` : ""}`
               : typeof data.params?.filename === "string" && data.params.filename.length > 0
               ? data.params.filename
-              : data.latestArtifactKind
-                ? `Output: ${data.latestArtifactKind}`
+              : effectiveArtifactKind
+                ? `Output: ${effectiveArtifactKind}`
                 : spec.description}
           </p>
           {isInputImageNode && !hasImagePreview && !isImageGenerationNode ? (
@@ -734,7 +754,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br px-2.5 py-2 text-[11px] text-zinc-300",
-            previewTint[data.latestArtifactKind ?? ""] ?? "from-zinc-700/20 to-zinc-800/30"
+            previewTint[effectiveArtifactKind ?? ""] ?? "from-zinc-700/20 to-zinc-800/30"
           )}
         >
           {data.status === "running" ? (
@@ -742,20 +762,20 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <div className="h-3 w-24 animate-pulse rounded bg-white/15" />
               <div className="h-3 w-32 animate-pulse rounded bg-white/10" />
             </div>
-          ) : data.previewUrl ? (
+          ) : isPreviewNode && effectivePreviewUrl ? (
             <div className="overflow-hidden rounded-lg border border-white/10 bg-black/40">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={data.previewUrl}
+                src={effectivePreviewUrl}
                 alt={`${spec.title} output`}
                 className="nodrag aspect-video h-full w-full cursor-zoom-in object-cover"
                 onDoubleClick={openPreviewModal}
                 title="Double-click to open full size"
               />
             </div>
-          ) : data.latestArtifactKind ? (
+          ) : effectiveArtifactKind ? (
             <div className="space-y-1">
-              <p className="font-medium text-zinc-100">Output: {data.latestArtifactKind}</p>
+              <p className="font-medium text-zinc-100">Output: {effectiveArtifactKind}</p>
               <p className="truncate text-zinc-400">Artifact {data.latestArtifactId?.slice(0, 10)}</p>
             </div>
           ) : (
@@ -763,6 +783,26 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           )}
         </div>
       )}
+
+      {isPreviewNode ? (
+        <div className="mb-2 space-y-2 rounded-lg border border-white/10 bg-black/30 p-2">
+          <p className="text-[10px] text-zinc-400">
+            {data.latestArtifactId
+              ? `Connected artifact #${data.latestArtifactId.slice(0, 8)}`
+              : "Connect any node output to preview it here."}
+          </p>
+          <button
+            type="button"
+            className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-2 text-[10px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => data.onOpenViewer?.({ artifactId: previewViewerArtifactId, nodeId: id })}
+            disabled={!previewViewerArtifactId}
+            title={previewViewerArtifactId ? "Open connected scene in viewer" : "Viewer opens scene artifacts only"}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open Viewer
+          </button>
+        </div>
+      ) : null}
 
       {canRunNode ? (
         <button
@@ -799,7 +839,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               position={Position.Right}
               style={{ top, width: 9, height: 9, background: "#8dc6a2", border: "1px solid #1f2937", right: -4.5 }}
             />
-          <span
+            <span
               className={cn(
                 "pointer-events-none absolute -right-1 translate-x-full rounded-md border border-white/10 bg-black/75 px-1.5 py-0.5 text-[10px] text-zinc-400",
                 port.hidden && "opacity-70"
@@ -826,9 +866,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </DialogClose>
           </div>
           <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
-            {data.previewUrl ? (
+            {effectivePreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={data.previewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
             ) : null}
           </div>
         </DialogContent>

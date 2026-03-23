@@ -800,6 +800,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
                   artifactType: outputArtifactType,
                   hidden: outputHidden,
                   templateId: template.id,
+                  templateHostNodeId: task.nodeId,
                   templateNodeId: internalNodeId,
                   mode: internalResult.mode ?? internalRuntimeMode ?? null,
                   warnings: internalResult.warnings ?? internalWarnings
@@ -911,6 +912,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
                 artifactType: outputArtifactType,
                 hidden: false,
                 templateId: template.id,
+                templateHostNodeId: task.nodeId,
                 templateOutputSource: `${outputBinding.internalNodeId}.${outputBinding.internalOutputId}`,
                 mode: runtimeMode ?? null
               } as Prisma.InputJsonValue

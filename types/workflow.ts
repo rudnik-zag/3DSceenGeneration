@@ -106,6 +106,19 @@ export interface GraphNodeData {
       createdAt?: string;
     }
   >;
+  scenePreviewStages?: Record<
+    string,
+    {
+      id: string;
+      kind: string;
+      label: string;
+      hidden?: boolean;
+      outputKey?: string;
+      url?: string | null;
+      previewUrl?: string | null;
+      createdAt?: string;
+    }
+  >;
   onRunNode?: (nodeId: string) => void;
   onUploadImage?: (nodeId: string, file: File) => void;
   onUpdateParam?: (nodeId: string, key: string, value: string | number | boolean) => void;
