@@ -741,6 +741,9 @@ export function UnifiedWorldViewer({
   const pausedRef = useRef(false);
   const navModeRef = useRef<NavigationMode>("orbit");
   const viewModeRef = useRef<ViewMode>("default");
+  const modelviewerAutoRotateRef = useRef(false);
+  const showGridRef = useRef(true);
+  const gridRef = useRef<THREE.GridHelper | null>(null);
   const flySpeedRef = useRef(4);
   const rotationDisplayRef = useRef<Map<string, EulerTriplet>>(new Map());
   const removedMeshIdsRef = useRef<Set<string>>(new Set());
@@ -753,6 +756,10 @@ export function UnifiedWorldViewer({
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [viewMode, setViewMode] = useState<ViewMode>("default");
+  const [modelviewerAutoRotate, setModelviewerAutoRotate] = useState(false);
+  const [showGrid, setShowGrid] = useState(true);
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [flySpeed, setFlySpeed] = useState([4]);
   const [splatLoadProfile, setSplatLoadProfile] = useState<SplatLoadProfile>("full");
   const [splatDensityDraft, setSplatDensityDraft] = useState([100]);
@@ -835,6 +842,17 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
+
+  useEffect(() => {
+    modelviewerAutoRotateRef.current = modelviewerAutoRotate;
+  }, [modelviewerAutoRotate]);
+
+  useEffect(() => {
+    showGridRef.current = showGrid;
+    if (gridRef.current) {
+      gridRef.current.visible = showGrid;
+    }
+  }, [showGrid]);
 
   useEffect(() => {
     flySpeedRef.current = flySpeed[0] ?? 4;
@@ -1735,7 +1753,10 @@ export function UnifiedWorldViewer({
     directional.position.set(8, 12, 6);
     scene.add(directional);
 
-    scene.add(new THREE.GridHelper(24, 48, 0x263245, 0x111827));
+    const grid = new THREE.GridHelper(24, 48, 0x263245, 0x111827);
+    grid.visible = showGridRef.current;
+    scene.add(grid);
+    gridRef.current = grid;
 
     const orbit = new OrbitControls(camera, renderer.domElement);
     orbit.enableDamping = true;
@@ -1818,6 +1839,11 @@ export function UnifiedWorldViewer({
     };
 
     const onPointerDown = (event: PointerEvent) => {
+      setToolMenuOpen(false);
+      setViewMenuOpen(false);
+      setOpenPanel("none");
+      setObjectContextMenu(null);
+      setArtifactContextMenu(null);
       if (!rendererRef.current || !cameraRef.current) return;
       if (navModeRef.current === "fly" && event.button === 2) {
         beginFlyMouseLook(event);
@@ -2488,7 +2514,11 @@ export function UnifiedWorldViewer({
         if (autoAlignOnLoadRef.current) {
           queueAutoAlignScene(true);
         }
-        fitScene();
+        if (viewModeRef.current === "modelviewer") {
+          applyViewModeProfile("modelviewer");
+        } else {
+          fitScene();
+        }
       } catch (err) {
         if (disposed || cancelled) return;
         setError(err instanceof Error ? err.message : "Failed to load world");
@@ -2533,7 +2563,7 @@ export function UnifiedWorldViewer({
         }
       }
 
-      if (viewModeRef.current === "modelviewer") {
+      if (viewModeRef.current === "modelviewer" && modelviewerAutoRotateRef.current) {
         alignmentRoot.rotation.y += 0.0005;
       }
 
@@ -2639,6 +2669,7 @@ export function UnifiedWorldViewer({
       clearGroundAlignDebug();
       disposeObjectTree(root);
       scene.clear();
+      gridRef.current = null;
       renderer.dispose();
       alignmentRootRef.current = null;
       if (renderer.domElement.parentNode) {
@@ -2650,6 +2681,7 @@ export function UnifiedWorldViewer({
     applyMeshTransforms,
     clearGroundAlignDebug,
     directSplats,
+    applyViewModeProfile,
     fitScene,
     isPersistableArtifact,
     loadPersistedTransforms,
@@ -2669,7 +2701,7 @@ export function UnifiedWorldViewer({
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#04060d]">
       <div className="absolute left-3 top-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/55 p-2 backdrop-blur-md">
-        <DropdownMenu>
+        <DropdownMenu open={toolMenuOpen} onOpenChange={setToolMenuOpen}>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="outline" className="rounded-xl">
               Tool
@@ -2707,7 +2739,7 @@ export function UnifiedWorldViewer({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <DropdownMenu>
+        <DropdownMenu open={viewMenuOpen} onOpenChange={setViewMenuOpen}>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="outline" className="rounded-xl">
               View
@@ -2726,6 +2758,19 @@ export function UnifiedWorldViewer({
             <DropdownMenuItem onSelect={() => setSplatLoadProfile("preview")}>
               Preview
               {splatLoadProfile === "preview" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setShowGrid((prev) => !prev)}>
+              Grid
+              <span className="ml-auto text-[10px] text-zinc-400">{showGrid ? "On" : "Off"}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => setModelviewerAutoRotate((prev) => !prev)}
+              disabled={viewMode !== "modelviewer"}
+            >
+              Modelviewer Auto-Rotate
+              <span className="ml-auto text-[10px] text-zinc-400">{modelviewerAutoRotate ? "On" : "Off"}</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void persistTransforms()} disabled={!isPersistableArtifact}>
@@ -2783,7 +2828,7 @@ export function UnifiedWorldViewer({
       </div>
 
       {openPanel === "file" && fileMenu ? (
-        <div className="absolute left-3 top-16 z-30 w-[360px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+        <div className="absolute right-3 top-16 z-30 w-[360px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">File</div>
           <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">
             {fileMenu.selectedKind ? (
