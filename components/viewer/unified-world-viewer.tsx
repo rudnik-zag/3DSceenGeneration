@@ -19,6 +19,14 @@ import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.j
 import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -2525,60 +2533,70 @@ export function UnifiedWorldViewer({
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#04060d]">
       <div className="absolute left-3 top-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/55 p-2 backdrop-blur-md">
-        <Button size="sm" variant={navMode === "orbit" ? "default" : "outline"} className="rounded-xl" onClick={() => setNavMode("orbit")}>
-          <Navigation className="mr-1 h-4 w-4" />
-          Orbit
-        </Button>
-        <Button size="sm" variant={navMode === "fly" ? "default" : "outline"} className="rounded-xl" onClick={() => setNavMode("fly")}>
-          <MoveHorizontal className="mr-1 h-4 w-4" />
-          Fly
-        </Button>
-        <Button size="sm" variant="outline" className="rounded-xl" onClick={resetCamera}>
-          <RotateCcw className="mr-1 h-4 w-4" />
-          Reset
-        </Button>
-        <Button size="sm" variant="outline" className="rounded-xl" onClick={fitScene}>
-          <Crosshair className="mr-1 h-4 w-4" />
-          Fit Scene
-        </Button>
-        <Button size="sm" variant="outline" className="rounded-xl" onClick={fitSelection} disabled={!selectedRef.current}>
-          <Crosshair className="mr-1 h-4 w-4" />
-          Fit Selection
-        </Button>
-        <Button size="sm" variant="outline" className="rounded-xl" onClick={captureScreenshot}>
-          <Download className="mr-1 h-4 w-4" />
-          Screenshot
-        </Button>
-        <div className="ml-1 h-6 w-px bg-border/60" />
-        <Button
-          size="sm"
-          variant={splatLoadProfile === "full" ? "default" : "outline"}
-          className="rounded-xl"
-          onClick={() => setSplatLoadProfile("full")}
-        >
-          Full Gaussian
-        </Button>
-        <Button
-          size="sm"
-          variant={splatLoadProfile === "balanced" ? "default" : "outline"}
-          className="rounded-xl"
-          onClick={() => setSplatLoadProfile("balanced")}
-        >
-          Balanced
-        </Button>
-        <Button
-          size="sm"
-          variant={splatLoadProfile === "preview" ? "default" : "outline"}
-          className="rounded-xl"
-          onClick={() => setSplatLoadProfile("preview")}
-        >
-          Preview
-        </Button>
-        {isPersistableArtifact ? (
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void persistTransforms()}>
-            Save Transforms
-          </Button>
-        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="outline" className="rounded-xl">
+              Tool
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuLabel>Navigation</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => setNavMode("orbit")}>
+              <Navigation className="mr-2 h-4 w-4" />
+              Orbit
+              {navMode === "orbit" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setNavMode("fly")}>
+              <MoveHorizontal className="mr-2 h-4 w-4" />
+              Fly
+              {navMode === "fly" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={resetCamera}>
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Reset
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={fitScene}>
+              <Crosshair className="mr-2 h-4 w-4" />
+              Fit Scene
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={fitSelection} disabled={!selectedName}>
+              <Crosshair className="mr-2 h-4 w-4" />
+              Fit Selection
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={captureScreenshot}>
+              <Download className="mr-2 h-4 w-4" />
+              Screenshot
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="outline" className="rounded-xl">
+              View
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuLabel>Splat Profile</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => setSplatLoadProfile("full")}>
+              Full Gaussian
+              {splatLoadProfile === "full" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setSplatLoadProfile("balanced")}>
+              Balanced
+              {splatLoadProfile === "balanced" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setSplatLoadProfile("preview")}>
+              Preview
+              {splatLoadProfile === "preview" ? <span className="ml-auto text-[10px] text-zinc-400">Active</span> : null}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void persistTransforms()} disabled={!isPersistableArtifact}>
+              Save Transforms
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <div className="rounded-full border border-border/70 bg-background/40 px-2 py-1 text-[11px] text-zinc-300">
           Runtime: {activeRuntimeLabel} ({configuredRuntimeLabel})
         </div>
