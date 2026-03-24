@@ -182,7 +182,9 @@ function getContextRowIcon(type: WorkflowNodeType) {
 }
 
 type OutputArtifactView = NonNullable<GraphNodeData["outputArtifacts"]>[string];
+type OutputArtifactHistoryView = NonNullable<GraphNodeData["outputArtifactHistory"]>;
 type ScenePreviewStageView = NonNullable<GraphNodeData["scenePreviewStages"]>[string];
+const LATEST_ARTIFACT_SENTINEL = "__latest__";
 
 function parseTemplateHostNodeId(artifact: NodeArtifact) {
   const meta = artifact.meta;
@@ -214,14 +216,65 @@ function mapArtifactView(artifact: NodeArtifact): OutputArtifactView {
   };
 }
 
-function pickLatestOutputArtifacts(artifacts: NodeArtifact[]) {
-  return artifacts.reduce<Record<string, OutputArtifactView>>((acc, artifact) => {
+function buildOutputArtifactHistory(artifacts: NodeArtifact[]): OutputArtifactHistoryView {
+  const grouped = artifacts.reduce<OutputArtifactHistoryView>((acc, artifact) => {
     const outputKey = artifact.outputKey ?? "default";
-    if (!acc[outputKey]) {
-      acc[outputKey] = mapArtifactView(artifact);
+    if (!acc[outputKey]) acc[outputKey] = [];
+    if (!acc[outputKey].some((entry) => entry.id === artifact.id)) {
+      acc[outputKey].push(mapArtifactView(artifact));
     }
     return acc;
   }, {});
+
+  for (const outputKey of Object.keys(grouped)) {
+    grouped[outputKey] = grouped[outputKey]
+      .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())
+      .slice(0, 40);
+  }
+
+  return grouped;
+}
+
+function resolveSelectedOutputArtifacts(
+  history: OutputArtifactHistoryView,
+  params: Record<string, unknown>
+) {
+  const selected: Record<string, OutputArtifactView> = {};
+  for (const [outputKey, entries] of Object.entries(history)) {
+    if (entries.length === 0) continue;
+    const selectionKey = `__selectedArtifact__${outputKey}`;
+    const selectionRaw = params?.[selectionKey];
+    const selectedArtifactId =
+      typeof selectionRaw === "string" && selectionRaw.trim().length > 0 && selectionRaw !== LATEST_ARTIFACT_SENTINEL
+        ? selectionRaw.trim()
+        : null;
+    selected[outputKey] = selectedArtifactId
+      ? entries.find((entry) => entry.id === selectedArtifactId) ?? entries[0]
+      : entries[0];
+  }
+  return selected;
+}
+
+function mergeOutputArtifactHistory(
+  current: GraphNodeData["outputArtifactHistory"] | undefined,
+  incoming: OutputArtifactHistoryView
+) {
+  const merged: OutputArtifactHistoryView = {};
+  const keys = new Set<string>([...Object.keys(current ?? {}), ...Object.keys(incoming)]);
+  for (const key of keys) {
+    const combined = [...(incoming[key] ?? []), ...(current?.[key] ?? [])];
+    const deduped: OutputArtifactView[] = [];
+    const seen = new Set<string>();
+    for (const entry of combined) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      deduped.push(entry);
+    }
+    merged[key] = deduped
+      .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())
+      .slice(0, 40);
+  }
+  return merged;
 }
 
 function toScenePreviewStage(label: string, artifact: NodeArtifact): ScenePreviewStageView {
@@ -293,7 +346,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
     .filter((a) => a.nodeId === base.id)
     .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
 
-  const outputArtifacts = pickLatestOutputArtifacts(matched);
+  const outputArtifactHistory = buildOutputArtifactHistory(matched);
+  const outputArtifacts = resolveSelectedOutputArtifacts(outputArtifactHistory, mergedParams);
 
   const previewOutputIds = spec.ui?.previewOutputIds ?? [];
   const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
@@ -353,6 +407,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
         inputNodePreviewUrl ??
         (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
       outputArtifacts,
+      outputArtifactHistory: Object.keys(outputArtifactHistory).length > 0 ? outputArtifactHistory : undefined,
       scenePreviewStages: scenePreviewStages ?? undefined,
       runtimeMode: typeof base.data.runtimeMode === "string" ? base.data.runtimeMode : runtimeMode,
       runtimeWarning: base.data.runtimeWarning ?? runtimeWarning,
@@ -1624,7 +1679,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
           (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
         );
-        const artifactByOutput = pickLatestOutputArtifacts(nodeArtifacts);
+        const runHistory = buildOutputArtifactHistory(nodeArtifacts);
+        const mergedHistory = mergeOutputArtifactHistory(node.data.outputArtifactHistory, runHistory);
+        const artifactByOutput = resolveSelectedOutputArtifacts(mergedHistory, node.data.params ?? {});
 
         const previewArtifact =
           (spec.ui?.previewOutputIds ?? [])
@@ -1676,6 +1733,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
             previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null,
             outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
+            outputArtifactHistory:
+              Object.keys(mergedHistory).length > 0 ? mergedHistory : node.data.outputArtifactHistory,
             scenePreviewStages:
               scenePreviewStages && Object.keys(scenePreviewStages).length > 0
                 ? scenePreviewStages
@@ -2517,15 +2576,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </div>
         </div>
 
-        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#06080f]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
-          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-xl border border-white/10 bg-black/45 px-3 py-2 backdrop-blur-sm">
+        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
+          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 px-3 py-2">
             <p className="text-[11px] font-medium text-zinc-200">{projectName}</p>
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
           </div>
 
           <div
             data-no-connect-menu="true"
-            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm"
+            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2"
           >
             <Button size="icon" variant="outline" className="h-10 w-10 rounded-full" onClick={openNodeMenuAtViewportCenter}>
               <Plus className="h-4 w-4" />
@@ -2576,13 +2635,13 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             defaultEdgeOptions={{
               type: "smoothstep",
               animated: true,
-              style: { stroke: "rgba(176, 191, 221, 0.42)", strokeWidth: 1.45 }
+              style: { stroke: "rgba(145, 145, 145, 0.65)", strokeWidth: 1.4 }
             }}
-            connectionLineStyle={{ stroke: "rgba(188, 203, 228, 0.45)", strokeWidth: 1.35 }}
+            connectionLineStyle={{ stroke: "rgba(169, 169, 169, 0.75)", strokeWidth: 1.35 }}
             proOptions={{ hideAttribution: true }}
           >
-            <Background color="rgba(255,255,255,0.12)" gap={18} />
-            {showMiniMap ? <MiniMap pannable zoomable style={{ background: "rgba(8,10,18,0.95)" }} /> : null}
+            <Background color="rgba(255,255,255,0.06)" gap={16} />
+            {showMiniMap ? <MiniMap pannable zoomable style={{ background: "rgba(26,26,26,0.96)" }} /> : null}
           </ReactFlow>
 
           {paneMenu ? (

@@ -17,6 +17,7 @@ interface ViewerTransformsPayload {
   updatedAt: string;
   meshes: Record<string, TransformRecord>;
   splats: Record<string, TransformRecord>;
+  sceneAlignment?: TransformRecord | null;
 }
 
 function getLocalStorageRoot() {
@@ -70,6 +71,10 @@ function sanitizeTransformsMap(raw: unknown): Record<string, TransformRecord> {
     cleaned[key] = value;
   }
   return cleaned;
+}
+
+function sanitizeTransformRecord(raw: unknown): TransformRecord | null {
+  return isValidTransformRecord(raw) ? raw : null;
 }
 
 async function resolveContext(artifactId: string) {
@@ -128,7 +133,8 @@ export async function GET(req: NextRequest) {
         artifactId,
         updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
         meshes: sanitizeTransformsMap(parsed.meshes),
-        splats: sanitizeTransformsMap(parsed.splats)
+        splats: sanitizeTransformsMap(parsed.splats),
+        sceneAlignment: sanitizeTransformRecord(parsed.sceneAlignment)
       }
     });
   } catch {
@@ -141,7 +147,8 @@ export async function GET(req: NextRequest) {
         artifactId,
         updatedAt: new Date().toISOString(),
         meshes: {},
-        splats: {}
+        splats: {},
+        sceneAlignment: null
       }
     });
   }
@@ -159,12 +166,14 @@ export async function POST(req: NextRequest) {
 
   const meshes = sanitizeTransformsMap(body.meshes);
   const splats = sanitizeTransformsMap(body.splats);
+  const sceneAlignment = sanitizeTransformRecord(body.sceneAlignment);
   const payload: ViewerTransformsPayload = {
     version: 1,
     artifactId,
     updatedAt: new Date().toISOString(),
     meshes,
-    splats
+    splats,
+    sceneAlignment
   };
 
   await fs.mkdir(path.dirname(context.transformsPath), { recursive: true });
@@ -175,6 +184,7 @@ export async function POST(req: NextRequest) {
     artifactId,
     transformsPath: context.transformsPath,
     savedMeshCount: Object.keys(meshes).length,
-    savedSplatCount: Object.keys(splats).length
+    savedSplatCount: Object.keys(splats).length,
+    savedSceneAlignment: Boolean(sceneAlignment)
   });
 }

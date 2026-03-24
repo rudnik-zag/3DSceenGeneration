@@ -13,7 +13,7 @@ import { buildExecutionPlan, parseGraphDocument } from "@/lib/graph/plan";
 import { artifactPreviewStorageKey, artifactStorageKey } from "@/lib/storage/keys";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { getObjectBuffer, putObjectToStorage } from "@/lib/storage/s3";
-import { ArtifactType, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
+import { ArtifactType, GraphNode, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
 
 export interface RunWorkflowInput {
   projectId: string;
@@ -99,6 +99,25 @@ function mapArtifact(artifact: {
 
 function mapKey(nodeId: string, outputId: string) {
   return `${nodeId}:${outputId}`;
+}
+
+const LATEST_ARTIFACT_SENTINEL = "__latest__";
+
+function selectedArtifactParamKey(outputId: string) {
+  return `__selectedArtifact__${outputId}`;
+}
+
+function resolveSelectedArtifactIdForOutput(node: GraphNode | undefined, outputId: string) {
+  const params =
+    node?.data?.params && typeof node.data.params === "object" && !Array.isArray(node.data.params)
+      ? (node.data.params as Record<string, unknown>)
+      : null;
+  if (!params) return null;
+  const raw = params[selectedArtifactParamKey(outputId)];
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim();
+  if (!normalized || normalized === LATEST_ARTIFACT_SENTINEL) return null;
+  return normalized;
 }
 
 async function findArtifactById(projectId: string, artifactId: string): Promise<RuntimeArtifactRef | null> {
@@ -288,12 +307,27 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
       const inputsByPort: Record<string, RuntimeArtifactRef[]> = {};
       for (const binding of task.inputBindings) {
+        const sourceNode = documentNodeById.get(binding.sourceNodeId);
         const produced = producedByOutput.get(mapKey(binding.sourceNodeId, binding.sourceOutputId));
-        let resolved =
-          produced ?? (await findLatestArtifactByNodeOutput(input.projectId, binding.sourceNodeId, binding.sourceOutputId));
+        let resolved: RuntimeArtifactRef | null | undefined = produced;
+        if (!resolved) {
+          const selectedArtifactId = resolveSelectedArtifactIdForOutput(sourceNode, binding.sourceOutputId);
+          if (selectedArtifactId) {
+            const selectedArtifact = await findArtifactById(input.projectId, selectedArtifactId);
+            if (
+              selectedArtifact &&
+              selectedArtifact.nodeId === binding.sourceNodeId &&
+              selectedArtifact.outputId === binding.sourceOutputId
+            ) {
+              resolved = selectedArtifact;
+            }
+          }
+        }
+        if (!resolved) {
+          resolved = await findLatestArtifactByNodeOutput(input.projectId, binding.sourceNodeId, binding.sourceOutputId);
+        }
 
         if (!resolved) {
-          const sourceNode = documentNodeById.get(binding.sourceNodeId);
           const sourceStorageKey =
             sourceNode?.type === "input.image" &&
             sourceNode?.data?.params &&

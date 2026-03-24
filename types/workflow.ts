@@ -106,6 +106,17 @@ export interface GraphNodeData {
       createdAt?: string;
     }
   >;
+  outputArtifactHistory?: Record<
+    string,
+    Array<{
+      id: string;
+      kind: string;
+      hidden?: boolean;
+      url?: string | null;
+      previewUrl?: string | null;
+      createdAt?: string;
+    }>
+  >;
   scenePreviewStages?: Record<
     string,
     {

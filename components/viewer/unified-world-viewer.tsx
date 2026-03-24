@@ -87,6 +87,7 @@ interface MeshTransformRecord {
 interface PersistedViewerTransforms {
   meshes: Record<string, MeshTransformRecord>;
   splats: Record<string, MeshTransformRecord>;
+  sceneAlignment: MeshTransformRecord | null;
 }
 
 interface MeshListItem {
@@ -177,6 +178,11 @@ const TRANSFORM_STEP_OPTIONS = [0.1, 1, 10] as const;
 const PLY_3DGS_RECORD_SIZE_BYTES = 68; // 17 float32 values
 const SH_C0 = 0.28209479177387814;
 const TWO_PI = Math.PI * 2;
+const IDENTITY_TRANSFORM: MeshTransformRecord = {
+  position: [0, 0, 0],
+  rotation: [0, 0, 0, 1],
+  scale: [1, 1, 1]
+};
 
 interface ParsedPlyHeader {
   vertexCount: number;
@@ -203,6 +209,26 @@ function applyTransformRecord(object: THREE.Object3D, transform: MeshTransformRe
   );
   object.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
   object.updateMatrixWorld(true);
+}
+
+function isIdentityTransformRecord(transform: MeshTransformRecord | null | undefined) {
+  if (!transform) return true;
+  const [px, py, pz] = transform.position;
+  const [qx, qy, qz, qw] = transform.rotation;
+  const [sx, sy, sz] = transform.scale;
+  const epsilon = 1e-6;
+  return (
+    Math.abs(px) <= epsilon &&
+    Math.abs(py) <= epsilon &&
+    Math.abs(pz) <= epsilon &&
+    Math.abs(qx) <= epsilon &&
+    Math.abs(qy) <= epsilon &&
+    Math.abs(qz) <= epsilon &&
+    Math.abs(qw - 1) <= epsilon &&
+    Math.abs(sx - 1) <= epsilon &&
+    Math.abs(sy - 1) <= epsilon &&
+    Math.abs(sz - 1) <= epsilon
+  );
 }
 
 function stableHash(input: string): string {
@@ -620,8 +646,10 @@ export function UnifiedWorldViewer({
   const selectedBoxRef = useRef<THREE.Object3D | null>(null);
   const requestRef = useRef<number | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
+  const alignmentRootRef = useRef<THREE.Group | null>(null);
   const meshRootsRef = useRef<THREE.Object3D[]>([]);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoAlignTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clockRef = useRef(new THREE.Clock());
   const keysRef = useRef<Set<string>>(new Set());
   const splatHandlesRef = useRef(new Set<SplatHandle>());
@@ -636,6 +664,7 @@ export function UnifiedWorldViewer({
   const removedSplatSourceKeysRef = useRef<Set<string>>(new Set());
   const objectContextMenuRef = useRef<HTMLDivElement | null>(null);
   const artifactContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const autoAlignOnLoadRef = useRef(false);
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [flySpeed, setFlySpeed] = useState([4]);
@@ -872,6 +901,66 @@ export function UnifiedWorldViewer({
     }
   }, []);
 
+  const serializeSceneAlignment = useCallback((): MeshTransformRecord | null => {
+    const alignmentRoot = alignmentRootRef.current;
+    if (!alignmentRoot) return null;
+    return objectToTransformRecord(alignmentRoot);
+  }, []);
+
+  const applySceneAlignment = useCallback((transform: MeshTransformRecord | null) => {
+    const alignmentRoot = alignmentRootRef.current;
+    if (!alignmentRoot) return;
+    applyTransformRecord(alignmentRoot, transform ?? IDENTITY_TRANSFORM);
+    sceneRef.current?.updateMatrixWorld(true);
+  }, []);
+
+  const computeSceneContentBounds = useCallback((): THREE.Box3 | null => {
+    const temp = new THREE.Box3();
+    const union = new THREE.Box3();
+    let hasBounds = false;
+
+    for (const meshRoot of meshRootsRef.current) {
+      meshRoot.updateMatrixWorld(true);
+      temp.setFromObject(meshRoot);
+      if (temp.isEmpty()) continue;
+      if (!hasBounds) {
+        union.copy(temp);
+        hasBounds = true;
+      } else {
+        union.union(temp);
+      }
+    }
+
+    for (const handle of splatHandlesRef.current) {
+      handle.object.updateMatrixWorld(true);
+      if (handle.bounds && !handle.bounds.isEmpty()) {
+        temp.copy(handle.bounds).applyMatrix4(handle.object.matrixWorld);
+      } else {
+        temp.setFromObject(handle.object);
+      }
+      if (temp.isEmpty()) continue;
+      if (!hasBounds) {
+        union.copy(temp);
+        hasBounds = true;
+      } else {
+        union.union(temp);
+      }
+    }
+
+    if (!hasBounds) {
+      const alignmentRoot = alignmentRootRef.current;
+      if (!alignmentRoot) return null;
+      alignmentRoot.updateMatrixWorld(true);
+      temp.setFromObject(alignmentRoot);
+      if (!temp.isEmpty()) {
+        union.copy(temp);
+        hasBounds = true;
+      }
+    }
+
+    return hasBounds ? union : null;
+  }, []);
+
   const persistTransforms = useCallback(async () => {
     if (!isPersistableArtifact || !manifest.artifactId) return;
     try {
@@ -882,7 +971,8 @@ export function UnifiedWorldViewer({
         body: JSON.stringify({
           artifactId: manifest.artifactId,
           meshes: serializeMeshTransforms(),
-          splats: serializeSplatTransforms()
+          splats: serializeSplatTransforms(),
+          sceneAlignment: serializeSceneAlignment()
         })
       });
       if (!response.ok) {
@@ -895,7 +985,13 @@ export function UnifiedWorldViewer({
       setPersistState("error");
       setPersistMessage(err instanceof Error ? err.message : "Failed to save transforms");
     }
-  }, [isPersistableArtifact, manifest.artifactId, serializeMeshTransforms, serializeSplatTransforms]);
+  }, [
+    isPersistableArtifact,
+    manifest.artifactId,
+    serializeMeshTransforms,
+    serializeSceneAlignment,
+    serializeSplatTransforms
+  ]);
 
   const schedulePersist = useCallback(() => {
     if (!isPersistableArtifact) return;
@@ -909,25 +1005,96 @@ export function UnifiedWorldViewer({
     }, 650);
   }, [isPersistableArtifact, persistTransforms]);
 
+  const autoAlignSceneToGround = useCallback(
+    (persist = true) => {
+      const alignmentRoot = alignmentRootRef.current;
+      if (!alignmentRoot) return false;
+
+      const previous = objectToTransformRecord(alignmentRoot);
+      applyTransformRecord(alignmentRoot, IDENTITY_TRANSFORM);
+      sceneRef.current?.updateMatrixWorld(true);
+      const bounds = computeSceneContentBounds();
+      if (!bounds) {
+        applyTransformRecord(alignmentRoot, previous);
+        sceneRef.current?.updateMatrixWorld(true);
+        setTransformDebug("sceneAlign skipped: no measurable scene bounds");
+        return false;
+      }
+
+      const yOffset = Number.isFinite(bounds.min.y) ? -bounds.min.y : 0;
+      const center = bounds.getCenter(new THREE.Vector3());
+      const nextTransform: MeshTransformRecord = {
+        ...IDENTITY_TRANSFORM,
+        position: [-center.x, yOffset, -center.z]
+      };
+      applyTransformRecord(alignmentRoot, nextTransform);
+      sceneRef.current?.updateMatrixWorld(true);
+      if (selectedRef.current) {
+        syncTransformDraft(selectedRef.current);
+      }
+      setTransformDebug(
+        `sceneAlign minY=${bounds.min.y.toFixed(3)} center=(${center.x.toFixed(3)},${center.y.toFixed(
+          3
+        )},${center.z.toFixed(3)})`
+      );
+      if (persist) {
+        schedulePersist();
+      }
+      return true;
+    },
+    [computeSceneContentBounds, schedulePersist, syncTransformDraft]
+  );
+
+  const resetSceneAlignment = useCallback(
+    (persist = true) => {
+      applySceneAlignment(null);
+      if (selectedRef.current) {
+        syncTransformDraft(selectedRef.current);
+      }
+      setTransformDebug("sceneAlign reset -> identity transform");
+      if (persist) {
+        schedulePersist();
+      }
+    },
+    [applySceneAlignment, schedulePersist, syncTransformDraft]
+  );
+
+  const queueAutoAlignScene = useCallback(
+    (persist = true) => {
+      if (autoAlignTimerRef.current) {
+        clearTimeout(autoAlignTimerRef.current);
+      }
+      autoAlignTimerRef.current = setTimeout(() => {
+        autoAlignTimerRef.current = null;
+        autoAlignSceneToGround(persist);
+      }, 160);
+    },
+    [autoAlignSceneToGround]
+  );
+
   const loadPersistedTransforms = useCallback(async (): Promise<PersistedViewerTransforms> => {
-    if (!isPersistableArtifact || !manifest.artifactId) return { meshes: {}, splats: {} };
+    if (!isPersistableArtifact || !manifest.artifactId) {
+      return { meshes: {}, splats: {}, sceneAlignment: null };
+    }
     try {
       const response = await fetch(`/api/world/transforms?artifactId=${encodeURIComponent(manifest.artifactId)}`, {
         cache: "no-store"
       });
-      if (!response.ok) return { meshes: {}, splats: {} };
+      if (!response.ok) return { meshes: {}, splats: {}, sceneAlignment: null };
       const payload = (await response.json()) as {
         payload?: {
           meshes?: Record<string, MeshTransformRecord>;
           splats?: Record<string, MeshTransformRecord>;
+          sceneAlignment?: MeshTransformRecord | null;
         };
       };
       return {
         meshes: payload.payload?.meshes ?? {},
-        splats: payload.payload?.splats ?? {}
+        splats: payload.payload?.splats ?? {},
+        sceneAlignment: payload.payload?.sceneAlignment ?? null
       };
     } catch {
-      return { meshes: {}, splats: {} };
+      return { meshes: {}, splats: {}, sceneAlignment: null };
     }
   }, [isPersistableArtifact, manifest.artifactId]);
 
@@ -1028,7 +1195,7 @@ export function UnifiedWorldViewer({
       if (targetIndex < 0) return;
 
       const [target] = meshRootsRef.current.splice(targetIndex, 1);
-      rootRef.current?.remove(target);
+      target.parent?.remove(target);
       if (selectedRef.current === target) {
         setSelectedObject(null);
       }
@@ -1050,7 +1217,7 @@ export function UnifiedWorldViewer({
       for (const handle of [...splatHandlesRef.current]) {
         if (handle.sourceKey !== sourceKey) continue;
         splatHandlesRef.current.delete(handle);
-        rootRef.current?.remove(handle.object);
+        handle.object.parent?.remove(handle.object);
         if (selectedRef.current === handle.object) {
           setSelectedObject(null);
         }
@@ -1238,7 +1405,7 @@ export function UnifiedWorldViewer({
   }, [schedulePersist, selectedKind, selectedName, setSelectedObject]);
 
   const fitScene = useCallback(() => {
-    const root = rootRef.current;
+    const root = alignmentRootRef.current ?? rootRef.current;
     const camera = cameraRef.current;
     const orbit = orbitRef.current;
     if (!root || !camera || !orbit) return;
@@ -1322,6 +1489,10 @@ export function UnifiedWorldViewer({
     root.name = "WorldRoot";
     scene.add(root);
     rootRef.current = root;
+    const alignmentRoot = new THREE.Group();
+    alignmentRoot.name = "WorldContentRoot";
+    root.add(alignmentRoot);
+    alignmentRootRef.current = alignmentRoot;
 
     const camera = new THREE.PerspectiveCamera(
       manifest.camera?.fov ?? 50,
@@ -1482,7 +1653,7 @@ export function UnifiedWorldViewer({
         camera
       });
       object.renderOrder = 1;
-      root.add(object);
+      alignmentRoot.add(object);
       return { object, sceneFormatEnum };
     };
 
@@ -1523,6 +1694,9 @@ export function UnifiedWorldViewer({
       updateHudFromHandles();
       if (!selectedRef.current && meshRootsRef.current.length === 0) {
         setSelectedObject(handle.object, "splat");
+      }
+      if (autoAlignOnLoadRef.current) {
+        queueAutoAlignScene(true);
       }
       return handle;
     };
@@ -1572,7 +1746,7 @@ export function UnifiedWorldViewer({
           throw new Error("Gaussian scene loaded with no renderable content.");
         }
       } catch (error) {
-        root.remove(object);
+        object.parent?.remove(object);
         object.dispose?.();
         throw error;
       }
@@ -1641,7 +1815,7 @@ export function UnifiedWorldViewer({
       }
 
       object.renderOrder = 1;
-      root.add(object);
+      alignmentRoot.add(object);
       try {
         await waitForSparkSplatReady(instance);
         const bridge = await ensureSparkRendererBridge();
@@ -1649,7 +1823,7 @@ export function UnifiedWorldViewer({
           throw new Error("SparkRenderer is not available in this environment.");
         }
       } catch (error) {
-        root.remove(object);
+        object.parent?.remove(object);
         const dispose = instance.dispose;
         if (typeof dispose === "function") {
           (dispose as () => void).call(instance);
@@ -1738,7 +1912,7 @@ export function UnifiedWorldViewer({
       const points = new THREE.Points(geometry, material);
       points.name = `ply-points-${Date.now()}`;
       points.renderOrder = 1;
-      root.add(points);
+      alignmentRoot.add(points);
 
       const handle: SplatHandle = {
         id: buildSplatHandleId(idSource ?? url),
@@ -1813,6 +1987,11 @@ export function UnifiedWorldViewer({
 
         const persistedTransforms = await loadPersistedTransforms();
         persistedSplatTransforms = persistedTransforms.splats;
+        const hasSavedAlignment =
+          persistedTransforms.sceneAlignment &&
+          !isIdentityTransformRecord(persistedTransforms.sceneAlignment);
+        autoAlignOnLoadRef.current = !hasSavedAlignment;
+        applySceneAlignment(hasSavedAlignment ? persistedTransforms.sceneAlignment : null);
         if (disposed || cancelled) return;
 
         const meshIdUsage = new Map<string, number>();
@@ -1854,7 +2033,7 @@ export function UnifiedWorldViewer({
             gltf.scene.name = usageCount === 0 ? baseId : `${baseId}-${usageCount}`;
 
             meshRootsRef.current.push(gltf.scene);
-            root.add(gltf.scene);
+            alignmentRoot.add(gltf.scene);
           } catch (meshError) {
             const message = meshError instanceof Error ? meshError.message : "Unknown mesh load error";
             meshLoadErrors.push(`${mesh.id}: ${message}`);
@@ -1868,7 +2047,11 @@ export function UnifiedWorldViewer({
         }
         if (isPersistableArtifact) {
           setPersistState("saved");
-          setPersistMessage("Loaded saved transforms");
+          setPersistMessage(
+            hasSavedAlignment
+              ? "Loaded saved transforms + scene alignment"
+              : "Loaded saved transforms"
+          );
         }
         if (meshLoadErrors.length > 0) {
           setError(
@@ -1909,6 +2092,9 @@ export function UnifiedWorldViewer({
         }
 
         if (disposed || cancelled) return;
+        if (autoAlignOnLoadRef.current) {
+          queueAutoAlignScene(true);
+        }
         fitScene();
       } catch (err) {
         if (disposed || cancelled) return;
@@ -1960,7 +2146,7 @@ export function UnifiedWorldViewer({
           handle.update();
         } catch (updateError) {
           splatHandlesRef.current.delete(handle);
-          root.remove(handle.object);
+          handle.object.parent?.remove(handle.object);
           handle.dispose?.();
           refreshSplatItems();
           const message =
@@ -2011,6 +2197,10 @@ export function UnifiedWorldViewer({
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
+      if (autoAlignTimerRef.current) {
+        clearTimeout(autoAlignTimerRef.current);
+        autoAlignTimerRef.current = null;
+      }
       if (requestRef.current) {
         cancelAnimationFrame(requestRef.current);
         requestRef.current = null;
@@ -2047,11 +2237,13 @@ export function UnifiedWorldViewer({
       disposeObjectTree(root);
       scene.clear();
       renderer.dispose();
+      alignmentRootRef.current = null;
       if (renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement);
       }
     };
   }, [
+    applySceneAlignment,
     applyMeshTransforms,
     directSplats,
     fitScene,
@@ -2064,6 +2256,7 @@ export function UnifiedWorldViewer({
     clearSelectedHelper,
     setSelectedObject,
     preferredRuntimeOrder,
+    queueAutoAlignScene,
     splatLoadProfile,
     splatDensityApplied,
     updateHudFromHandles
@@ -2465,6 +2658,27 @@ export function UnifiedWorldViewer({
       {openPanel === "transform" ? (
         <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Transform</div>
+          <div className="mb-2 rounded-md border border-border/50 bg-background/20 p-1.5">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Scene Alignment</div>
+            <div className="grid grid-cols-2 gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={() => autoAlignSceneToGround(true)}
+              >
+                Auto Align
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={() => resetSceneAlignment(true)}
+              >
+                Reset Align
+              </Button>
+            </div>
+          </div>
           {selectedKind && transformDraft ? (
             <div className="space-y-2">
               <div className="rounded-md border border-border/50 bg-background/20 p-1.5">
