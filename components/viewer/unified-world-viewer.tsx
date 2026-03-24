@@ -50,6 +50,7 @@ type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transfo
 type BundleMode = "same_node" | "project_fallback";
 type SplatRuntimeName = "legacy" | "spark";
 type LoadedSplatRuntime = SplatRuntimeName | "points";
+type ViewMode = "default" | "modelviewer";
 
 interface ViewerFileMenuOption {
   id: string;
@@ -709,6 +710,7 @@ export function UnifiedWorldViewer({
   const fpsCounterRef = useRef({ acc: 0, frames: 0, fps: 0 });
   const pausedRef = useRef(false);
   const navModeRef = useRef<NavigationMode>("orbit");
+  const viewModeRef = useRef<ViewMode>("default");
   const flySpeedRef = useRef(4);
   const rotationDisplayRef = useRef<Map<string, EulerTriplet>>(new Map());
   const removedMeshIdsRef = useRef<Set<string>>(new Set());
@@ -720,6 +722,7 @@ export function UnifiedWorldViewer({
   const splatSupportSampleCacheRef = useRef<Map<string, THREE.Vector3[]>>(new Map());
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
+  const [viewMode, setViewMode] = useState<ViewMode>("default");
   const [flySpeed, setFlySpeed] = useState([4]);
   const [splatLoadProfile, setSplatLoadProfile] = useState<SplatLoadProfile>("full");
   const [splatDensityDraft, setSplatDensityDraft] = useState([100]);
@@ -798,6 +801,10 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     navModeRef.current = navMode;
   }, [navMode]);
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
 
   useEffect(() => {
     flySpeedRef.current = flySpeed[0] ?? 4;
@@ -1543,10 +1550,57 @@ export function UnifiedWorldViewer({
     orbit.update();
   }, []);
 
+  const applyViewModeProfile = useCallback(
+    (mode: ViewMode) => {
+      const camera = cameraRef.current;
+      const orbit = orbitRef.current;
+      if (!camera || !orbit) return;
+
+      if (mode === "modelviewer") {
+        camera.fov = 75;
+        camera.near = 0.1;
+        camera.far = 1000;
+        camera.position.set(0, 0, 0);
+        camera.updateProjectionMatrix();
+        orbit.enableDamping = false;
+        orbit.target.set(0, 0, -10);
+        orbit.update();
+        setNavMode("fly");
+        setTransformDebug("viewMode=modelviewer fov=75 near=0.1 far=1000");
+        return;
+      }
+
+      camera.fov = manifest.camera?.fov ?? 50;
+      camera.near = 0.0001;
+      camera.far = 4000;
+      camera.updateProjectionMatrix();
+      orbit.enableDamping = true;
+      orbit.target.set(...(manifest.camera?.target ?? [0, 0, 0]));
+      orbit.update();
+      setNavMode("orbit");
+      fitScene();
+      setTransformDebug("viewMode=default (fit scene)");
+    },
+    [fitScene, manifest.camera]
+  );
+
+  const switchViewMode = useCallback(
+    (mode: ViewMode) => {
+      setViewMode(mode);
+      applyViewModeProfile(mode);
+    },
+    [applyViewModeProfile]
+  );
+
   const resetCamera = useCallback(() => {
     const camera = cameraRef.current;
     const orbit = orbitRef.current;
     if (!camera || !orbit) return;
+
+    if (viewModeRef.current === "modelviewer") {
+      applyViewModeProfile("modelviewer");
+      return;
+    }
 
     const preset = manifest.camera;
     const position = preset?.position ?? [4, 3, 4];
@@ -1555,7 +1609,7 @@ export function UnifiedWorldViewer({
     camera.position.set(position[0], position[1], position[2]);
     orbit.target.set(target[0], target[1], target[2]);
     orbit.update();
-  }, [manifest.camera]);
+  }, [applyViewModeProfile, manifest.camera]);
 
   const fitSelection = useCallback(() => {
     const selected = selectedRef.current;
@@ -1671,8 +1725,61 @@ export function UnifiedWorldViewer({
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
+    let isFlyLookDragging = false;
+    let flyLookPointerId: number | null = null;
+    let flyLookLastX = 0;
+    let flyLookLastY = 0;
+    let flyLookYaw = 0;
+    let flyLookPitch = 0;
+
+    const beginFlyMouseLook = (event: PointerEvent) => {
+      if (!cameraRef.current || !rendererRef.current) return;
+      const euler = new THREE.Euler().setFromQuaternion(cameraRef.current.quaternion, "YXZ");
+      flyLookYaw = euler.y;
+      flyLookPitch = euler.x;
+      isFlyLookDragging = true;
+      flyLookPointerId = event.pointerId;
+      flyLookLastX = event.clientX;
+      flyLookLastY = event.clientY;
+      rendererRef.current.domElement.setPointerCapture?.(event.pointerId);
+    };
+
+    const updateFlyMouseLook = (event: PointerEvent) => {
+      if (!isFlyLookDragging) return;
+      if (flyLookPointerId !== null && event.pointerId !== flyLookPointerId) return;
+      const camera = cameraRef.current;
+      if (!camera) return;
+      const dx = event.clientX - flyLookLastX;
+      const dy = event.clientY - flyLookLastY;
+      flyLookLastX = event.clientX;
+      flyLookLastY = event.clientY;
+      const sensitivity = 0.0025;
+      flyLookYaw -= dx * sensitivity;
+      flyLookPitch = THREE.MathUtils.clamp(flyLookPitch - dy * sensitivity, -Math.PI / 2 + 0.02, Math.PI / 2 - 0.02);
+      camera.quaternion.setFromEuler(new THREE.Euler(flyLookPitch, flyLookYaw, 0, "YXZ"));
+      camera.updateMatrixWorld(true);
+      event.preventDefault();
+    };
+
+    const endFlyMouseLook = (event?: PointerEvent) => {
+      if (!isFlyLookDragging) return;
+      const activePointerId = flyLookPointerId;
+      isFlyLookDragging = false;
+      flyLookPointerId = null;
+      if (activePointerId !== null && rendererRef.current) {
+        rendererRef.current.domElement.releasePointerCapture?.(activePointerId);
+      }
+      event?.preventDefault();
+    };
+
     const onPointerDown = (event: PointerEvent) => {
       if (!rendererRef.current || !cameraRef.current) return;
+      if (navModeRef.current === "fly" && event.button === 2) {
+        beginFlyMouseLook(event);
+        event.preventDefault();
+        return;
+      }
+      if (event.button !== 0) return;
       const rect = rendererRef.current.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1700,7 +1807,25 @@ export function UnifiedWorldViewer({
       }
       setSelectedObject(selected, "mesh");
     };
+    const onPointerMove = (event: PointerEvent) => {
+      if (navModeRef.current !== "fly") return;
+      updateFlyMouseLook(event);
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (navModeRef.current !== "fly") return;
+      endFlyMouseLook(event);
+    };
+    const onPointerCancel = () => {
+      endFlyMouseLook();
+    };
+    const onCanvasContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("contextmenu", onCanvasContextMenu);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
 
     const resizeObserver = new ResizeObserver(() => {
       if (!containerRef.current || !rendererRef.current || !cameraRef.current) return;
@@ -2264,6 +2389,10 @@ export function UnifiedWorldViewer({
         }
       }
 
+      if (viewModeRef.current === "modelviewer") {
+        alignmentRoot.rotation.y += 0.0005;
+      }
+
       for (const handle of [...splatHandlesRef.current]) {
         if (!handle.update) continue;
         try {
@@ -2333,6 +2462,10 @@ export function UnifiedWorldViewer({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("contextmenu", onCanvasContextMenu);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
       resizeObserver.disconnect();
 
       setSelectedObject(null);
@@ -2636,6 +2769,30 @@ export function UnifiedWorldViewer({
       {openPanel === "settings" ? (
         <div className="absolute left-3 bottom-3 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300">Settings</p>
+          <div className="mb-3 rounded-md border border-border/50 bg-background/20 p-1.5">
+            <p className="mb-1 text-xs uppercase tracking-[0.14em] text-zinc-400">View Mode</p>
+            <div className="grid grid-cols-2 gap-1">
+              <Button
+                size="sm"
+                variant={viewMode === "default" ? "default" : "outline"}
+                className="h-7 rounded-md text-xs"
+                onClick={() => switchViewMode("default")}
+              >
+                Default
+              </Button>
+              <Button
+                size="sm"
+                variant={viewMode === "modelviewer" ? "default" : "outline"}
+                className="h-7 rounded-md text-xs"
+                onClick={() => switchViewMode("modelviewer")}
+              >
+                Modelviewer
+              </Button>
+            </div>
+            <p className="mt-1 text-[10px] text-zinc-500">
+              Modelviewer: FOV 75, fixed near/far, origin camera, fly nav, slow scene spin.
+            </p>
+          </div>
           <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-400">Fly Speed</p>
           <Slider min={1} max={20} step={0.5} value={flySpeed} onValueChange={setFlySpeed} />
           <p className="mt-2 text-xs text-zinc-400">
