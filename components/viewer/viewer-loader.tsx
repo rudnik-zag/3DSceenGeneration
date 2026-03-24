@@ -207,6 +207,75 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
   };
 }
 
+const DEFAULT_CAMERA = { position: [4, 3, 4] as [number, number, number], target: [0, 0, 0] as [number, number, number], fov: 50 };
+
+function mergeExternalArtifactsIntoManifest(base: UnifiedManifest, externalArtifacts: ViewerArtifact[]): UnifiedManifest {
+  if (externalArtifacts.length === 0) {
+    return base;
+  }
+
+  const merged: UnifiedManifest = {
+    artifactId: base.artifactId,
+    camera: base.camera ?? DEFAULT_CAMERA,
+    meshes: [...base.meshes],
+    splats: [...base.splats]
+  };
+
+  const knownMeshUrls = new Set(merged.meshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
+  const knownSplatUrls = new Set(
+    merged.splats
+      .map((entry) => (entry.sourceUrl ? normalizeAssetUrlForDedup(entry.sourceUrl) : null))
+      .filter((value): value is string => Boolean(value))
+  );
+
+  externalArtifacts.forEach((artifact, artifactIndex) => {
+    const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
+      ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
+      : [];
+
+    const meshLike =
+      artifact.kind === "mesh_glb" ||
+      artifact.url.toLowerCase().endsWith(".glb") ||
+      artifact.url.toLowerCase().endsWith(".gltf");
+    if (meshLike) {
+      const meshUrls = extraMeshUrls.length > 0 ? extraMeshUrls : [artifact.url];
+      meshUrls.forEach((url, urlIndex) => {
+        const dedupKey = normalizeAssetUrlForDedup(url);
+        if (knownMeshUrls.has(dedupKey)) return;
+        knownMeshUrls.add(dedupKey);
+        merged.meshes.push({
+          id: `mesh-external-${meshIdFromUrl(url, `${artifact.id}-${artifactIndex}-${urlIndex}`)}-${artifactIndex}-${urlIndex}`,
+          url
+        });
+      });
+      return;
+    }
+
+    const splatLike = artifact.kind === "point_ply" || artifact.kind === "splat_ksplat";
+    if (!splatLike) return;
+    const dedupKey = normalizeAssetUrlForDedup(artifact.url);
+    if (knownSplatUrls.has(dedupKey)) return;
+    knownSplatUrls.add(dedupKey);
+    const formatHint =
+      inferSplatFormatHintFromKind(artifact.kind) ??
+      inferSplatFormatHintFromUrl(artifact.url) ??
+      inferSplatFormatHintFromUrl(artifact.filename ?? "");
+    merged.splats.push({
+      id: `splat-external-${artifact.id}-${artifactIndex}`,
+      tilesetUrl: null,
+      sourceUrl: artifact.url,
+      formatHint
+    });
+  });
+
+  return merged;
+}
+
+function revokeLocalArtifactUrl(artifact: ViewerArtifact | null | undefined) {
+  if (!artifact?.url || !isBlobUrl(artifact.url)) return;
+  URL.revokeObjectURL(artifact.url);
+}
+
 export function ViewerLoader({
   initialArtifact,
   artifactPicker,
@@ -217,7 +286,9 @@ export function ViewerLoader({
   initialBundleMode?: BundleMode;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const appendInputRef = useRef<HTMLInputElement>(null);
   const [localArtifact, setLocalArtifact] = useState<ViewerArtifact | null>(null);
+  const [localSceneAdditions, setLocalSceneAdditions] = useState<ViewerArtifact[]>([]);
   const [worldManifest, setWorldManifest] = useState<WorldManifestResponse | null>(null);
   const [worldManifestLoading, setWorldManifestLoading] = useState(false);
   const [worldManifestError, setWorldManifestError] = useState<string | null>(null);
@@ -227,22 +298,25 @@ export function ViewerLoader({
   const [viewerResetVersion, setViewerResetVersion] = useState(0);
   const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "project_fallback");
   const [sceneCleared, setSceneCleared] = useState(false);
+  const localArtifactRef = useRef<ViewerArtifact | null>(null);
+  const localSceneAdditionsRef = useRef<ViewerArtifact[]>([]);
 
   const activeArtifact = useMemo(() => localArtifact ?? initialArtifact, [initialArtifact, localArtifact]);
 
   const unifiedManifest = useMemo<UnifiedManifest | null>(() => {
+    let baseManifest: UnifiedManifest | null = null;
     if (sceneCleared) {
-      return {
+      baseManifest = {
         artifactId: activeArtifact?.id,
-        camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+        camera: DEFAULT_CAMERA,
         meshes: [],
         splats: []
       };
     }
     if (localArtifact) {
-      return buildSingleArtifactManifest(localArtifact);
+      baseManifest = buildSingleArtifactManifest(localArtifact);
     }
-    if (worldManifest) {
+    if (!baseManifest && worldManifest) {
       const extraMeshUrls =
         activeArtifact && Array.isArray(activeArtifact.additionalSceneUrls)
           ? activeArtifact.additionalSceneUrls.filter(
@@ -261,9 +335,9 @@ export function ViewerLoader({
           url
         });
       });
-      return {
+      baseManifest = {
         artifactId: worldManifest.artifactId,
-        camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+        camera: DEFAULT_CAMERA,
         meshes: mergedMeshes,
         splats: worldManifest.splats.map((entry) => ({
           id: entry.id,
@@ -275,19 +349,37 @@ export function ViewerLoader({
         }))
       };
     }
-    if (activeArtifact) {
-      return buildSingleArtifactManifest(activeArtifact);
+    if (!baseManifest && activeArtifact) {
+      baseManifest = buildSingleArtifactManifest(activeArtifact);
     }
-    return null;
-  }, [activeArtifact, localArtifact, sceneCleared, worldManifest]);
+    if (!baseManifest && localSceneAdditions.length === 0) {
+      return null;
+    }
+    return mergeExternalArtifactsIntoManifest(
+      baseManifest ?? {
+        artifactId: activeArtifact?.id,
+        camera: DEFAULT_CAMERA,
+        meshes: [],
+        splats: []
+      },
+      localSceneAdditions
+    );
+  }, [activeArtifact, localArtifact, localSceneAdditions, sceneCleared, worldManifest]);
+
+  useEffect(() => {
+    localArtifactRef.current = localArtifact;
+  }, [localArtifact]);
+
+  useEffect(() => {
+    localSceneAdditionsRef.current = localSceneAdditions;
+  }, [localSceneAdditions]);
 
   useEffect(() => {
     return () => {
-      if (localArtifact?.url && isBlobUrl(localArtifact.url)) {
-        URL.revokeObjectURL(localArtifact.url);
-      }
+      revokeLocalArtifactUrl(localArtifactRef.current);
+      localSceneAdditionsRef.current.forEach((artifact) => revokeLocalArtifactUrl(artifact));
     };
-  }, [localArtifact]);
+  }, []);
 
   useEffect(() => {
     if (sceneCleared || !activeArtifact || localArtifact) {
@@ -444,6 +536,10 @@ export function ViewerLoader({
     inputRef.current?.click();
   };
 
+  const onAddExternalFile = () => {
+    appendInputRef.current?.click();
+  };
+
   const onFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -460,9 +556,7 @@ export function ViewerLoader({
     const url = URL.createObjectURL(file);
     setSceneCleared(false);
     setLocalArtifact((prev) => {
-      if (prev?.url && isBlobUrl(prev.url)) {
-        URL.revokeObjectURL(prev.url);
-      }
+      revokeLocalArtifactUrl(prev);
       return {
         id: `local-${Date.now()}`,
         kind,
@@ -479,19 +573,63 @@ export function ViewerLoader({
     event.target.value = "";
   };
 
+  const onAppendFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const kind = await detectKindForLocalFile(file);
+    if (!kind) {
+      toast({
+        title: "Unsupported file",
+        description: "Use .ply, .compressed.ply, .glb/.gltf, .splat, .spz, .ksplat."
+      });
+      event.target.value = "";
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    setSceneCleared(false);
+    setLocalSceneAdditions((prev) => [
+      ...prev,
+      {
+        id: `local-external-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind,
+        url,
+        mimeType: file.type || "application/octet-stream",
+        filename: file.name,
+        byteSize: file.size,
+        meta: {
+          filename: file.name,
+          byteSize: file.size
+        }
+      }
+    ]);
+    toast({
+      title: "External Object Added",
+      description: `${file.name} appended to current scene`
+    });
+    event.target.value = "";
+  };
+
   const clearLocalArtifact = () => {
     setSceneCleared(false);
     setLocalArtifact((prev) => {
-      if (prev?.url && isBlobUrl(prev.url)) {
-        URL.revokeObjectURL(prev.url);
-      }
+      revokeLocalArtifactUrl(prev);
       return null;
+    });
+  };
+
+  const clearLocalSceneAdditions = () => {
+    setLocalSceneAdditions((prev) => {
+      prev.forEach((artifact) => revokeLocalArtifactUrl(artifact));
+      return [];
     });
   };
 
   const onResetViewer = () => {
     setSceneCleared(false);
     clearLocalArtifact();
+    clearLocalSceneAdditions();
     setWorldManifest(null);
     setWorldManifestError(null);
     setWorldManifestLoading(false);
@@ -501,6 +639,7 @@ export function ViewerLoader({
   };
   const onClearScene = () => {
     clearLocalArtifact();
+    clearLocalSceneAdditions();
     setWorldManifest(null);
     setWorldManifestError(null);
     setWorldManifestLoading(false);
@@ -592,7 +731,9 @@ export function ViewerLoader({
                   ...option,
                   href: withBundleModeHref(option.href, bundleMode)
                 })) ?? [],
-              sourceLabel: localArtifact ? "local file" : activeArtifact ? "run artifact" : "none",
+              sourceLabel:
+                (localArtifact ? "local file" : activeArtifact ? "run artifact" : "none") +
+                (localSceneAdditions.length > 0 ? ` + ${localSceneAdditions.length} external` : ""),
               viewerLabel: "Unified",
               canUseRunArtifact: Boolean(localArtifact),
               canBuildTileset,
@@ -600,6 +741,7 @@ export function ViewerLoader({
               bundleSourceNote,
               bundleMode,
               onPickLocalFile,
+              onAddExternalFile,
               onUseRunArtifact: localArtifact ? clearLocalArtifact : undefined,
               onBuildTileset: canBuildTileset ? onBuildTileset : undefined,
               onBundleModeChange,
@@ -626,6 +768,13 @@ export function ViewerLoader({
         accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
         className="hidden"
         onChange={onFileChange}
+      />
+      <input
+        ref={appendInputRef}
+        type="file"
+        accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
+        className="hidden"
+        onChange={onAppendFileChange}
       />
     </div>
   );

@@ -82,6 +82,7 @@ interface ViewerFileMenu {
   bundleSourceNote?: string | null;
   bundleMode: BundleMode;
   onPickLocalFile: () => void;
+  onAddExternalFile?: () => void;
   onUseRunArtifact?: () => void;
   onBuildTileset?: () => void;
   onBundleModeChange?: (mode: BundleMode) => void;
@@ -1536,6 +1537,21 @@ export function UnifiedWorldViewer({
     setSelectedObject(object, selectedKind);
   }, [schedulePersist, selectedKind, selectedName, setSelectedObject]);
 
+  const applySelectedAxisCorrection = useCallback(() => {
+    const object = resolveSelectedObject();
+    if (!object) return;
+
+    // Match modelviewer.html correction path for loaded assets.
+    object.rotateX(-Math.PI / 2);
+    object.rotateZ(-Math.PI / 2);
+    object.updateMatrixWorld(true);
+    sceneRef.current?.updateMatrixWorld(true);
+
+    schedulePersist();
+    setTransformDebug(`axis-correct id=${object.name || object.uuid} rotX=-90 rotZ=-90`);
+    setSelectedObject(object, selectedKind);
+  }, [resolveSelectedObject, schedulePersist, selectedKind, setSelectedObject]);
+
   const fitScene = useCallback(() => {
     const root = alignmentRootRef.current ?? rootRef.current;
     const camera = cameraRef.current;
@@ -2692,6 +2708,15 @@ export function UnifiedWorldViewer({
             <Button size="sm" className="h-8 rounded-md text-xs" onClick={fileMenu.onPickLocalFile}>
               Open local file
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs"
+              onClick={() => fileMenu.onAddExternalFile?.()}
+              disabled={!fileMenu.onAddExternalFile}
+            >
+              Add external object
+            </Button>
             {fileMenu.canUseRunArtifact ? (
               <Button
                 size="sm"
@@ -3004,6 +3029,18 @@ export function UnifiedWorldViewer({
           </div>
           {selectedKind && transformDraft ? (
             <div className="space-y-2">
+              <div className="rounded-md border border-border/50 bg-background/20 p-1.5">
+                <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Environment Transform</div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 w-full rounded-md text-xs"
+                  onClick={applySelectedAxisCorrection}
+                  disabled={!selectedRef.current}
+                >
+                  Correct Axis Misalignment
+                </Button>
+              </div>
               <div className="rounded-md border border-border/50 bg-background/20 p-1.5">
                 <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Step</div>
                 <div className="grid grid-cols-3 gap-1">
