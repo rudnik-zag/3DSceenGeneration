@@ -8,7 +8,7 @@ import { toast } from "@/hooks/use-toast";
 
 interface ViewerArtifact {
   id: string;
-  kind: "mesh_glb" | "point_ply" | "splat_ksplat" | string;
+  kind: "mesh_glb" | "mesh_ply" | "point_ply" | "splat_ksplat" | string;
   url: string;
   mimeType: string;
   meta: Record<string, unknown> | null;
@@ -55,7 +55,7 @@ interface UnifiedManifest {
     target?: [number, number, number];
     fov?: number;
   };
-  meshes: Array<{ id: string; url: string }>;
+  meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
 }
 
@@ -119,12 +119,24 @@ function inferKindFromFilename(filename: string): ViewerArtifact["kind"] | null 
 }
 
 function inferSplatFormatHintFromUrl(url: string): SplatFormatHint {
-  const lower = url.toLowerCase();
-  if (lower.endsWith(".compressed.ply")) return "ply";
-  if (lower.endsWith(".ply")) return "ply";
-  if (lower.endsWith(".ksplat")) return "ksplat";
-  if (lower.endsWith(".spz")) return "spz";
-  if (lower.endsWith(".splat")) return "splat";
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = (keyParam && keyParam.length > 0 ? keyParam : parsed.pathname).toLowerCase();
+    if (source.endsWith(".compressed.ply")) return "ply";
+    if (source.endsWith(".ply")) return "ply";
+    if (source.endsWith(".ksplat")) return "ksplat";
+    if (source.endsWith(".spz")) return "spz";
+    if (source.endsWith(".splat")) return "splat";
+    return null;
+  } catch {
+    const lower = url.toLowerCase();
+    if (lower.endsWith(".compressed.ply")) return "ply";
+    if (lower.endsWith(".ply")) return "ply";
+    if (lower.endsWith(".ksplat")) return "ksplat";
+    if (lower.endsWith(".spz")) return "spz";
+    if (lower.endsWith(".splat")) return "splat";
+  }
   return null;
 }
 
@@ -137,9 +149,44 @@ function inferSplatFormatHintFromKind(kind: string | null | undefined): SplatFor
   return null;
 }
 
+function inferMeshFormatHintFromUrl(url: string): "ply" | "glb" | "gltf" | null {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = (keyParam && keyParam.length > 0 ? keyParam : parsed.pathname).toLowerCase();
+    if (source.endsWith(".ply") || source.endsWith(".compressed.ply")) return "ply";
+    if (source.endsWith(".glb")) return "glb";
+    if (source.endsWith(".gltf")) return "gltf";
+    return null;
+  } catch {
+    const lower = url.toLowerCase();
+    if (lower.endsWith(".ply") || lower.endsWith(".compressed.ply")) return "ply";
+    if (lower.endsWith(".glb")) return "glb";
+    if (lower.endsWith(".gltf")) return "gltf";
+  }
+  return null;
+}
+
 async function detectKindForLocalFile(file: File): Promise<ViewerArtifact["kind"] | null> {
   const directKind = inferKindFromFilename(file.name);
   if (!directKind) return null;
+  if (directKind === "point_ply" || directKind === "splat_ksplat") {
+    try {
+      const headerSlice = await file.slice(0, 256 * 1024).arrayBuffer();
+      const rawHeader = new TextDecoder("utf-8").decode(headerSlice);
+      const endMatch = rawHeader.match(/end_header(?:\r?\n|$)/);
+      if (endMatch) {
+        const header = rawHeader.slice(0, endMatch.index !== undefined ? endMatch.index + endMatch[0].length : undefined);
+        const faceMatch = header.match(/element\s+face\s+(\d+)/i);
+        const faceCount = faceMatch ? Number(faceMatch[1]) : 0;
+        if (Number.isFinite(faceCount) && faceCount > 0) {
+          return "mesh_ply";
+        }
+      }
+    } catch {
+      // Fall back to extension-based detection.
+    }
+  }
   return directKind;
 }
 
@@ -162,20 +209,32 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
   const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
     ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
     : [];
-  const meshLike = artifact.kind === "mesh_glb" || artifact.url.toLowerCase().endsWith(".glb") || artifact.url.toLowerCase().endsWith(".gltf");
+  const meshLike =
+    artifact.kind === "mesh_glb" ||
+    artifact.kind === "mesh_ply" ||
+    artifact.url.toLowerCase().endsWith(".glb") ||
+    artifact.url.toLowerCase().endsWith(".gltf");
   if (meshLike) {
     const preferPerObjectMeshes = extraMeshUrls.length > 0;
-    const meshes: Array<{ id: string; url: string }> = [];
+    const meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }> = [];
     const knownUrls = new Set<string>();
     if (!preferPerObjectMeshes) {
-      meshes.push({ id: `mesh-${artifact.id}`, url: artifact.url });
+      meshes.push({
+        id: `mesh-${artifact.id}`,
+        url: artifact.url,
+        formatHint: artifact.kind === "mesh_ply" ? "ply" : inferMeshFormatHintFromUrl(artifact.url)
+      });
       knownUrls.add(normalizeAssetUrlForDedup(artifact.url));
     }
     extraMeshUrls.forEach((url, index) => {
       const dedupKey = normalizeAssetUrlForDedup(url);
       if (knownUrls.has(dedupKey)) return;
       knownUrls.add(dedupKey);
-      meshes.push({ id: `mesh-extra-${meshIdFromUrl(url, `${artifact.id}-${index}`)}-${index}`, url });
+      meshes.push({
+        id: `mesh-extra-${meshIdFromUrl(url, `${artifact.id}-${index}`)}-${index}`,
+        url,
+        formatHint: inferMeshFormatHintFromUrl(url)
+      });
     });
     return {
       artifactId: artifact.id,
@@ -235,6 +294,7 @@ function mergeExternalArtifactsIntoManifest(base: UnifiedManifest, externalArtif
 
     const meshLike =
       artifact.kind === "mesh_glb" ||
+      artifact.kind === "mesh_ply" ||
       artifact.url.toLowerCase().endsWith(".glb") ||
       artifact.url.toLowerCase().endsWith(".gltf");
     if (meshLike) {
@@ -245,7 +305,8 @@ function mergeExternalArtifactsIntoManifest(base: UnifiedManifest, externalArtif
         knownMeshUrls.add(dedupKey);
         merged.meshes.push({
           id: `mesh-external-${meshIdFromUrl(url, `${artifact.id}-${artifactIndex}-${urlIndex}`)}-${artifactIndex}-${urlIndex}`,
-          url
+          url,
+          formatHint: artifact.kind === "mesh_ply" ? "ply" : inferMeshFormatHintFromUrl(url)
         });
       });
       return;
@@ -323,7 +384,11 @@ export function ViewerLoader({
               (value): value is string => typeof value === "string" && value.length > 0
             )
           : [];
-      const baseMeshes = worldManifest.meshes.map((entry) => ({ id: entry.id, url: entry.url }));
+      const baseMeshes = worldManifest.meshes.map((entry) => ({
+        id: entry.id,
+        url: entry.url,
+        formatHint: inferMeshFormatHintFromUrl(entry.url)
+      }));
       const mergedMeshes = [...baseMeshes];
       const knownUrls = new Set(mergedMeshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
       extraMeshUrls.forEach((url, index) => {
@@ -332,7 +397,8 @@ export function ViewerLoader({
         knownUrls.add(dedupKey);
         mergedMeshes.push({
           id: `mesh-extra-${meshIdFromUrl(url, `${worldManifest.artifactId}-${index}`)}-${index}`,
-          url
+          url,
+          formatHint: inferMeshFormatHintFromUrl(url)
         });
       });
       baseManifest = {

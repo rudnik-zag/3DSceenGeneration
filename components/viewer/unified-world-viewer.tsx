@@ -43,7 +43,7 @@ interface WorldManifest {
     target?: [number, number, number];
     fov?: number;
   };
-  meshes: Array<{ id: string; url: string }>;
+  meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{
     id: string;
     tilesetUrl: string | null;
@@ -213,6 +213,7 @@ const GROUND_ALIGN_OPTIONS: GroundAlignOptions = {
 
 interface ParsedPlyHeader {
   vertexCount: number;
+  faceCount: number;
   dataOffset: number;
   format: string;
   properties: string[];
@@ -347,6 +348,8 @@ function parsePlyHeader(rawHeader: string): ParsedPlyHeader | null {
   if (!elementLine) return null;
   const vertexCount = Number(elementLine.split(/\s+/)[2]);
   if (!Number.isFinite(vertexCount) || vertexCount <= 0) return null;
+  const faceElementLine = lines.find((line) => /^element\s+face\s+\d+$/.test(line));
+  const faceCount = faceElementLine ? Number(faceElementLine.split(/\s+/)[2]) : 0;
 
   const parsedProperties = lines
     .filter((line) => line.startsWith("property "))
@@ -358,6 +361,7 @@ function parsePlyHeader(rawHeader: string): ParsedPlyHeader | null {
 
   return {
     vertexCount,
+    faceCount: Number.isFinite(faceCount) && faceCount > 0 ? faceCount : 0,
     dataOffset: endMatch.index + endMatch[0].length,
     format,
     properties: parsedProperties
@@ -368,6 +372,7 @@ function parse3dgsHeader(rawHeader: string): { vertexCount: number; dataOffset: 
   const parsed = parsePlyHeader(rawHeader);
   if (!parsed) return null;
   if (parsed.format !== "binary_little_endian 1.0") return null;
+  if (parsed.faceCount > 0) return null;
 
   const expectedProperties = PLY_3DGS_PROPERTIES.map((name) => `float:${name}`);
   if (parsed.properties.length !== expectedProperties.length) return null;
@@ -378,7 +383,9 @@ function parse3dgsHeader(rawHeader: string): { vertexCount: number; dataOffset: 
   return { vertexCount: parsed.vertexCount, dataOffset: parsed.dataOffset };
 }
 
-async function inspectPlyUrl(url: string): Promise<{ vertexCount: number; is3dgs: boolean } | null> {
+async function inspectPlyUrl(
+  url: string
+): Promise<{ vertexCount: number; faceCount: number; hasFaces: boolean; is3dgs: boolean } | null> {
   try {
     const response = await fetch(url, {
       cache: "no-store",
@@ -394,7 +401,9 @@ async function inspectPlyUrl(url: string): Promise<{ vertexCount: number; is3dgs
       parsed.format === "binary_little_endian 1.0" &&
       parsed.properties.length === expectedProperties.length &&
       expectedProperties.every((prop, idx) => parsed.properties[idx] === prop);
-    return { vertexCount: parsed.vertexCount, is3dgs };
+    const faceCount = parsed.faceCount;
+    const hasFaces = faceCount > 0;
+    return { vertexCount: parsed.vertexCount, faceCount, hasFaces, is3dgs };
   } catch {
     return null;
   }
@@ -617,6 +626,18 @@ function normalizeMeshUrlForDedup(url: string): string {
     return `${parsed.origin}${parsed.pathname}`;
   } catch {
     return url;
+  }
+}
+
+function urlHasPlyExtension(url: string): boolean {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = (keyParam && keyParam.length > 0 ? keyParam : parsed.pathname).toLowerCase();
+    return source.endsWith(".ply") || source.endsWith(".compressed.ply");
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.endsWith(".ply") || lower.endsWith(".compressed.ply");
   }
 }
 
@@ -2150,6 +2171,53 @@ export function UnifiedWorldViewer({
       throw new Error(runtimeErrors.join(" | "));
     };
 
+    const createSurfaceMeshHandleFromPly = async (
+      url: string,
+      vertexCountHint?: number,
+      idSource?: string
+    ): Promise<SplatHandle> => {
+      const geometry = await plyLoader.loadAsync(url);
+      if (!geometry?.getAttribute("position")) {
+        throw new Error("PLY surface mesh has no position attribute.");
+      }
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+
+      const hasVertexColors = Boolean(geometry.getAttribute("color"));
+      const material = new THREE.MeshBasicMaterial({
+        color: hasVertexColors ? 0xffffff : 0xd4d9e8,
+        vertexColors: hasVertexColors,
+        side: THREE.DoubleSide
+      });
+      material.depthTest = true;
+      material.depthWrite = true;
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = `ply-surface-${Date.now()}`;
+      mesh.renderOrder = 0;
+      // Match modelviewer orientation for Hunyuan/Open3D PLY mesh exports.
+      mesh.rotateX(-Math.PI / 2);
+      mesh.rotateZ(-Math.PI / 2);
+      alignmentRoot.add(mesh);
+
+      const handle: SplatHandle = {
+        id: buildSplatHandleId(idSource ?? url),
+        label: buildSplatLabel(idSource ?? url),
+        object: mesh,
+        runtime: "points",
+        sourceKey: normalizeMeshUrlForDedup(idSource ?? url),
+        sourceUrl: idSource ?? url,
+        formatHint: "ply",
+        dispose: () => {
+          mesh.geometry.dispose();
+          material.dispose();
+        },
+        splatCount: vertexCountHint ?? (geometry.getAttribute("position")?.count ?? 0),
+        bounds: geometry.boundingBox?.clone()
+      };
+      return registerSplatHandle(handle);
+    };
+
     const createPointCloudHandleFromPly = async (
       url: string,
       vertexCountHint?: number,
@@ -2205,8 +2273,15 @@ export function UnifiedWorldViewer({
 
     const loadDirectPlyWithPolicy = async (url: string): Promise<void> => {
       const inspected = await inspectPlyUrl(url);
+      const hasFaces = Boolean(inspected?.hasFaces);
       const is3dgs = Boolean(inspected?.is3dgs);
       const vertexCount = inspected?.vertexCount ?? 0;
+      if (hasFaces) {
+        await createSurfaceMeshHandleFromPly(url, vertexCount > 0 ? vertexCount : undefined, url);
+        setRuntimeNotice("PLY loaded as surface mesh.");
+        setError(null);
+        return;
+      }
       if (is3dgs) {
         const sliderFraction = Math.max(0.01, Math.min(1, splatDensityApplied / 100));
         const profileLimit =
@@ -2278,6 +2353,51 @@ export function UnifiedWorldViewer({
         for (const mesh of activeMeshes) {
           if (disposed || cancelled) break;
           try {
+            const shouldLoadPlyMesh = mesh.formatHint === "ply" || urlHasPlyExtension(mesh.url);
+            if (shouldLoadPlyMesh) {
+              const geometry = await plyLoader.loadAsync(mesh.url);
+              if (!geometry?.getAttribute("position")) {
+                throw new Error("PLY mesh has no position attribute.");
+              }
+              geometry.computeBoundingBox();
+              geometry.computeBoundingSphere();
+              const hasVertexColors = Boolean(geometry.getAttribute("color"));
+              const material = new THREE.MeshBasicMaterial({
+                color: hasVertexColors ? 0xffffff : 0xd4d9e8,
+                vertexColors: hasVertexColors,
+                side: THREE.DoubleSide
+              });
+              material.depthTest = true;
+              material.depthWrite = true;
+              const plyMesh = new THREE.Mesh(geometry, material);
+              // Match modelviewer orientation for Hunyuan/Open3D PLY mesh exports.
+              plyMesh.rotateX(-Math.PI / 2);
+              plyMesh.rotateZ(-Math.PI / 2);
+              plyMesh.traverse((obj: THREE.Object3D) => {
+                obj.matrixAutoUpdate = true;
+                const meshObj = obj as THREE.Mesh;
+                if (!meshObj.isMesh) return;
+                meshObj.userData.transformRoot = plyMesh;
+              });
+              plyMesh.userData.transformRoot = true;
+              plyMesh.userData.sourceMeshId = mesh.id;
+              plyMesh.userData.sourceMeshKey = normalizeMeshUrlForDedup(mesh.url);
+              plyMesh.renderOrder = 0;
+              if (disposed || cancelled) {
+                disposeObjectTree(plyMesh);
+                continue;
+              }
+
+              const baseId = mesh.id || plyMesh.name || "mesh";
+              const usageCount = meshIdUsage.get(baseId) ?? 0;
+              meshIdUsage.set(baseId, usageCount + 1);
+              plyMesh.name = usageCount === 0 ? baseId : `${baseId}-${usageCount}`;
+
+              meshRootsRef.current.push(plyMesh);
+              alignmentRoot.add(plyMesh);
+              continue;
+            }
+
             const gltf = await loader.loadAsync(mesh.url);
             if (disposed || cancelled) {
               disposeObjectTree(gltf.scene);
