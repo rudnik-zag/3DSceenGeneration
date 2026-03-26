@@ -92,6 +92,13 @@ interface ViewerFileMenu {
   onResetViewer?: () => void;
 }
 
+interface ExternalSceneAddition {
+  id: string;
+  kind: string;
+  url: string;
+  filename?: string | null;
+}
+
 interface MeshTransformRecord {
   position: [number, number, number];
   rotation: [number, number, number, number];
@@ -109,12 +116,32 @@ interface MeshListItem {
   label: string;
 }
 
-type SceneObjectKind = "mesh" | "splat";
+type SelectableSceneObjectKind = "mesh" | "splat";
+type SceneObjectKind = SelectableSceneObjectKind | "group";
 
 interface SplatListItem {
   id: string;
   label: string;
   splatCount: number;
+}
+
+interface ActiveGroupMember {
+  key: string;
+  kind: SelectableSceneObjectKind;
+  id: string;
+  label: string;
+  object: THREE.Object3D;
+  baselineLocal: MeshTransformRecord;
+}
+
+interface ActiveObjectGroup {
+  id: string;
+  name: string;
+  members: ActiveGroupMember[];
+  initialTransform: MeshTransformRecord;
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+  scale: THREE.Vector3;
 }
 
 interface TransformDraft {
@@ -142,7 +169,7 @@ interface ObjectContextMenuState {
   x: number;
   y: number;
   itemId: string;
-  kind: SceneObjectKind;
+  kind: SelectableSceneObjectKind;
   label: string;
 }
 
@@ -641,6 +668,36 @@ function urlHasPlyExtension(url: string): boolean {
   }
 }
 
+function buildObjectItemKey(kind: SelectableSceneObjectKind, id: string) {
+  return `${kind}:${id}`;
+}
+
+function parseObjectItemKey(key: string): { kind: SelectableSceneObjectKind; id: string } | null {
+  const separatorIndex = key.indexOf(":");
+  if (separatorIndex < 0) return null;
+  const kindRaw = key.slice(0, separatorIndex);
+  const id = key.slice(separatorIndex + 1);
+  if (kindRaw !== "mesh" && kindRaw !== "splat") return null;
+  return { kind: kindRaw, id };
+}
+
+function computeUnionBoundsForObjects(objects: THREE.Object3D[]): THREE.Box3 | null {
+  const union = new THREE.Box3();
+  const current = new THREE.Box3();
+  let hasAny = false;
+  for (const object of objects) {
+    current.setFromObject(object);
+    if (current.isEmpty()) continue;
+    if (!hasAny) {
+      union.copy(current);
+      hasAny = true;
+    } else {
+      union.union(current);
+    }
+  }
+  return hasAny ? union : null;
+}
+
 async function getGaussianSplatsModule() {
   return import("@mkkellogg/gaussian-splats-3d");
 }
@@ -714,9 +771,11 @@ function disposeObjectTree(root: THREE.Object3D) {
 
 export function UnifiedWorldViewer({
   manifest,
+  externalSceneAdditions = [],
   fileMenu
 }: {
   manifest: WorldManifest;
+  externalSceneAdditions?: ExternalSceneAddition[];
   fileMenu?: ViewerFileMenu | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -741,6 +800,7 @@ export function UnifiedWorldViewer({
   const pausedRef = useRef(false);
   const navModeRef = useRef<NavigationMode>("orbit");
   const viewModeRef = useRef<ViewMode>("default");
+  const selectedKindRef = useRef<SceneObjectKind | null>(null);
   const modelviewerAutoRotateRef = useRef(false);
   const showGridRef = useRef(true);
   const gridRef = useRef<THREE.GridHelper | null>(null);
@@ -753,6 +813,10 @@ export function UnifiedWorldViewer({
   const autoAlignOnLoadRef = useRef(false);
   const groundAlignDebugGroupRef = useRef<THREE.Group | null>(null);
   const splatSupportSampleCacheRef = useRef<Map<string, THREE.Vector3[]>>(new Map());
+  const activeGroupRef = useRef<ActiveObjectGroup | null>(null);
+  const groupCounterRef = useRef(1);
+  const objectListSelectionAnchorRef = useRef<string | null>(null);
+  const loadedExternalAdditionIdsRef = useRef<Set<string>>(new Set());
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [viewMode, setViewMode] = useState<ViewMode>("default");
@@ -785,6 +849,18 @@ export function UnifiedWorldViewer({
   const [objectContextMenu, setObjectContextMenu] = useState<ObjectContextMenuState | null>(null);
   const [artifactContextMenu, setArtifactContextMenu] = useState<ArtifactContextMenuState | null>(null);
   const [groundAlignDebug, setGroundAlignDebug] = useState(false);
+  const [groupSelectionKeys, setGroupSelectionKeys] = useState<string[]>([]);
+  const [activeGroupMeta, setActiveGroupMeta] = useState<{
+    id: string;
+    name: string;
+    memberCount: number;
+  } | null>(null);
+  const [dragSelectionRect, setDragSelectionRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   const preferredRuntimeOrder = useMemo(
     () => getRuntimeOrderForPreference(getSplatRuntimePreference()),
@@ -819,6 +895,71 @@ export function UnifiedWorldViewer({
     [meshItems, splatItems]
   );
 
+  const groupSelectionSet = useMemo(() => new Set(groupSelectionKeys), [groupSelectionKeys]);
+  const orderedObjectKeys = useMemo(
+    () => objectItems.map((item) => buildObjectItemKey(item.kind, item.id)),
+    [objectItems]
+  );
+
+  const resolveObjectByKindAndId = useCallback(
+    (kind: SelectableSceneObjectKind, id: string): THREE.Object3D | null => {
+      if (kind === "mesh") {
+        return meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === id) ?? null;
+      }
+      return [...splatHandlesRef.current].find((entry) => entry.id === id)?.object ?? null;
+    },
+    []
+  );
+
+  const resolveObjectByKey = useCallback(
+    (key: string): ActiveGroupMember | null => {
+      const parsedKey = parseObjectItemKey(key);
+      if (!parsedKey) return null;
+      const { kind, id } = parsedKey;
+      const object = resolveObjectByKindAndId(kind, id);
+      if (!object) return null;
+      const item = objectItems.find((entry) => entry.kind === kind && entry.id === id);
+      return {
+        key,
+        kind,
+        id,
+        label: item?.label ?? object.name ?? id,
+        object,
+        baselineLocal: objectToTransformRecord(object)
+      };
+    },
+    [objectItems, resolveObjectByKindAndId]
+  );
+
+  const hasActiveSelection = Boolean(selectedKind);
+
+  const markedGroupMembers = useMemo(
+    () =>
+      groupSelectionKeys
+        .map((key) => resolveObjectByKey(key))
+        .filter((value): value is ActiveGroupMember => Boolean(value?.object?.parent)),
+    [groupSelectionKeys, resolveObjectByKey]
+  );
+
+  const canCreateGroup = markedGroupMembers.length >= 2;
+  const canSelectExistingGroup = Boolean(activeGroupMeta && activeGroupMeta.memberCount >= 2);
+  const canAutoAlignSelected = selectedKind === "mesh" || selectedKind === "splat";
+
+  const selectObjectRangeFromAnchor = useCallback(
+    (targetKey: string) => {
+      const targetIndex = orderedObjectKeys.indexOf(targetKey);
+      if (targetIndex < 0) return;
+      const anchorKey = objectListSelectionAnchorRef.current;
+      const anchorIndex = anchorKey ? orderedObjectKeys.indexOf(anchorKey) : -1;
+      const start = anchorIndex >= 0 ? Math.min(anchorIndex, targetIndex) : targetIndex;
+      const end = anchorIndex >= 0 ? Math.max(anchorIndex, targetIndex) : targetIndex;
+      const rangeKeys = orderedObjectKeys.slice(start, end + 1);
+      setGroupSelectionKeys((current) => [...new Set([...current, ...rangeKeys])]);
+      objectListSelectionAnchorRef.current = targetKey;
+    },
+    [orderedObjectKeys]
+  );
+
   const configuredRuntimeLabel = useMemo(() => {
     if (preferredRuntimeOrder.length === 0) return "legacy";
     return preferredRuntimeOrder.join(" -> ");
@@ -842,6 +983,10 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
+
+  useEffect(() => {
+    selectedKindRef.current = selectedKind;
+  }, [selectedKind]);
 
   useEffect(() => {
     modelviewerAutoRotateRef.current = modelviewerAutoRotate;
@@ -911,6 +1056,22 @@ export function UnifiedWorldViewer({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [artifactContextMenu]);
+
+  useEffect(() => {
+    setGroupSelectionKeys((current) =>
+      current.filter((key) => {
+        const member = resolveObjectByKey(key);
+        return Boolean(member?.object.parent);
+      })
+    );
+  }, [objectItems, resolveObjectByKey]);
+
+  useEffect(() => {
+    const anchor = objectListSelectionAnchorRef.current;
+    if (anchor && !orderedObjectKeys.includes(anchor)) {
+      objectListSelectionAnchorRef.current = null;
+    }
+  }, [orderedObjectKeys]);
 
   const updateHudFromHandles = useCallback(() => {
     let loadedSplats = 0;
@@ -983,6 +1144,46 @@ export function UnifiedWorldViewer({
       )}, ${object.position.z.toFixed(3)}) world=(${world.x.toFixed(3)}, ${world.y.toFixed(3)}, ${world.z.toFixed(3)})`
     );
   }, []);
+
+  const syncTransformDraftFromGroup = useCallback((group: ActiveObjectGroup | null) => {
+    if (!group) {
+      setTransformDraft(null);
+      setTransformDebug("No object selected");
+      return;
+    }
+    const rotationKey = group.id;
+    const previousEuler = rotationDisplayRef.current.get(rotationKey);
+    const stabilizedEuler = stabilizeEulerXYZForDisplay(group.quaternion, previousEuler);
+    rotationDisplayRef.current.set(rotationKey, stabilizedEuler);
+    const world = group.position
+      .clone()
+      .applyMatrix4(alignmentRootRef.current?.matrixWorld ?? new THREE.Matrix4());
+    setTransformDraft({
+      position: [
+        group.position.x.toFixed(3),
+        group.position.y.toFixed(3),
+        group.position.z.toFixed(3)
+      ],
+      rotation: [
+        THREE.MathUtils.radToDeg(stabilizedEuler[0]).toFixed(2),
+        THREE.MathUtils.radToDeg(stabilizedEuler[1]).toFixed(2),
+        THREE.MathUtils.radToDeg(stabilizedEuler[2]).toFixed(2)
+      ],
+      scale: [group.scale.x.toFixed(3), group.scale.y.toFixed(3), group.scale.z.toFixed(3)]
+    });
+    setTransformDebug(
+      `selected=${group.name} members=${group.members.length} local=(${group.position.x.toFixed(3)}, ${group.position.y.toFixed(3)}, ${group.position.z.toFixed(3)}) world=(${world.x.toFixed(3)}, ${world.y.toFixed(3)}, ${world.z.toFixed(3)})`
+    );
+  }, []);
+
+  const syncTransformDraftForCurrentSelection = useCallback(() => {
+    const currentKind = selectedKindRef.current;
+    if (currentKind === "group") {
+      syncTransformDraftFromGroup(activeGroupRef.current);
+      return;
+    }
+    syncTransformDraft(selectedRef.current);
+  }, [syncTransformDraft, syncTransformDraftFromGroup]);
 
   const serializeMeshTransforms = useCallback((): Record<string, MeshTransformRecord> => {
     const transforms: Record<string, MeshTransformRecord> = {};
@@ -1087,6 +1288,7 @@ export function UnifiedWorldViewer({
   const resolveSelectedAlignmentRoot = useCallback((): THREE.Object3D | null => {
     const alignmentRoot = alignmentRootRef.current;
     if (!alignmentRoot) return null;
+    if (selectedKindRef.current === "group") return alignmentRoot;
     const selected = selectedRef.current;
     if (!selected || selected === alignmentRoot) return alignmentRoot;
     let current: THREE.Object3D | null = selected;
@@ -1180,8 +1382,8 @@ export function UnifiedWorldViewer({
         groundAlignDebugGroupRef.current = result.debugGroup;
       }
 
-      if (selectedRef.current) {
-        syncTransformDraft(selectedRef.current);
+      if (selectedKindRef.current) {
+        syncTransformDraftForCurrentSelection();
       }
 
       const normalText = result.fittedNormal
@@ -1196,7 +1398,12 @@ export function UnifiedWorldViewer({
       }
       return true;
     },
-    [clearGroundAlignDebug, collectPlySupportPointsForTarget, schedulePersist, syncTransformDraft]
+    [
+      clearGroundAlignDebug,
+      collectPlySupportPointsForTarget,
+      schedulePersist,
+      syncTransformDraftForCurrentSelection
+    ]
   );
 
   const autoAlignSceneToGroundPlane = useCallback(
@@ -1218,15 +1425,20 @@ export function UnifiedWorldViewer({
     (persist = true) => {
       clearGroundAlignDebug();
       applyPersistedSceneAlignment(null);
-      if (selectedRef.current) {
-        syncTransformDraft(selectedRef.current);
+      if (selectedKindRef.current) {
+        syncTransformDraftForCurrentSelection();
       }
       setTransformDebug("sceneAlign reset -> identity transform");
       if (persist) {
         schedulePersist();
       }
     },
-    [applyPersistedSceneAlignment, clearGroundAlignDebug, schedulePersist, syncTransformDraft]
+    [
+      applyPersistedSceneAlignment,
+      clearGroundAlignDebug,
+      schedulePersist,
+      syncTransformDraftForCurrentSelection
+    ]
   );
 
   const queueAutoAlignScene = useCallback(
@@ -1288,71 +1500,182 @@ export function UnifiedWorldViewer({
     selectedBoxRef.current = null;
   }, []);
 
-  const setSelectedObject = useCallback((object: THREE.Object3D | null, kind: SceneObjectKind | null = null) => {
-    selectedRef.current = object;
-    const splatHandle = object
-      ? [...splatHandlesRef.current].find((handle) => handle.object === object) ?? null
-      : null;
-    const resolvedKind: SceneObjectKind | null = object
-      ? kind ??
-        (meshRootsRef.current.includes(object)
-          ? "mesh"
-          : splatHandle
-            ? "splat"
-            : null)
-      : null;
-    setSelectedKind(resolvedKind);
-    setSelectedName(
-      object
-        ? resolvedKind === "splat"
-          ? (splatHandle?.id ?? object.name ?? object.uuid)
-          : object.name || object.uuid
-        : null
-    );
-    const scene = sceneRef.current;
-    clearSelectedHelper();
-    const attachMeshSelectionBox = (target: THREE.Object3D) => {
+  const styleSelectionHelperMaterial = useCallback((material: THREE.Material) => {
+    material.depthTest = false;
+    material.depthWrite = false;
+    material.transparent = true;
+    material.opacity = 0.95;
+  }, []);
+
+  const attachMeshSelectionBox = useCallback(
+    (target: THREE.Object3D) => {
+      const scene = sceneRef.current;
       target.updateMatrixWorld(true);
       const box = new THREE.BoxHelper(target, 0x34d399);
       box.renderOrder = 9998;
-      const boxMaterial = box.material as THREE.Material;
-      boxMaterial.depthTest = false;
-      boxMaterial.depthWrite = false;
-      boxMaterial.transparent = true;
-      boxMaterial.opacity = 0.95;
+      styleSelectionHelperMaterial(box.material as THREE.Material);
       if (scene) scene.add(box);
       selectedBoxRef.current = box;
-    };
-    const attachSplatSelectionBox = (target: THREE.Object3D, bounds?: THREE.Box3) => {
+    },
+    [styleSelectionHelperMaterial]
+  );
+
+  const attachSplatSelectionBox = useCallback(
+    (target: THREE.Object3D, bounds?: THREE.Box3) => {
+      const scene = sceneRef.current;
       target.updateMatrixWorld(true);
       const box = bounds?.clone().applyMatrix4(target.matrixWorld) ?? new THREE.Box3().setFromObject(target);
       if (box.isEmpty()) return;
       const helper = new THREE.Box3Helper(box, 0x34d399);
       helper.renderOrder = 9998;
-      const helperMaterial = helper.material as THREE.Material;
-      helperMaterial.depthTest = false;
-      helperMaterial.depthWrite = false;
-      helperMaterial.transparent = true;
-      helperMaterial.opacity = 0.95;
+      styleSelectionHelperMaterial(helper.material as THREE.Material);
       if (scene) scene.add(helper);
       selectedBoxRef.current = helper;
-    };
-    if (object && resolvedKind === "mesh") {
-      object.traverse((node: THREE.Object3D) => {
-        node.matrixAutoUpdate = true;
+    },
+    [styleSelectionHelperMaterial]
+  );
+
+  const attachGroupSelectionBox = useCallback(
+    (group: ActiveObjectGroup | null) => {
+      if (!group || group.members.length === 0) return;
+      const scene = sceneRef.current;
+      const box = computeUnionBoundsForObjects(group.members.map((entry) => entry.object));
+      if (!box || box.isEmpty()) return;
+      const helper = new THREE.Box3Helper(box, 0x34d399);
+      helper.renderOrder = 9998;
+      styleSelectionHelperMaterial(helper.material as THREE.Material);
+      if (scene) scene.add(helper);
+      selectedBoxRef.current = helper;
+    },
+    [styleSelectionHelperMaterial]
+  );
+
+  const setSelectedGroup = useCallback(
+    (group: ActiveObjectGroup | null) => {
+      clearSelectedHelper();
+      if (!group) {
+        selectedRef.current = null;
+        setSelectedKind(null);
+        setSelectedName(null);
+        setTransformDraft(null);
+        setTransformDebug("No object selected");
+        return;
+      }
+
+      selectedRef.current = group.members[0]?.object ?? null;
+      setSelectedKind("group");
+      setSelectedName(group.id);
+      attachGroupSelectionBox(group);
+      syncTransformDraftFromGroup(group);
+    },
+    [attachGroupSelectionBox, clearSelectedHelper, syncTransformDraftFromGroup]
+  );
+
+  const setSelectedObject = useCallback(
+    (object: THREE.Object3D | null, kind: SelectableSceneObjectKind | null = null) => {
+      selectedRef.current = object;
+      const splatHandle = object
+        ? [...splatHandlesRef.current].find((handle) => handle.object === object) ?? null
+        : null;
+      const resolvedKind: SelectableSceneObjectKind | null = object
+        ? kind ??
+          (meshRootsRef.current.includes(object)
+            ? "mesh"
+            : splatHandle
+              ? "splat"
+              : null)
+        : null;
+      setSelectedKind(resolvedKind);
+      setSelectedName(
+        object
+          ? resolvedKind === "splat"
+            ? (splatHandle?.id ?? object.name ?? object.uuid)
+            : object.name || object.uuid
+          : null
+      );
+
+      clearSelectedHelper();
+      if (object && resolvedKind === "mesh") {
+        object.traverse((node: THREE.Object3D) => {
+          node.matrixAutoUpdate = true;
+        });
+        attachMeshSelectionBox(object);
+        syncTransformDraft(object);
+        return;
+      }
+      if (object && resolvedKind === "splat") {
+        attachSplatSelectionBox(object, splatHandle?.bounds);
+        syncTransformDraft(object);
+        return;
+      }
+      setTransformDraft(null);
+      setTransformDebug("No object selected");
+    },
+    [attachMeshSelectionBox, attachSplatSelectionBox, clearSelectedHelper, syncTransformDraft]
+  );
+
+  const applyMarkedSelectionKeys = useCallback(
+    (keys: string[]) => {
+      const normalized = [...new Set(keys)].filter((key) => {
+        const parsed = parseObjectItemKey(key);
+        if (!parsed) return false;
+        return Boolean(resolveObjectByKindAndId(parsed.kind, parsed.id)?.parent);
       });
-      attachMeshSelectionBox(object);
-      syncTransformDraft(object);
-      return;
-    }
-    if (object && resolvedKind === "splat") {
-      attachSplatSelectionBox(object, splatHandle?.bounds);
-      syncTransformDraft(object);
-      return;
-    }
-    setTransformDraft(null);
-    setTransformDebug("No object selected");
-  }, [clearSelectedHelper, syncTransformDraft]);
+      setGroupSelectionKeys(normalized);
+      if (normalized.length === 1) {
+        const parsed = parseObjectItemKey(normalized[0]);
+        if (!parsed) return;
+        const object = resolveObjectByKindAndId(parsed.kind, parsed.id);
+        if (object) {
+          setSelectedObject(object, parsed.kind);
+        }
+        return;
+      }
+      if (normalized.length > 1) {
+        setSelectedGroup(null);
+        setTransformDebug(`selected ${normalized.length} objects`);
+      }
+    },
+    [resolveObjectByKindAndId, setSelectedGroup, setSelectedObject]
+  );
+
+  const removeObjectFromActiveGroup = useCallback(
+    (kind: SelectableSceneObjectKind, id: string) => {
+      const group = activeGroupRef.current;
+      if (!group) return;
+      const key = buildObjectItemKey(kind, id);
+      if (!group.members.some((member) => member.key === key)) return;
+
+      group.members = group.members.filter((member) => member.key !== key);
+      setGroupSelectionKeys((current) => current.filter((entry) => entry !== key));
+
+      if (group.members.length < 2) {
+        const fallback = group.members[0] ?? null;
+        activeGroupRef.current = null;
+        setActiveGroupMeta(null);
+        rotationDisplayRef.current.delete(group.id);
+        if (selectedKind === "group") {
+          if (fallback) {
+            setSelectedObject(fallback.object, fallback.kind);
+          } else {
+            setSelectedObject(null);
+          }
+        }
+        setTransformDebug("Group dissolved: fewer than two objects remain.");
+        return;
+      }
+
+      setActiveGroupMeta({
+        id: group.id,
+        name: group.name,
+        memberCount: group.members.length
+      });
+      if (selectedKind === "group") {
+        setSelectedGroup(group);
+      }
+    },
+    [selectedKind, setSelectedGroup, setSelectedObject]
+  );
 
   const removeMeshFromScene = useCallback(
     (meshId: string) => {
@@ -1368,15 +1691,19 @@ export function UnifiedWorldViewer({
 
       const [target] = meshRootsRef.current.splice(targetIndex, 1);
       target.parent?.remove(target);
+      removeObjectFromActiveGroup("mesh", target.name || target.uuid);
       if (selectedRef.current === target) {
         setSelectedObject(null);
       }
       rotationDisplayRef.current.delete(target.uuid);
+      setGroupSelectionKeys((current) =>
+        current.filter((entry) => entry !== buildObjectItemKey("mesh", target.name || target.uuid))
+      );
       disposeObjectTree(target);
       refreshMeshItems();
       setTransformDebug(`removed mesh=${meshId}`);
     },
-    [refreshMeshItems, setSelectedObject]
+    [refreshMeshItems, removeObjectFromActiveGroup, setSelectedObject]
   );
 
   const removeSplatFromScene = useCallback(
@@ -1390,9 +1717,13 @@ export function UnifiedWorldViewer({
         if (handle.sourceKey !== sourceKey) continue;
         splatHandlesRef.current.delete(handle);
         handle.object.parent?.remove(handle.object);
+        removeObjectFromActiveGroup("splat", handle.id);
         if (selectedRef.current === handle.object) {
           setSelectedObject(null);
         }
+        setGroupSelectionKeys((current) =>
+          current.filter((entry) => entry !== buildObjectItemKey("splat", handle.id))
+        );
         handle.dispose?.();
         removedAny = true;
       }
@@ -1402,11 +1733,11 @@ export function UnifiedWorldViewer({
       updateHudFromHandles();
       setTransformDebug(`removed splat=${sourceKey}`);
     },
-    [refreshSplatItems, setSelectedObject, updateHudFromHandles]
+    [refreshSplatItems, removeObjectFromActiveGroup, setSelectedObject, updateHudFromHandles]
   );
 
   const selectObjectItem = useCallback(
-    (kind: SceneObjectKind, itemId: string) => {
+    (kind: SelectableSceneObjectKind, itemId: string) => {
       if (kind === "mesh") {
         const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === itemId) ?? null;
         setSelectedObject(target, "mesh");
@@ -1419,7 +1750,7 @@ export function UnifiedWorldViewer({
   );
 
   const removeObjectItem = useCallback(
-    (kind: SceneObjectKind, itemId: string) => {
+    (kind: SelectableSceneObjectKind, itemId: string) => {
       if (kind === "mesh") {
         const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === itemId) ?? null;
         const sourceMeshId = (target?.userData?.sourceMeshId as string | undefined) ?? itemId;
@@ -1433,6 +1764,98 @@ export function UnifiedWorldViewer({
       setObjectContextMenu(null);
     },
     [removeMeshFromScene, removeSplatFromScene]
+  );
+
+  const toggleObjectMarkedForGroup = useCallback((kind: SelectableSceneObjectKind, itemId: string) => {
+    const key = buildObjectItemKey(kind, itemId);
+    objectListSelectionAnchorRef.current = key;
+    setGroupSelectionKeys((current) => (current.includes(key) ? current.filter((entry) => entry !== key) : [...current, key]));
+  }, []);
+
+  const clearMarkedGroupSelection = useCallback(() => {
+    objectListSelectionAnchorRef.current = null;
+    setGroupSelectionKeys([]);
+  }, []);
+
+  const createGroupFromMarkedSelection = useCallback(() => {
+    const members = groupSelectionKeys
+      .map((key) => resolveObjectByKey(key))
+      .filter((value): value is ActiveGroupMember => Boolean(value?.object?.parent));
+    const unique = new Map<string, ActiveGroupMember>();
+    members.forEach((entry) => unique.set(entry.key, entry));
+    const nextMembers = [...unique.values()];
+    if (nextMembers.length < 2) {
+      setTransformDebug("Select at least 2 objects to create a group.");
+      return;
+    }
+
+    const bounds = computeUnionBoundsForObjects(nextMembers.map((entry) => entry.object));
+    if (!bounds || bounds.isEmpty()) {
+      setTransformDebug("Unable to compute group bounds.");
+      return;
+    }
+
+    const centerWorld = bounds.getCenter(new THREE.Vector3());
+    const alignmentRoot = alignmentRootRef.current;
+    const centerLocal = alignmentRoot ? alignmentRoot.worldToLocal(centerWorld.clone()) : centerWorld.clone();
+    const nextIndex = groupCounterRef.current;
+    groupCounterRef.current += 1;
+    const id = `group-${nextIndex}`;
+    const name = `Group ${nextIndex}`;
+    const group: ActiveObjectGroup = {
+      id,
+      name,
+      members: nextMembers.map((member) => ({
+        ...member,
+        baselineLocal: objectToTransformRecord(member.object)
+      })),
+      initialTransform: {
+        position: [centerLocal.x, centerLocal.y, centerLocal.z],
+        rotation: [0, 0, 0, 1],
+        scale: [1, 1, 1]
+      },
+      position: centerLocal.clone(),
+      quaternion: new THREE.Quaternion(),
+      scale: new THREE.Vector3(1, 1, 1)
+    };
+
+    activeGroupRef.current = group;
+    setActiveGroupMeta({
+      id: group.id,
+      name: group.name,
+      memberCount: group.members.length
+    });
+    rotationDisplayRef.current.delete(group.id);
+    setSelectedGroup(group);
+  }, [groupSelectionKeys, resolveObjectByKey, setSelectedGroup]);
+
+  const selectActiveGroup = useCallback(() => {
+    const group = activeGroupRef.current;
+    if (!group) return;
+    setSelectedGroup(group);
+  }, [setSelectedGroup]);
+
+  const ungroupActiveSelection = useCallback(
+    (clearMarks = false) => {
+      const group = activeGroupRef.current;
+      if (!group) return;
+      const fallback = group.members[0] ?? null;
+      activeGroupRef.current = null;
+      setActiveGroupMeta(null);
+      rotationDisplayRef.current.delete(group.id);
+      if (clearMarks) {
+        setGroupSelectionKeys([]);
+      }
+      if (selectedKind === "group") {
+        if (fallback) {
+          setSelectedObject(fallback.object, fallback.kind);
+        } else {
+          setSelectedObject(null);
+        }
+      }
+      setTransformDebug(`Ungrouped ${group.members.length} objects.`);
+    },
+    [selectedKind, setSelectedObject]
   );
 
   const updateTransformDraftValue = useCallback(
@@ -1452,6 +1875,7 @@ export function UnifiedWorldViewer({
   );
 
   const resolveSelectedObject = useCallback((): THREE.Object3D | null => {
+    if (selectedKind === "group") return null;
     const selectedId = selectedName;
     if (selectedId && selectedKind === "mesh") {
       return meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === selectedId) ?? selectedRef.current;
@@ -1474,15 +1898,100 @@ export function UnifiedWorldViewer({
     helper.updateMatrixWorld(true);
   }, [selectedKind, selectedName]);
 
+  const syncLiveGroupSelectionBox = useCallback(() => {
+    if (selectedKind !== "group") return;
+    const helper = selectedBoxRef.current;
+    if (!(helper instanceof THREE.Box3Helper)) return;
+    const group = activeGroupRef.current;
+    if (!group || group.members.length === 0) return;
+    const box = computeUnionBoundsForObjects(group.members.map((member) => member.object));
+    if (!box || box.isEmpty()) return;
+    helper.box.copy(box);
+    helper.updateMatrixWorld(true);
+  }, [selectedKind]);
+
   const applyTransformFromDraft = useCallback(
     (draft: TransformDraft, commit: boolean) => {
-      const object = resolveSelectedObject();
-      if (!object) return false;
-
       const read = (value: string, fallback: number) => {
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : fallback;
       };
+
+      if (selectedKind === "group") {
+        const group = activeGroupRef.current;
+        if (!group) return false;
+
+        const currentEuler =
+          rotationDisplayRef.current.get(group.id) ?? stabilizeEulerXYZForDisplay(group.quaternion, undefined);
+        const px = read(draft.position[0], group.position.x);
+        const py = read(draft.position[1], group.position.y);
+        const pz = read(draft.position[2], group.position.z);
+        const rx = read(draft.rotation[0], THREE.MathUtils.radToDeg(currentEuler[0]));
+        const ry = read(draft.rotation[1], THREE.MathUtils.radToDeg(currentEuler[1]));
+        const rz = read(draft.rotation[2], THREE.MathUtils.radToDeg(currentEuler[2]));
+        const sx = read(draft.scale[0], group.scale.x);
+        const sy = read(draft.scale[1], group.scale.y);
+        const sz = read(draft.scale[2], group.scale.z);
+
+        const rxRad = THREE.MathUtils.degToRad(rx);
+        const ryRad = THREE.MathUtils.degToRad(ry);
+        const rzRad = THREE.MathUtils.degToRad(rz);
+        const nextQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(rxRad, ryRad, rzRad, "XYZ"));
+
+        const previousMatrix = new THREE.Matrix4().compose(group.position, group.quaternion, group.scale);
+        const nextMatrix = new THREE.Matrix4().compose(
+          new THREE.Vector3(px, py, pz),
+          nextQuaternion,
+          new THREE.Vector3(sx, sy, sz)
+        );
+        const deltaMatrix = new THREE.Matrix4().multiplyMatrices(
+          nextMatrix,
+          new THREE.Matrix4().copy(previousMatrix).invert()
+        );
+
+        for (const member of group.members) {
+          const object = member.object;
+          const parent = object.parent;
+          if (!parent) continue;
+          object.updateMatrixWorld(true);
+          parent.updateMatrixWorld(true);
+          const oldWorld = object.matrixWorld.clone();
+          const newWorld = oldWorld.clone().premultiply(deltaMatrix);
+          const localMatrix = new THREE.Matrix4().multiplyMatrices(
+            new THREE.Matrix4().copy(parent.matrixWorld).invert(),
+            newWorld
+          );
+          const nextPosition = new THREE.Vector3();
+          const nextQuaternionMember = new THREE.Quaternion();
+          const nextScale = new THREE.Vector3();
+          localMatrix.decompose(nextPosition, nextQuaternionMember, nextScale);
+          object.position.copy(nextPosition);
+          object.quaternion.copy(nextQuaternionMember);
+          object.scale.copy(nextScale);
+          object.updateMatrixWorld(true);
+          rotationDisplayRef.current.delete(object.uuid);
+        }
+
+        group.position.set(px, py, pz);
+        group.quaternion.copy(nextQuaternion);
+        group.scale.set(sx, sy, sz);
+        sceneRef.current?.updateMatrixWorld(true);
+        rotationDisplayRef.current.set(group.id, [rxRad, ryRad, rzRad]);
+
+        if (commit) {
+          schedulePersist();
+          setTransformDebug(
+            `apply group=${group.name} members=${group.members.length} pos=(${px.toFixed(3)},${py.toFixed(3)},${pz.toFixed(3)})`
+          );
+          setSelectedGroup(group);
+        } else {
+          syncLiveGroupSelectionBox();
+        }
+        return true;
+      }
+
+      const object = resolveSelectedObject();
+      if (!object) return false;
 
       const px = read(draft.position[0], object.position.x);
       const py = read(draft.position[1], object.position.y);
@@ -1512,13 +2021,23 @@ export function UnifiedWorldViewer({
       if (commit) {
         schedulePersist();
         setTransformDebug(`apply id=${object.name || object.uuid} pos=(${px.toFixed(3)},${py.toFixed(3)},${pz.toFixed(3)})`);
-        setSelectedObject(object, selectedKind);
+        const resolvedKind: SelectableSceneObjectKind | null =
+          selectedKind === "mesh" || selectedKind === "splat" ? selectedKind : null;
+        setSelectedObject(object, resolvedKind);
       } else {
         syncLiveSplatSelectionBox();
       }
       return true;
     },
-    [resolveSelectedObject, schedulePersist, selectedKind, setSelectedObject, syncLiveSplatSelectionBox]
+    [
+      resolveSelectedObject,
+      schedulePersist,
+      selectedKind,
+      setSelectedGroup,
+      setSelectedObject,
+      syncLiveGroupSelectionBox,
+      syncLiveSplatSelectionBox
+    ]
   );
 
   const nudgeTransformDraftValue = useCallback(
@@ -1554,6 +2073,26 @@ export function UnifiedWorldViewer({
   }, [applyTransformFromDraft, transformDraft]);
 
   const resetSelectedTransform = useCallback(() => {
+    if (selectedKind === "group") {
+      const group = activeGroupRef.current;
+      if (!group) return;
+      for (const member of group.members) {
+        applyTransformRecord(member.object, member.baselineLocal);
+      }
+      const [px, py, pz] = group.initialTransform.position;
+      const [qx, qy, qz, qw] = group.initialTransform.rotation;
+      const [sx, sy, sz] = group.initialTransform.scale;
+      group.position.set(px, py, pz);
+      group.quaternion.set(qx, qy, qz, qw);
+      group.scale.set(sx, sy, sz);
+      sceneRef.current?.updateMatrixWorld(true);
+      rotationDisplayRef.current.set(group.id, [0, 0, 0]);
+      schedulePersist();
+      setTransformDebug(`reset group=${group.name} -> grouped baseline`);
+      setSelectedGroup(group);
+      return;
+    }
+
     const selectedId = selectedName;
     let object: THREE.Object3D | null = null;
     if (selectedId && selectedKind === "mesh") {
@@ -1573,10 +2112,35 @@ export function UnifiedWorldViewer({
 
     schedulePersist();
     setTransformDebug(`reset id=${object.name || object.uuid} -> identity transform`);
-    setSelectedObject(object, selectedKind);
-  }, [schedulePersist, selectedKind, selectedName, setSelectedObject]);
+    const resolvedKind: SelectableSceneObjectKind | null =
+      selectedKind === "mesh" || selectedKind === "splat" ? selectedKind : null;
+    setSelectedObject(object, resolvedKind);
+  }, [schedulePersist, selectedKind, selectedName, setSelectedGroup, setSelectedObject]);
 
   const applySelectedAxisCorrection = useCallback(() => {
+    if (selectedKind === "group") {
+      const group = activeGroupRef.current;
+      if (!group) return;
+      const currentEuler =
+        rotationDisplayRef.current.get(group.id) ?? stabilizeEulerXYZForDisplay(group.quaternion, undefined);
+      const nextDraft: TransformDraft = {
+        position: [
+          group.position.x.toFixed(3),
+          group.position.y.toFixed(3),
+          group.position.z.toFixed(3)
+        ],
+        rotation: [
+          THREE.MathUtils.radToDeg(currentEuler[0] - Math.PI / 2).toFixed(2),
+          THREE.MathUtils.radToDeg(currentEuler[1]).toFixed(2),
+          THREE.MathUtils.radToDeg(currentEuler[2] - Math.PI / 2).toFixed(2)
+        ],
+        scale: [group.scale.x.toFixed(3), group.scale.y.toFixed(3), group.scale.z.toFixed(3)]
+      };
+      applyTransformFromDraft(nextDraft, true);
+      setTransformDebug(`axis-correct group=${group.name} rotX=-90 rotZ=-90`);
+      return;
+    }
+
     const object = resolveSelectedObject();
     if (!object) return;
 
@@ -1588,8 +2152,10 @@ export function UnifiedWorldViewer({
 
     schedulePersist();
     setTransformDebug(`axis-correct id=${object.name || object.uuid} rotX=-90 rotZ=-90`);
-    setSelectedObject(object, selectedKind);
-  }, [resolveSelectedObject, schedulePersist, selectedKind, setSelectedObject]);
+    const resolvedKind: SelectableSceneObjectKind | null =
+      selectedKind === "mesh" || selectedKind === "splat" ? selectedKind : null;
+    setSelectedObject(object, resolvedKind);
+  }, [applyTransformFromDraft, resolveSelectedObject, schedulePersist, selectedKind, setSelectedObject]);
 
   const fitScene = useCallback(() => {
     const root = alignmentRootRef.current ?? rootRef.current;
@@ -1675,13 +2241,21 @@ export function UnifiedWorldViewer({
   }, [applyViewModeProfile, manifest.camera]);
 
   const fitSelection = useCallback(() => {
-    const selected = selectedRef.current;
     const camera = cameraRef.current;
     const orbit = orbitRef.current;
-    if (!selected || !camera || !orbit) return;
+    if (!camera || !orbit) return;
 
-    const box = new THREE.Box3().setFromObject(selected);
-    if (box.isEmpty()) return;
+    let box: THREE.Box3 | null = null;
+    if (selectedKind === "group") {
+      const group = activeGroupRef.current;
+      if (!group || group.members.length === 0) return;
+      box = computeUnionBoundsForObjects(group.members.map((member) => member.object));
+    } else {
+      const selected = selectedRef.current;
+      if (!selected) return;
+      box = new THREE.Box3().setFromObject(selected);
+    }
+    if (!box || box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 0.5);
@@ -1689,7 +2263,7 @@ export function UnifiedWorldViewer({
     camera.position.copy(center.clone().add(new THREE.Vector3(distance, distance * 0.6, distance)));
     orbit.target.copy(center);
     orbit.update();
-  }, []);
+  }, [selectedKind]);
 
   const captureScreenshot = useCallback(() => {
     const renderer = rendererRef.current;
@@ -1717,6 +2291,13 @@ export function UnifiedWorldViewer({
     setSplatItems([]);
     setActiveSplatRuntimes([]);
     setRuntimeNotice(null);
+    activeGroupRef.current = null;
+    setActiveGroupMeta(null);
+    objectListSelectionAnchorRef.current = null;
+    loadedExternalAdditionIdsRef.current.clear();
+    setGroupSelectionKeys([]);
+    setDragSelectionRect(null);
+    rotationDisplayRef.current.clear();
     setSelectedObject(null);
     splatSupportSampleCacheRef.current.clear();
 
@@ -1780,7 +2361,9 @@ export function UnifiedWorldViewer({
     const onKeyDown = (event: KeyboardEvent) => {
       keysRef.current.add(event.code);
       if (event.code === "Delete" || event.code === "Backspace") {
-        if (selectedRef.current) {
+        if (activeGroupRef.current && selectedKindRef.current === "group") {
+          setSelectedGroup(null);
+        } else if (selectedRef.current) {
           setSelectedObject(null);
         }
       }
@@ -1797,6 +2380,142 @@ export function UnifiedWorldViewer({
     let flyLookLastY = 0;
     let flyLookYaw = 0;
     let flyLookPitch = 0;
+    let isRectSelecting = false;
+    let rectSelectPointerId: number | null = null;
+    let rectSelectStartX = 0;
+    let rectSelectStartY = 0;
+    let rectSelectCurrentX = 0;
+    let rectSelectCurrentY = 0;
+    let orbitWasEnabledBeforeRect = true;
+
+    const isDescendantOf = (object: THREE.Object3D, ancestor: THREE.Object3D) => {
+      let current: THREE.Object3D | null = object;
+      while (current) {
+        if (current === ancestor) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+
+    const buildRectFromClientPoints = (startX: number, startY: number, endX: number, endY: number) => {
+      const canvasRect = rendererRef.current?.domElement.getBoundingClientRect();
+      if (!canvasRect) return null;
+      const x1 = startX - canvasRect.left;
+      const y1 = startY - canvasRect.top;
+      const x2 = endX - canvasRect.left;
+      const y2 = endY - canvasRect.top;
+      return {
+        x: Math.min(x1, x2),
+        y: Math.min(y1, y2),
+        width: Math.abs(x2 - x1),
+        height: Math.abs(y2 - y1)
+      };
+    };
+
+    const findObjectAtClientPoint = (
+      clientX: number,
+      clientY: number
+    ): { kind: SelectableSceneObjectKind; id: string; object: THREE.Object3D } | null => {
+      if (!rendererRef.current || !cameraRef.current) return null;
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, cameraRef.current);
+
+      const roots = [
+        ...meshRootsRef.current,
+        ...[...splatHandlesRef.current].map((entry) => entry.object)
+      ];
+      const intersections = raycaster.intersectObjects(roots, true);
+      if (intersections.length === 0) return null;
+      const hit = intersections[0]?.object;
+      if (!hit) return null;
+
+      let meshCurrent: THREE.Object3D | null = hit;
+      while (meshCurrent) {
+        if (meshRootsRef.current.includes(meshCurrent)) {
+          const id = meshCurrent.name || meshCurrent.uuid;
+          return { kind: "mesh", id, object: meshCurrent };
+        }
+        meshCurrent = meshCurrent.parent;
+      }
+
+      for (const handle of splatHandlesRef.current) {
+        if (isDescendantOf(hit, handle.object)) {
+          return { kind: "splat", id: handle.id, object: handle.object };
+        }
+      }
+      return null;
+    };
+
+    const selectObjectsInsideRect = (rect: { x: number; y: number; width: number; height: number }) => {
+      const camera = cameraRef.current;
+      const renderer = rendererRef.current;
+      if (!camera || !renderer) return;
+      const width = renderer.domElement.clientWidth;
+      const height = renderer.domElement.clientHeight;
+      if (width <= 0 || height <= 0) return;
+
+      const cornersForBox = (box: THREE.Box3) => {
+        const { min, max } = box;
+        return [
+          new THREE.Vector3(min.x, min.y, min.z),
+          new THREE.Vector3(min.x, min.y, max.z),
+          new THREE.Vector3(min.x, max.y, min.z),
+          new THREE.Vector3(min.x, max.y, max.z),
+          new THREE.Vector3(max.x, min.y, min.z),
+          new THREE.Vector3(max.x, min.y, max.z),
+          new THREE.Vector3(max.x, max.y, min.z),
+          new THREE.Vector3(max.x, max.y, max.z)
+        ];
+      };
+
+      const intersectsSelectionRect = (box: THREE.Box3) => {
+        if (box.isEmpty()) return false;
+        let minX = Number.POSITIVE_INFINITY;
+        let minY = Number.POSITIVE_INFINITY;
+        let maxX = Number.NEGATIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+        for (const corner of cornersForBox(box)) {
+          const projected = corner.project(camera);
+          if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) continue;
+          const sx = (projected.x * 0.5 + 0.5) * width;
+          const sy = (-projected.y * 0.5 + 0.5) * height;
+          if (sx < minX) minX = sx;
+          if (sy < minY) minY = sy;
+          if (sx > maxX) maxX = sx;
+          if (sy > maxY) maxY = sy;
+        }
+        if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+          return false;
+        }
+        return (
+          maxX >= rect.x &&
+          minX <= rect.x + rect.width &&
+          maxY >= rect.y &&
+          minY <= rect.y + rect.height
+        );
+      };
+
+      const selectedKeys: string[] = [];
+      for (const meshRoot of meshRootsRef.current) {
+        const bounds = new THREE.Box3().setFromObject(meshRoot);
+        if (!intersectsSelectionRect(bounds)) continue;
+        selectedKeys.push(buildObjectItemKey("mesh", meshRoot.name || meshRoot.uuid));
+      }
+      for (const handle of splatHandlesRef.current) {
+        handle.object.updateMatrixWorld(true);
+        const bounds = handle.bounds
+          ? handle.bounds.clone().applyMatrix4(handle.object.matrixWorld)
+          : new THREE.Box3().setFromObject(handle.object);
+        if (!intersectsSelectionRect(bounds)) continue;
+        selectedKeys.push(buildObjectItemKey("splat", handle.id));
+      }
+      applyMarkedSelectionKeys(selectedKeys);
+      if (selectedKeys.length === 0) {
+        setTransformDebug("selected 0 objects");
+      }
+    };
 
     const beginFlyMouseLook = (event: PointerEvent) => {
       if (!cameraRef.current || !rendererRef.current) return;
@@ -1850,49 +2569,107 @@ export function UnifiedWorldViewer({
         event.preventDefault();
         return;
       }
+      if (event.button === 0 && event.shiftKey && navModeRef.current !== "fly") {
+        isRectSelecting = true;
+        rectSelectPointerId = event.pointerId;
+        rectSelectStartX = event.clientX;
+        rectSelectStartY = event.clientY;
+        rectSelectCurrentX = event.clientX;
+        rectSelectCurrentY = event.clientY;
+        orbitWasEnabledBeforeRect = orbit.enabled;
+        orbit.enabled = false;
+        const nextRect = buildRectFromClientPoints(
+          rectSelectStartX,
+          rectSelectStartY,
+          rectSelectCurrentX,
+          rectSelectCurrentY
+        );
+        setDragSelectionRect(nextRect);
+        rendererRef.current.domElement.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (event.button !== 0) return;
-      const rect = rendererRef.current.domElement.getBoundingClientRect();
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(pointer, cameraRef.current);
-
-      const intersections = raycaster.intersectObjects(meshRootsRef.current, true);
-      if (intersections.length === 0) {
-        return;
-      }
-
-      const hit = intersections[0]?.object;
-      if (!hit) {
-        return;
-      }
-
-      let current: THREE.Object3D | null = hit;
-      let selected: THREE.Object3D | null = hit;
-      while (current) {
-        if (meshRootsRef.current.includes(current)) {
-          selected = current;
-          break;
-        }
-        current = current.parent;
-      }
-      setSelectedObject(selected, "mesh");
+      const hitItem = findObjectAtClientPoint(event.clientX, event.clientY);
+      if (!hitItem) return;
+      setSelectedObject(hitItem.object, hitItem.kind);
+      objectListSelectionAnchorRef.current = buildObjectItemKey(hitItem.kind, hitItem.id);
     };
     const onPointerMove = (event: PointerEvent) => {
+      if (isRectSelecting) {
+        if (rectSelectPointerId !== null && event.pointerId !== rectSelectPointerId) return;
+        rectSelectCurrentX = event.clientX;
+        rectSelectCurrentY = event.clientY;
+        const nextRect = buildRectFromClientPoints(
+          rectSelectStartX,
+          rectSelectStartY,
+          rectSelectCurrentX,
+          rectSelectCurrentY
+        );
+        setDragSelectionRect(nextRect);
+        event.preventDefault();
+        return;
+      }
       if (navModeRef.current !== "fly") return;
       updateFlyMouseLook(event);
     };
     const onPointerUp = (event: PointerEvent) => {
+      if (isRectSelecting) {
+        if (rectSelectPointerId !== null && event.pointerId !== rectSelectPointerId) return;
+        const activePointerId = rectSelectPointerId;
+        isRectSelecting = false;
+        rectSelectPointerId = null;
+        if (activePointerId !== null && rendererRef.current) {
+          rendererRef.current.domElement.releasePointerCapture?.(activePointerId);
+        }
+        orbit.enabled = orbitWasEnabledBeforeRect && navModeRef.current === "orbit";
+        const finalRect = buildRectFromClientPoints(
+          rectSelectStartX,
+          rectSelectStartY,
+          rectSelectCurrentX,
+          rectSelectCurrentY
+        );
+        setDragSelectionRect(null);
+        if (finalRect) {
+          const isClickLike = finalRect.width < 4 && finalRect.height < 4;
+          if (isClickLike) {
+            const hitItem = findObjectAtClientPoint(event.clientX, event.clientY);
+            if (hitItem) {
+              const key = buildObjectItemKey(hitItem.kind, hitItem.id);
+              objectListSelectionAnchorRef.current = key;
+              setGroupSelectionKeys((current) =>
+                current.includes(key) ? current.filter((entry) => entry !== key) : [...current, key]
+              );
+              setSelectedObject(hitItem.object, hitItem.kind);
+            }
+          } else {
+            selectObjectsInsideRect(finalRect);
+          }
+        }
+        event.preventDefault();
+        return;
+      }
       if (navModeRef.current !== "fly") return;
       endFlyMouseLook(event);
     };
     const onPointerCancel = () => {
+      if (isRectSelecting) {
+        const activePointerId = rectSelectPointerId;
+        isRectSelecting = false;
+        rectSelectPointerId = null;
+        if (activePointerId !== null && rendererRef.current) {
+          rendererRef.current.domElement.releasePointerCapture?.(activePointerId);
+        }
+        orbit.enabled = orbitWasEnabledBeforeRect && navModeRef.current === "orbit";
+        setDragSelectionRect(null);
+      }
       endFlyMouseLook();
     };
     const onCanvasContextMenu = (event: MouseEvent) => {
       event.preventDefault();
     };
-    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointerdown", onPointerDown, true);
     renderer.domElement.addEventListener("contextmenu", onCanvasContextMenu);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -2539,8 +3316,10 @@ export function UnifiedWorldViewer({
       if (pausedRef.current) return;
 
       if (navModeRef.current === "orbit") {
-        orbit.enabled = true;
-        orbit.update();
+        orbit.enabled = !isRectSelecting;
+        if (orbit.enabled) {
+          orbit.update();
+        }
       } else {
         orbit.enabled = false;
         const keys = keysRef.current;
@@ -2581,7 +3360,16 @@ export function UnifiedWorldViewer({
           setError(`Splat update failed: ${message}`);
         }
       }
-      if (selectedBoxRef.current instanceof THREE.BoxHelper) {
+      if (selectedKindRef.current === "group" && selectedBoxRef.current instanceof THREE.Box3Helper) {
+        const group = activeGroupRef.current;
+        if (group) {
+          const groupBounds = computeUnionBoundsForObjects(group.members.map((member) => member.object));
+          if (groupBounds && !groupBounds.isEmpty()) {
+            selectedBoxRef.current.box.copy(groupBounds);
+          }
+        }
+        selectedBoxRef.current.updateMatrixWorld(true);
+      } else if (selectedBoxRef.current instanceof THREE.BoxHelper) {
         selectedBoxRef.current.update();
       }
       const hasSparkRuntime = [...splatHandlesRef.current].some((handle) => handle.runtime === "spark");
@@ -2635,13 +3423,19 @@ export function UnifiedWorldViewer({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
-      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown, true);
       renderer.domElement.removeEventListener("contextmenu", onCanvasContextMenu);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
       resizeObserver.disconnect();
 
+      activeGroupRef.current = null;
+      setActiveGroupMeta(null);
+      objectListSelectionAnchorRef.current = null;
+      loadedExternalAdditionIdsRef.current.clear();
+      setGroupSelectionKeys([]);
+      setDragSelectionRect(null);
       setSelectedObject(null);
       clearSelectedHelper();
 
@@ -2677,6 +3471,7 @@ export function UnifiedWorldViewer({
       }
     };
   }, [
+    applyMarkedSelectionKeys,
     applyPersistedSceneAlignment,
     applyMeshTransforms,
     clearGroundAlignDebug,
@@ -2690,11 +3485,312 @@ export function UnifiedWorldViewer({
     refreshSplatItems,
     schedulePersist,
     clearSelectedHelper,
+    setSelectedGroup,
     setSelectedObject,
     preferredRuntimeOrder,
     queueAutoAlignScene,
     splatLoadProfile,
     splatDensityApplied,
+    updateHudFromHandles
+  ]);
+
+  useEffect(() => {
+    if (loading) return;
+    const alignmentRoot = alignmentRootRef.current;
+    const renderer = rendererRef.current;
+    const camera = cameraRef.current;
+    if (!alignmentRoot || !renderer || !camera) return;
+
+    const pending = (externalSceneAdditions ?? []).filter(
+      (entry) => typeof entry.id === "string" && entry.id.length > 0 && !loadedExternalAdditionIdsRef.current.has(entry.id)
+    );
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+
+    const inferSplatSceneFormat = (
+      sceneFormatEnum: Record<string, number>,
+      url: string,
+      kind: string,
+      filename?: string | null
+    ): number | undefined => {
+      const lowerKind = kind.toLowerCase();
+      const lower = url.toLowerCase();
+      const lowerName = (filename ?? "").toLowerCase();
+      const source = `${lower} ${lowerName}`;
+      if ((lowerKind === "point_ply" || lower.endsWith(".ply") || lower.endsWith(".compressed.ply")) && typeof sceneFormatEnum.Ply === "number") {
+        return sceneFormatEnum.Ply;
+      }
+      if (source.includes(".ksplat") && typeof sceneFormatEnum.KSplat === "number") return sceneFormatEnum.KSplat;
+      if (source.includes(".splat") && typeof sceneFormatEnum.Splat === "number") return sceneFormatEnum.Splat;
+      if (source.includes(".spz") && typeof sceneFormatEnum.Spz === "number") return sceneFormatEnum.Spz;
+      return undefined;
+    };
+
+    const buildUniqueMeshName = (seed: string) => {
+      let base = seed.trim();
+      if (base.length === 0) base = "external-mesh";
+      let name = base;
+      let counter = 1;
+      const existingNames = new Set(meshRootsRef.current.map((entry) => entry.name || entry.uuid));
+      while (existingNames.has(name)) {
+        name = `${base}-${counter}`;
+        counter += 1;
+      }
+      return name;
+    };
+
+    const attachLoadedMesh = (object: THREE.Object3D, sourceId: string, sourceUrl: string) => {
+      const meshName = buildUniqueMeshName(sourceId);
+      object.name = meshName;
+      object.userData.transformRoot = true;
+      object.userData.sourceMeshId = sourceId;
+      object.userData.sourceMeshKey = normalizeMeshUrlForDedup(sourceUrl);
+      meshRootsRef.current.push(object);
+      alignmentRoot.add(object);
+      refreshMeshItems();
+      objectListSelectionAnchorRef.current = buildObjectItemKey("mesh", meshName);
+      setSelectedObject(object, "mesh");
+    };
+
+    const loadExternalMeshGlb = async (addition: ExternalSceneAddition) => {
+      const loader = new GLTFLoader();
+      const draco = new DRACOLoader();
+      draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.7/");
+      loader.setDRACOLoader(draco);
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      const ktx2 = new KTX2Loader();
+      ktx2.setTranscoderPath("https://unpkg.com/three@0.170.0/examples/jsm/libs/basis/");
+      ktx2.detectSupport(renderer);
+      loader.setKTX2Loader(ktx2);
+      try {
+        const gltf = await loader.loadAsync(addition.url);
+        if (cancelled) {
+          disposeObjectTree(gltf.scene);
+          return;
+        }
+        gltf.scene.traverse((obj: THREE.Object3D) => {
+          obj.matrixAutoUpdate = true;
+          const meshObj = obj as THREE.Mesh;
+          if (!meshObj.isMesh) return;
+          meshObj.userData.transformRoot = gltf.scene;
+          const applyState = (material: THREE.Material) => {
+            material.depthTest = true;
+            material.depthWrite = !material.transparent;
+          };
+          if (Array.isArray(meshObj.material)) meshObj.material.forEach(applyState);
+          else if (meshObj.material) applyState(meshObj.material);
+        });
+        attachLoadedMesh(gltf.scene, addition.id, addition.url);
+      } finally {
+        draco.dispose();
+        ktx2.dispose();
+      }
+    };
+
+    const loadExternalMeshPly = async (addition: ExternalSceneAddition) => {
+      const loader = new PLYLoader();
+      const geometry = await loader.loadAsync(addition.url);
+      if (!geometry?.getAttribute("position")) {
+        throw new Error("PLY mesh has no position attribute.");
+      }
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      const hasVertexColors = Boolean(geometry.getAttribute("color"));
+      const material = new THREE.MeshBasicMaterial({
+        color: hasVertexColors ? 0xffffff : 0xd4d9e8,
+        vertexColors: hasVertexColors,
+        side: THREE.DoubleSide
+      });
+      material.depthTest = true;
+      material.depthWrite = true;
+      const plyMesh = new THREE.Mesh(geometry, material);
+      plyMesh.rotateX(-Math.PI / 2);
+      plyMesh.rotateZ(-Math.PI / 2);
+      plyMesh.traverse((obj: THREE.Object3D) => {
+        obj.matrixAutoUpdate = true;
+        const meshObj = obj as THREE.Mesh;
+        if (!meshObj.isMesh) return;
+        meshObj.userData.transformRoot = plyMesh;
+      });
+      if (cancelled) {
+        disposeObjectTree(plyMesh);
+        return;
+      }
+      attachLoadedMesh(plyMesh, addition.id, addition.url);
+    };
+
+    const loadExternalPointPly = async (addition: ExternalSceneAddition) => {
+      const loader = new PLYLoader();
+      let geometry: THREE.BufferGeometry | null = null;
+      try {
+        geometry = await tryLoad3dgsBinaryPlyGeometry(addition.url);
+      } catch {
+        geometry = null;
+      }
+      if (!geometry) {
+        geometry = await loader.loadAsync(addition.url);
+      }
+      if (!geometry?.getAttribute("position")) {
+        throw new Error("PLY points has no position attribute.");
+      }
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      const hasVertexColors = Boolean(geometry.getAttribute("color"));
+      const material = new THREE.PointsMaterial({
+        color: hasVertexColors ? 0xffffff : 0xd4d9e8,
+        vertexColors: hasVertexColors,
+        size: 0.01,
+        sizeAttenuation: true
+      });
+      material.depthTest = true;
+      material.depthWrite = true;
+      const points = new THREE.Points(geometry, material);
+      points.renderOrder = 1;
+      if (cancelled) {
+        points.geometry.dispose();
+        material.dispose();
+        return;
+      }
+      points.name = addition.id;
+      points.userData.sourceMeshId = addition.id;
+      points.userData.sourceMeshKey = normalizeMeshUrlForDedup(addition.url);
+      const handle: SplatHandle = {
+        id: `external-${addition.id}`,
+        label: points.name,
+        object: points,
+        runtime: "points",
+        sourceKey: normalizeMeshUrlForDedup(addition.url),
+        sourceUrl: addition.url,
+        formatHint: "ply",
+        dispose: () => {
+          points.geometry.dispose();
+          material.dispose();
+        },
+        splatCount: geometry.getAttribute("position")?.count ?? 0,
+        bounds: geometry.boundingBox?.clone()
+      };
+      splatHandlesRef.current.add(handle);
+      alignmentRoot.add(points);
+      refreshSplatItems();
+      updateHudFromHandles();
+      objectListSelectionAnchorRef.current = buildObjectItemKey("splat", handle.id);
+      setSelectedObject(points, "splat");
+    };
+
+    const loadExternalSplat = async (addition: ExternalSceneAddition) => {
+      const module = (await getGaussianSplatsModule()) as Record<string, unknown>;
+      const DropInViewerCtor = module.DropInViewer as
+        | (new (options: Record<string, unknown>) => {
+            addSplatScene?: (path: string, options?: Record<string, unknown>) => Promise<void>;
+            addSplatScenes?: (entries: Array<Record<string, unknown>>) => Promise<void>;
+            dispose?: () => void;
+            children?: THREE.Object3D[];
+          } & THREE.Object3D)
+        | undefined;
+      if (!DropInViewerCtor) {
+        throw new Error("Gaussian splat renderer is unavailable.");
+      }
+      const sceneFormatEnum = (module.SceneFormat ?? {}) as Record<string, number>;
+      const sharedMemoryAllowed = typeof window !== "undefined" && window.crossOriginIsolated === true;
+      const object = new DropInViewerCtor({
+        selfDrivenMode: false,
+        useBuiltInControls: false,
+        sharedMemoryForWorkers: sharedMemoryAllowed,
+        gpuAcceleratedSort: sharedMemoryAllowed,
+        enableSIMDInSort: sharedMemoryAllowed,
+        integerBasedSort: false,
+        freeIntermediateSplatData: true,
+        renderer,
+        camera
+      });
+      object.renderOrder = 1;
+      alignmentRoot.add(object);
+      const sceneFormat = inferSplatSceneFormat(sceneFormatEnum, addition.url, addition.kind, addition.filename);
+      const addOptions: Record<string, unknown> = {
+        showLoadingUI: false,
+        progressiveLoad: true
+      };
+      if (sceneFormat !== undefined) addOptions.format = sceneFormat;
+      try {
+        if (typeof object.addSplatScene === "function") {
+          await object.addSplatScene(addition.url, addOptions);
+        } else if (typeof object.addSplatScenes === "function") {
+          await object.addSplatScenes([{ path: addition.url, ...addOptions }]);
+        } else {
+          throw new Error("Splat runtime does not support addSplatScene API.");
+        }
+        if (cancelled) {
+          object.parent?.remove(object);
+          object.dispose?.();
+          return;
+        }
+        const handle: SplatHandle = {
+          id: `external-${addition.id}`,
+          label: addition.id,
+          object,
+          runtime: "legacy",
+          sourceKey: normalizeMeshUrlForDedup(addition.url),
+          sourceUrl: addition.url,
+          formatHint:
+            inferSplatSceneFormat(sceneFormatEnum, addition.url, addition.kind, addition.filename) === sceneFormatEnum.Ply
+              ? "ply"
+              : null,
+          dispose: typeof object.dispose === "function" ? () => object.dispose?.() : undefined,
+          splatCount: 0
+        };
+        splatHandlesRef.current.add(handle);
+        refreshSplatItems();
+        updateHudFromHandles();
+        objectListSelectionAnchorRef.current = buildObjectItemKey("splat", handle.id);
+        setSelectedObject(object, "splat");
+      } catch (error) {
+        object.parent?.remove(object);
+        object.dispose?.();
+        throw error;
+      }
+    };
+
+    const loadPending = async () => {
+      for (const addition of pending) {
+        if (cancelled) break;
+        try {
+          const lowerUrl = addition.url.toLowerCase();
+          const lowerKind = addition.kind.toLowerCase();
+          if (lowerKind === "mesh_glb" || lowerKind === "mesh_ply" || lowerUrl.endsWith(".glb") || lowerUrl.endsWith(".gltf")) {
+            if (lowerKind === "mesh_ply" || urlHasPlyExtension(addition.url)) {
+              await loadExternalMeshPly(addition);
+            } else {
+              await loadExternalMeshGlb(addition);
+            }
+          } else if (lowerKind === "point_ply") {
+            await loadExternalPointPly(addition);
+          } else if (lowerKind === "splat_ksplat") {
+            await loadExternalSplat(addition);
+          } else {
+            setRuntimeNotice(`Unsupported external object kind: ${addition.kind}`);
+            continue;
+          }
+          loadedExternalAdditionIdsRef.current.add(addition.id);
+          setError(null);
+          setTransformDebug(`added external object=${addition.id}`);
+        } catch (externalLoadError) {
+          const message = externalLoadError instanceof Error ? externalLoadError.message : "Unknown external load error.";
+          setError(`Failed to add external object ${addition.id}: ${message}`);
+        }
+      }
+    };
+
+    void loadPending();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    externalSceneAdditions,
+    loading,
+    refreshMeshItems,
+    refreshSplatItems,
+    setSelectedObject,
     updateHudFromHandles
   ]);
 
@@ -2728,7 +3824,7 @@ export function UnifiedWorldViewer({
               <Crosshair className="mr-2 h-4 w-4" />
               Fit Scene
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={fitSelection} disabled={!selectedName}>
+            <DropdownMenuItem onSelect={fitSelection} disabled={!hasActiveSelection}>
               <Crosshair className="mr-2 h-4 w-4" />
               Fit Selection
             </DropdownMenuItem>
@@ -3053,38 +4149,112 @@ export function UnifiedWorldViewer({
       {openPanel === "objects" ? (
         <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
+          <div className="mb-2 rounded-md border border-border/50 bg-background/20 p-1.5">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Grouping</div>
+            <div className="mb-1 text-[11px] text-zinc-300">
+              Marked: {markedGroupMembers.length}
+              {activeGroupMeta ? ` • ${activeGroupMeta.name} (${activeGroupMeta.memberCount})` : ""}
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={createGroupFromMarkedSelection}
+                disabled={!canCreateGroup}
+              >
+                Create Group
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={selectActiveGroup}
+                disabled={!canSelectExistingGroup}
+              >
+                Select Group
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={() => ungroupActiveSelection(false)}
+                disabled={!canSelectExistingGroup}
+              >
+                Ungroup
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                onClick={clearMarkedGroupSelection}
+                disabled={groupSelectionKeys.length === 0}
+              >
+                Clear Marks
+              </Button>
+            </div>
+          </div>
           <div className="max-h-[280px] space-y-1 overflow-auto pr-1">
             {objectItems.length === 0 ? (
               <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No scene objects</div>
             ) : (
               objectItems.map((item) => (
-                <Button
-                  key={item.id}
-                  size="sm"
-                  variant={selectedName === item.id ? "default" : "outline"}
-                  className="h-8 w-full justify-between gap-2 rounded-md"
-                  onClick={() => selectObjectItem(item.kind, item.id)}
-                  onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                    event.preventDefault();
-                    selectObjectItem(item.kind, item.id);
-                    const menuWidth = 168;
-                    const menuHeight = 78;
-                    const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
-                    const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
-                    setObjectContextMenu({
-                      x: Math.max(8, Math.min(event.clientX, maxX)),
-                      y: Math.max(8, Math.min(event.clientY, maxY)),
-                      itemId: item.id,
-                      kind: item.kind,
-                      label: item.label
-                    });
-                  }}
-                >
-                  <span className="truncate text-left text-xs">{item.label}</span>
-                  <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
-                    {item.kind === "mesh" ? "mesh" : "splat"}
-                  </span>
-                </Button>
+                <div key={item.id} className="flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant={
+                      (selectedKind !== "group" && selectedName === item.id) ||
+                      groupSelectionSet.has(buildObjectItemKey(item.kind, item.id))
+                        ? "default"
+                        : "outline"
+                    }
+                    className="h-8 flex-1 justify-between gap-2 rounded-md"
+                    onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                      const itemKey = buildObjectItemKey(item.kind, item.id);
+                      if (event.shiftKey) {
+                        selectObjectRangeFromAnchor(itemKey);
+                        selectObjectItem(item.kind, item.id);
+                        return;
+                      }
+                      if (event.metaKey || event.ctrlKey) {
+                        toggleObjectMarkedForGroup(item.kind, item.id);
+                        selectObjectItem(item.kind, item.id);
+                        return;
+                      }
+                      objectListSelectionAnchorRef.current = itemKey;
+                      selectObjectItem(item.kind, item.id);
+                    }}
+                    onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                      event.preventDefault();
+                      selectObjectItem(item.kind, item.id);
+                      const menuWidth = 168;
+                      const menuHeight = 78;
+                      const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
+                      const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
+                      setObjectContextMenu({
+                        x: Math.max(8, Math.min(event.clientX, maxX)),
+                        y: Math.max(8, Math.min(event.clientY, maxY)),
+                        itemId: item.id,
+                        kind: item.kind,
+                        label: item.label
+                      });
+                    }}
+                  >
+                    <span className="truncate text-left text-xs">{item.label}</span>
+                    <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
+                      {item.kind === "mesh" ? "mesh" : "splat"}
+                    </span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={groupSelectionSet.has(buildObjectItemKey(item.kind, item.id)) ? "default" : "outline"}
+                    className="h-8 w-8 rounded-md px-0 text-[11px]"
+                    onClick={() => toggleObjectMarkedForGroup(item.kind, item.id)}
+                    title="Mark for grouping"
+                  >
+                    G
+                  </Button>
+                </div>
               ))
             )}
           </div>
@@ -3093,11 +4263,13 @@ export function UnifiedWorldViewer({
             variant="outline"
             className="mt-2 h-8 w-full rounded-md text-xs"
             onClick={() => setOpenPanel("transform")}
-            disabled={!selectedRef.current}
+            disabled={!hasActiveSelection}
           >
             Open Transform
           </Button>
-          <div className="mt-1 text-[10px] text-zinc-500">Right-click object for delete action.</div>
+          <div className="mt-1 text-[10px] text-zinc-500">
+            Right-click to delete. Shift+click for range multi-select. Shift+drag in viewer for box select.
+          </div>
         </div>
       ) : null}
 
@@ -3170,7 +4342,7 @@ export function UnifiedWorldViewer({
                 onClick={() => {
                   void autoAlignSceneToGroundPlane(true, true);
                 }}
-                disabled={!selectedRef.current}
+                disabled={!canAutoAlignSelected}
               >
                 Auto Align Selected
               </Button>
@@ -3201,7 +4373,7 @@ export function UnifiedWorldViewer({
                   variant="outline"
                   className="h-7 w-full rounded-md text-xs"
                   onClick={applySelectedAxisCorrection}
-                  disabled={!selectedRef.current}
+                  disabled={!hasActiveSelection}
                 >
                   Correct Axis Misalignment
                 </Button>
@@ -3281,7 +4453,7 @@ export function UnifiedWorldViewer({
                   variant="outline"
                   className="h-7 rounded-md text-xs"
                   onClick={resetSelectedTransform}
-                  disabled={!selectedRef.current}
+                  disabled={!hasActiveSelection}
                 >
                   Reset Transform
                 </Button>
@@ -3290,7 +4462,7 @@ export function UnifiedWorldViewer({
                   variant="outline"
                   className="h-7 rounded-md text-xs col-span-2"
                   onClick={fitSelection}
-                  disabled={!selectedRef.current}
+                  disabled={!hasActiveSelection}
                 >
                   Focus
                 </Button>
@@ -3300,6 +4472,11 @@ export function UnifiedWorldViewer({
               </div>
               {selectedKind === "splat" ? (
                 <div className="text-[11px] text-zinc-400">Editing splat transform</div>
+              ) : null}
+              {selectedKind === "group" && activeGroupMeta ? (
+                <div className="text-[11px] text-zinc-400">
+                  Editing {activeGroupMeta.name} ({activeGroupMeta.memberCount} objects)
+                </div>
               ) : null}
               {isPersistableArtifact ? (
                 <div className="text-[11px] text-zinc-400">
@@ -3332,6 +4509,18 @@ export function UnifiedWorldViewer({
         >
           {runtimeNotice}
         </div>
+      ) : null}
+
+      {dragSelectionRect ? (
+        <div
+          className="pointer-events-none absolute z-[22] border border-sky-400/80 bg-sky-400/15"
+          style={{
+            left: dragSelectionRect.x,
+            top: dragSelectionRect.y,
+            width: dragSelectionRect.width,
+            height: dragSelectionRect.height
+          }}
+        />
       ) : null}
 
       <div ref={containerRef} className="h-full w-full" />

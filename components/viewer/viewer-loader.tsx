@@ -268,70 +268,6 @@ function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest 
 
 const DEFAULT_CAMERA = { position: [4, 3, 4] as [number, number, number], target: [0, 0, 0] as [number, number, number], fov: 50 };
 
-function mergeExternalArtifactsIntoManifest(base: UnifiedManifest, externalArtifacts: ViewerArtifact[]): UnifiedManifest {
-  if (externalArtifacts.length === 0) {
-    return base;
-  }
-
-  const merged: UnifiedManifest = {
-    artifactId: base.artifactId,
-    camera: base.camera ?? DEFAULT_CAMERA,
-    meshes: [...base.meshes],
-    splats: [...base.splats]
-  };
-
-  const knownMeshUrls = new Set(merged.meshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
-  const knownSplatUrls = new Set(
-    merged.splats
-      .map((entry) => (entry.sourceUrl ? normalizeAssetUrlForDedup(entry.sourceUrl) : null))
-      .filter((value): value is string => Boolean(value))
-  );
-
-  externalArtifacts.forEach((artifact, artifactIndex) => {
-    const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
-      ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
-      : [];
-
-    const meshLike =
-      artifact.kind === "mesh_glb" ||
-      artifact.kind === "mesh_ply" ||
-      artifact.url.toLowerCase().endsWith(".glb") ||
-      artifact.url.toLowerCase().endsWith(".gltf");
-    if (meshLike) {
-      const meshUrls = extraMeshUrls.length > 0 ? extraMeshUrls : [artifact.url];
-      meshUrls.forEach((url, urlIndex) => {
-        const dedupKey = normalizeAssetUrlForDedup(url);
-        if (knownMeshUrls.has(dedupKey)) return;
-        knownMeshUrls.add(dedupKey);
-        merged.meshes.push({
-          id: `mesh-external-${meshIdFromUrl(url, `${artifact.id}-${artifactIndex}-${urlIndex}`)}-${artifactIndex}-${urlIndex}`,
-          url,
-          formatHint: artifact.kind === "mesh_ply" ? "ply" : inferMeshFormatHintFromUrl(url)
-        });
-      });
-      return;
-    }
-
-    const splatLike = artifact.kind === "point_ply" || artifact.kind === "splat_ksplat";
-    if (!splatLike) return;
-    const dedupKey = normalizeAssetUrlForDedup(artifact.url);
-    if (knownSplatUrls.has(dedupKey)) return;
-    knownSplatUrls.add(dedupKey);
-    const formatHint =
-      inferSplatFormatHintFromKind(artifact.kind) ??
-      inferSplatFormatHintFromUrl(artifact.url) ??
-      inferSplatFormatHintFromUrl(artifact.filename ?? "");
-    merged.splats.push({
-      id: `splat-external-${artifact.id}-${artifactIndex}`,
-      tilesetUrl: null,
-      sourceUrl: artifact.url,
-      formatHint
-    });
-  });
-
-  return merged;
-}
-
 function revokeLocalArtifactUrl(artifact: ViewerArtifact | null | undefined) {
   if (!artifact?.url || !isBlobUrl(artifact.url)) return;
   URL.revokeObjectURL(artifact.url);
@@ -418,19 +354,11 @@ export function ViewerLoader({
     if (!baseManifest && activeArtifact) {
       baseManifest = buildSingleArtifactManifest(activeArtifact);
     }
-    if (!baseManifest && localSceneAdditions.length === 0) {
+    if (!baseManifest) {
       return null;
     }
-    return mergeExternalArtifactsIntoManifest(
-      baseManifest ?? {
-        artifactId: activeArtifact?.id,
-        camera: DEFAULT_CAMERA,
-        meshes: [],
-        splats: []
-      },
-      localSceneAdditions
-    );
-  }, [activeArtifact, localArtifact, localSceneAdditions, sceneCleared, worldManifest]);
+    return baseManifest;
+  }, [activeArtifact, localArtifact, sceneCleared, worldManifest]);
 
   useEffect(() => {
     localArtifactRef.current = localArtifact;
@@ -785,6 +713,12 @@ export function ViewerLoader({
           <UnifiedWorldViewer
             key={`${activeArtifact?.id ?? "no-artifact"}:${viewerResetVersion}`}
             manifest={unifiedManifest}
+            externalSceneAdditions={localSceneAdditions.map((artifact) => ({
+              id: artifact.id,
+              kind: artifact.kind,
+              url: artifact.url,
+              filename: artifact.filename ?? null
+            }))}
             fileMenu={{
               selectedKind: artifactPicker?.selectedKind ?? null,
               activeNodeScope: artifactPicker?.activeNodeScope ?? null,
