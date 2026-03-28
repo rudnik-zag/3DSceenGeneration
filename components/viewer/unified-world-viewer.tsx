@@ -20,9 +20,6 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { OutlinePass } from "three/examples/jsm/postprocessing/OutlinePass.js";
 import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -1039,8 +1036,6 @@ export function UnifiedWorldViewer({
   const requestRef = useRef<number | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
   const alignmentRootRef = useRef<THREE.Group | null>(null);
-  const composerRef = useRef<EffectComposer | null>(null);
-  const outlinePassRef = useRef<OutlinePass | null>(null);
   const transformControlsRef = useRef<InstanceType<typeof TransformControls> | null>(null);
   const transformDraggingRef = useRef(false);
   const transformModeRef = useRef<TransformMode>("translate");
@@ -1059,6 +1054,10 @@ export function UnifiedWorldViewer({
   const navModeRef = useRef<NavigationMode>("orbit");
   const viewModeRef = useRef<ViewMode>("default");
   const selectedKindRef = useRef<SceneObjectKind | null>(null);
+  const selectedNameRef = useRef<string | null>(null);
+  const openPanelRef = useRef<FloatingPanel>("none");
+  const objectCustomLabelsRef = useRef<Record<string, string>>({});
+  const objectItemsRef = useRef<Array<{ id: string; kind: SelectableSceneObjectKind; label: string }>>([]);
   const modelviewerAutoRotateRef = useRef(false);
   const showGridRef = useRef(true);
   const gridRef = useRef<THREE.GridHelper | null>(null);
@@ -1104,6 +1103,9 @@ export function UnifiedWorldViewer({
   const [selectedKind, setSelectedKind] = useState<SceneObjectKind | null>(null);
   const [meshItems, setMeshItems] = useState<MeshListItem[]>([]);
   const [splatItems, setSplatItems] = useState<SplatListItem[]>([]);
+  const [objectCustomLabels, setObjectCustomLabels] = useState<Record<string, string>>({});
+  const [renamingObjectKey, setRenamingObjectKey] = useState<string | null>(null);
+  const [renamingMeshDraft, setRenamingMeshDraft] = useState("");
   const [transformDraft, setTransformDraft] = useState<TransformDraft | null>(null);
   const [transformStep, setTransformStep] = useState<number>(1);
   const [transformDebug, setTransformDebug] = useState<string>("");
@@ -1150,22 +1152,31 @@ export function UnifiedWorldViewer({
     [manifest.splats]
   );
 
-  const objectItems = useMemo(
-    () => [
+  const objectItems = useMemo(() => {
+    const merged = [
       ...meshItems.map((item) => ({
         id: item.id,
-        label: item.label,
-        kind: "mesh" as const
+        kind: "mesh" as const,
+        splatCount: undefined
       })),
       ...splatItems.map((item) => ({
         id: item.id,
-        label: item.label,
         kind: "splat" as const,
         splatCount: item.splatCount
       }))
-    ],
-    [meshItems, splatItems]
-  );
+    ];
+    return merged.map((item, index) => {
+      const autoLabel = `object_${index + 1}`;
+      const objectKey = buildObjectItemKey(item.kind, item.id);
+      const customLabel = objectCustomLabels[objectKey]?.trim();
+      return {
+        id: item.id,
+        kind: item.kind,
+        splatCount: item.splatCount,
+        label: customLabel && customLabel.length > 0 ? customLabel : autoLabel
+      };
+    });
+  }, [objectCustomLabels, meshItems, splatItems]);
 
   const groupSelectionSet = useMemo(() => new Set(groupSelectionKeys), [groupSelectionKeys]);
   const orderedObjectKeys = useMemo(
@@ -1455,6 +1466,26 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     selectedKindRef.current = selectedKind;
   }, [selectedKind]);
+
+  useEffect(() => {
+    selectedNameRef.current = selectedName;
+  }, [selectedName]);
+
+  useEffect(() => {
+    openPanelRef.current = openPanel;
+  }, [openPanel]);
+
+  useEffect(() => {
+    objectCustomLabelsRef.current = objectCustomLabels;
+  }, [objectCustomLabels]);
+
+  useEffect(() => {
+    objectItemsRef.current = objectItems.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      label: item.label
+    }));
+  }, [objectItems]);
 
   useEffect(() => {
     modelviewerAutoRotateRef.current = modelviewerAutoRotate;
@@ -2020,7 +2051,6 @@ export function UnifiedWorldViewer({
 
   const setSelectedGroup = useCallback(
     (group: ActiveObjectGroup | null) => {
-      outlinePassRef.current?.selectedObjects.splice(0);
       if (transformControlsRef.current) {
         transformControlsRef.current.detach();
         transformControlsRef.current.visible = false;
@@ -2059,10 +2089,6 @@ export function UnifiedWorldViewer({
         : null;
 
       const controls = transformControlsRef.current;
-      const outlinePass = outlinePassRef.current;
-      if (outlinePass) {
-        outlinePass.selectedObjects = [];
-      }
       if (controls) {
         controls.detach();
         controls.visible = false;
@@ -2083,11 +2109,7 @@ export function UnifiedWorldViewer({
         object.traverse((node: THREE.Object3D) => {
           node.matrixAutoUpdate = true;
         });
-        if (outlinePass) {
-          outlinePass.selectedObjects = [object];
-        } else {
-          attachMeshSelectionBox(object);
-        }
+        attachMeshSelectionBox(object);
         if (controls) {
           controls.attach(object);
           controls.setMode(transformModeRef.current);
@@ -2123,7 +2145,6 @@ export function UnifiedWorldViewer({
       const normalized = [...new Set(keys)].filter((key) => {
         const parsed = parseObjectItemKey(key);
         if (!parsed) return false;
-        if (parsed.kind !== "mesh") return false;
         return Boolean(resolveObjectByKindAndId(parsed.kind, parsed.id)?.parent);
       });
       setGroupSelectionKeys(normalized);
@@ -2195,20 +2216,32 @@ export function UnifiedWorldViewer({
       if (targetIndex < 0) return;
 
       const [target] = meshRootsRef.current.splice(targetIndex, 1);
+      const targetItemId = target.name || target.uuid;
       target.parent?.remove(target);
-      removeObjectFromActiveGroup("mesh", target.name || target.uuid);
+      removeObjectFromActiveGroup("mesh", targetItemId);
       if (selectedRef.current === target) {
         setSelectedObject(null);
       }
       rotationDisplayRef.current.delete(target.uuid);
+      const targetItemKey = buildObjectItemKey("mesh", targetItemId);
+      setObjectCustomLabels((current) => {
+        if (!Object.prototype.hasOwnProperty.call(current, targetItemKey)) return current;
+        const next = { ...current };
+        delete next[targetItemKey];
+        return next;
+      });
+      if (renamingObjectKey === targetItemKey) {
+        setRenamingObjectKey(null);
+        setRenamingMeshDraft("");
+      }
       setGroupSelectionKeys((current) =>
-        current.filter((entry) => entry !== buildObjectItemKey("mesh", target.name || target.uuid))
+        current.filter((entry) => entry !== buildObjectItemKey("mesh", targetItemId))
       );
       disposeObjectTree(target);
       refreshMeshItems();
       setTransformDebug(`removed mesh=${meshId}`);
     },
-    [refreshMeshItems, removeObjectFromActiveGroup, setSelectedObject]
+    [refreshMeshItems, removeObjectFromActiveGroup, renamingObjectKey, setSelectedObject]
   );
 
   const removeSplatFromScene = useCallback(
@@ -2226,6 +2259,17 @@ export function UnifiedWorldViewer({
         if (selectedRef.current === handle.object) {
           setSelectedObject(null);
         }
+        const targetItemKey = buildObjectItemKey("splat", handle.id);
+        setObjectCustomLabels((current) => {
+          if (!Object.prototype.hasOwnProperty.call(current, targetItemKey)) return current;
+          const next = { ...current };
+          delete next[targetItemKey];
+          return next;
+        });
+        if (renamingObjectKey === targetItemKey) {
+          setRenamingObjectKey(null);
+          setRenamingMeshDraft("");
+        }
         setGroupSelectionKeys((current) =>
           current.filter((entry) => entry !== buildObjectItemKey("splat", handle.id))
         );
@@ -2238,7 +2282,7 @@ export function UnifiedWorldViewer({
       updateHudFromHandles();
       setTransformDebug(`removed splat=${sourceKey}`);
     },
-    [refreshSplatItems, removeObjectFromActiveGroup, setSelectedObject, updateHudFromHandles]
+    [refreshSplatItems, removeObjectFromActiveGroup, renamingObjectKey, setSelectedObject, updateHudFromHandles]
   );
 
   const selectObjectItem = useCallback(
@@ -2253,6 +2297,30 @@ export function UnifiedWorldViewer({
     },
     [setSelectedObject]
   );
+
+  const commitObjectRename = useCallback(
+    (kind: SelectableSceneObjectKind, id: string) => {
+      const nextLabel = renamingMeshDraft.trim();
+      const objectKey = buildObjectItemKey(kind, id);
+      setObjectCustomLabels((current) => {
+        const next = { ...current };
+        if (nextLabel.length === 0) {
+          delete next[objectKey];
+        } else {
+          next[objectKey] = nextLabel;
+        }
+        return next;
+      });
+      setRenamingObjectKey((current) => (current === objectKey ? null : current));
+    },
+    [renamingMeshDraft]
+  );
+
+  const cancelObjectRename = useCallback((kind: SelectableSceneObjectKind, id: string) => {
+    const objectKey = buildObjectItemKey(kind, id);
+    setRenamingObjectKey((current) => (current === objectKey ? null : current));
+    setRenamingMeshDraft("");
+  }, []);
 
   const removeObjectItem = useCallback(
     (kind: SelectableSceneObjectKind, itemId: string) => {
@@ -2828,6 +2896,9 @@ export function UnifiedWorldViewer({
     meshRootsRef.current = [];
     setMeshItems([]);
     setSplatItems([]);
+    setObjectCustomLabels({});
+    setRenamingObjectKey(null);
+    setRenamingMeshDraft("");
     setActiveSplatRuntimes([]);
     setRuntimeNotice(null);
     activeGroupRef.current = null;
@@ -2935,30 +3006,6 @@ export function UnifiedWorldViewer({
     orbit.update();
     orbitRef.current = orbit;
 
-    const composer = new EffectComposer(renderer);
-    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    composer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
-    composer.addPass(new RenderPass(scene, camera));
-    composerRef.current = composer;
-
-    let outlinePass: OutlinePass | null = null;
-    try {
-      outlinePass = new OutlinePass(
-        new THREE.Vector2(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight)),
-        scene,
-        camera
-      );
-      outlinePass.edgeStrength = 5.5;
-      outlinePass.edgeGlow = 0.3;
-      outlinePass.edgeThickness = 1.4;
-      outlinePass.visibleEdgeColor.set("#34d399");
-      outlinePass.hiddenEdgeColor.set("#1f2937");
-      composer.addPass(outlinePass);
-    } catch {
-      outlinePass = null;
-    }
-    outlinePassRef.current = outlinePass;
-
     const transformControls = new TransformControls(camera, renderer.domElement);
     transformControls.setMode(transformModeRef.current);
     transformControls.setSpace(transformSpaceRef.current);
@@ -2989,7 +3036,46 @@ export function UnifiedWorldViewer({
           target?.isContentEditable === true);
 
       if (!isTypingTarget) {
-        if (event.code === "Digit1") {
+        if (event.code === "F2" || event.key === "F2") {
+          const selectedObject = selectedRef.current;
+          const selectedObjectId = selectedObject ? selectedObject.name || selectedObject.uuid : null;
+          let targetKind: SelectableSceneObjectKind | null = null;
+          let targetId: string | null = null;
+          if (
+            selectedObject &&
+            meshRootsRef.current.some((entry) => entry === selectedObject || (entry.name || entry.uuid) === selectedObjectId)
+          ) {
+            targetKind = "mesh";
+            targetId = selectedObjectId;
+          } else if (selectedObject) {
+            const splatHandle = [...splatHandlesRef.current].find((entry) => entry.object === selectedObject) ?? null;
+            if (splatHandle) {
+              targetKind = "splat";
+              targetId = splatHandle.id;
+            }
+          }
+          if (!targetKind && selectedNameRef.current && (selectedKindRef.current === "mesh" || selectedKindRef.current === "splat")) {
+            const matched = objectItemsRef.current.find(
+              (entry) => entry.kind === selectedKindRef.current && entry.id === selectedNameRef.current
+            );
+            if (matched) {
+              targetKind = matched.kind;
+              targetId = matched.id;
+            }
+          }
+          if (targetKind && targetId) {
+            if (openPanelRef.current !== "objects") {
+              setOpenPanel("objects");
+              openPanelRef.current = "objects";
+            }
+            const objectKey = buildObjectItemKey(targetKind, targetId);
+            const item = objectItemsRef.current.find((entry) => entry.kind === targetKind && entry.id === targetId);
+            const draft = (objectCustomLabelsRef.current[objectKey] ?? item?.label ?? "").trim();
+            setRenamingObjectKey(objectKey);
+            setRenamingMeshDraft(draft);
+            event.preventDefault();
+          }
+        } else if (event.code === "Digit1") {
           applyTransformMode("translate");
           event.preventDefault();
         } else if (event.code === "Digit2") {
@@ -3201,6 +3287,14 @@ export function UnifiedWorldViewer({
         if (!intersectsSelectionRect(bounds)) continue;
         selectedKeys.push(buildObjectItemKey("mesh", meshRoot.name || meshRoot.uuid));
       }
+      for (const handle of splatHandlesRef.current) {
+        handle.object.updateMatrixWorld(true);
+        const bounds = handle.bounds
+          ? handle.bounds.clone().applyMatrix4(handle.object.matrixWorld)
+          : new THREE.Box3().setFromObject(handle.object);
+        if (!intersectsSelectionRect(bounds)) continue;
+        selectedKeys.push(buildObjectItemKey("splat", handle.id));
+      }
       applyMarkedSelectionKeys(selectedKeys);
       if (selectedKeys.length === 0) {
         setTransformDebug("selected 0 objects");
@@ -3254,10 +3348,10 @@ export function UnifiedWorldViewer({
       setObjectContextMenu(null);
       setArtifactContextMenu(null);
       if (!rendererRef.current || !cameraRef.current) return;
-      if (transformControls.axis || transformDraggingRef.current) {
-        return;
-      }
       if (event.button === 0 && transformControls.visible) {
+        if (transformDraggingRef.current) {
+          return;
+        }
         const rect = rendererRef.current.domElement.getBoundingClientRect();
         pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -3265,7 +3359,18 @@ export function UnifiedWorldViewer({
           (transformControls as unknown as { getRaycaster?: () => THREE.Raycaster }).getRaycaster?.() ?? null;
         if (gizmoRaycaster) {
           gizmoRaycaster.setFromCamera(pointer, cameraRef.current);
-          const gizmoHits = gizmoRaycaster.intersectObject(transformControlsHelper, true);
+          const gizmoHits = gizmoRaycaster.intersectObject(transformControlsHelper, true).filter((hit) => {
+            const candidate = hit.object as THREE.Object3D & { isTransformControlsPlane?: boolean };
+            if (candidate.isTransformControlsPlane) {
+              return false;
+            }
+            let current: THREE.Object3D | null = candidate;
+            while (current) {
+              if (!current.visible) return false;
+              current = current.parent;
+            }
+            return true;
+          });
           if (gizmoHits.length > 0) {
             return;
           }
@@ -3394,8 +3499,6 @@ export function UnifiedWorldViewer({
       const width = Math.max(1, containerRef.current.clientWidth);
       const height = Math.max(1, containerRef.current.clientHeight);
       rendererRef.current.setSize(width, height);
-      composerRef.current?.setSize(width, height);
-      outlinePassRef.current?.setSize(width, height);
       cameraRef.current.aspect = width / height;
       cameraRef.current.updateProjectionMatrix();
     });
@@ -4121,11 +4224,7 @@ export function UnifiedWorldViewer({
       } else if (hasSparkRuntime && sparkRendererBridge && (sparkRendererBridge as unknown as THREE.Object3D).parent !== root) {
         root.add(sparkRendererBridge as unknown as THREE.Object3D);
       }
-      if (composerRef.current) {
-        composerRef.current.render();
-      } else {
-        renderer.render(scene, camera);
-      }
+      renderer.render(scene, camera);
 
       fpsCounterRef.current.acc += dt;
       fpsCounterRef.current.frames += 1;
@@ -4183,14 +4282,6 @@ export function UnifiedWorldViewer({
       scene.remove(transformControlsHelper);
       transformControls.dispose();
       transformControlsRef.current = null;
-      outlinePassRef.current = null;
-      const composerInstance = composerRef.current;
-      if (composerInstance) {
-        for (const pass of composerInstance.passes as Array<{ dispose?: () => void }>) {
-          pass.dispose?.();
-        }
-      }
-      composerRef.current = null;
 
       orbit.dispose();
       draco.dispose();
@@ -5026,70 +5117,106 @@ export function UnifiedWorldViewer({
             {objectItems.length === 0 ? (
               <div className="rounded-md border border-border/50 px-2 py-1 text-xs text-zinc-400">No scene objects</div>
             ) : (
-              objectItems.map((item) => (
-                <div key={item.id} className="flex items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant={
-                      (selectedKind !== "group" && selectedName === item.id) ||
-                      groupSelectionSet.has(buildObjectItemKey(item.kind, item.id))
-                        ? "default"
-                        : "outline"
-                    }
-                    className="h-8 flex-1 justify-between gap-2 rounded-md"
-                    onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                      const itemKey = buildObjectItemKey(item.kind, item.id);
-                      if (event.shiftKey) {
-                        if (item.kind !== "mesh") {
+              objectItems.map((item) => {
+                const itemKey = buildObjectItemKey(item.kind, item.id);
+                const isMarkedForGroup = groupSelectionSet.has(itemKey);
+                const isSelected = selectedKind !== "group" && selectedName === item.id;
+                const isRenaming = renamingObjectKey === itemKey;
+                return (
+                  <div key={item.id} className="flex items-center gap-1">
+                    {isRenaming ? (
+                      <div className="flex h-8 flex-1 items-center gap-1 rounded-md border border-border/60 bg-background/35 px-1">
+                        <Input
+                          value={renamingMeshDraft}
+                          onChange={(event: ReactChangeEvent<HTMLInputElement>) => setRenamingMeshDraft(event.target.value)}
+                          onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              commitObjectRename(item.kind, item.id);
+                              return;
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelObjectRename(item.kind, item.id);
+                            }
+                          }}
+                          autoFocus
+                          className="h-6 border-border/70 bg-background/70 px-2 text-xs"
+                          placeholder="object name"
+                        />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 w-6 rounded-sm px-0 text-[10px]"
+                          onClick={() => commitObjectRename(item.kind, item.id)}
+                          title="Save object name"
+                        >
+                          S
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 w-6 rounded-sm px-0 text-[10px]"
+                          onClick={() => cancelObjectRename(item.kind, item.id)}
+                          title="Cancel rename"
+                        >
+                          X
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant={isSelected || isMarkedForGroup ? "default" : "outline"}
+                        className="h-8 flex-1 justify-between gap-2 rounded-md"
+                        onDoubleClick={() => {
+                          const draft = (objectCustomLabels[itemKey] ?? item.label).trim();
+                          setRenamingObjectKey(itemKey);
+                          setRenamingMeshDraft(draft);
+                        }}
+                        onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                          if (event.shiftKey) {
+                            if (item.kind !== "mesh") {
+                              objectListSelectionAnchorRef.current = itemKey;
+                              selectObjectItem(item.kind, item.id);
+                              return;
+                            }
+                            selectObjectRangeFromAnchor(itemKey);
+                            selectObjectItem(item.kind, item.id);
+                            return;
+                          }
+                          if (event.metaKey || event.ctrlKey) {
+                            toggleObjectMarkedForGroup(item.kind, item.id);
+                            selectObjectItem(item.kind, item.id);
+                            return;
+                          }
                           objectListSelectionAnchorRef.current = itemKey;
                           selectObjectItem(item.kind, item.id);
-                          return;
-                        }
-                        selectObjectRangeFromAnchor(itemKey);
-                        selectObjectItem(item.kind, item.id);
-                        return;
-                      }
-                      if (event.metaKey || event.ctrlKey) {
-                        toggleObjectMarkedForGroup(item.kind, item.id);
-                        selectObjectItem(item.kind, item.id);
-                        return;
-                      }
-                      objectListSelectionAnchorRef.current = itemKey;
-                      selectObjectItem(item.kind, item.id);
-                    }}
-                    onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                      event.preventDefault();
-                      selectObjectItem(item.kind, item.id);
-                      const menuWidth = 168;
-                      const menuHeight = 78;
-                      const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
-                      const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
-                      setObjectContextMenu({
-                        x: Math.max(8, Math.min(event.clientX, maxX)),
-                        y: Math.max(8, Math.min(event.clientY, maxY)),
-                        itemId: item.id,
-                        kind: item.kind,
-                        label: item.label
-                      });
-                    }}
-                  >
-                    <span className="truncate text-left text-xs">{item.label}</span>
-                    <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
-                      {item.kind === "mesh" ? "mesh" : "splat"}
-                    </span>
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={groupSelectionSet.has(buildObjectItemKey(item.kind, item.id)) ? "default" : "outline"}
-                    className="h-8 w-8 rounded-md px-0 text-[11px]"
-                    onClick={() => toggleObjectMarkedForGroup(item.kind, item.id)}
-                    title="Mark for grouping"
-                    disabled={item.kind !== "mesh"}
-                  >
-                    G
-                  </Button>
-                </div>
-              ))
+                        }}
+                        onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                          event.preventDefault();
+                          selectObjectItem(item.kind, item.id);
+                          const menuWidth = 168;
+                          const menuHeight = 78;
+                          const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
+                          const maxY = typeof window !== "undefined" ? window.innerHeight - menuHeight - 8 : event.clientY;
+                          setObjectContextMenu({
+                            x: Math.max(8, Math.min(event.clientX, maxX)),
+                            y: Math.max(8, Math.min(event.clientY, maxY)),
+                            itemId: item.id,
+                            kind: item.kind,
+                            label: item.label
+                          });
+                        }}
+                      >
+                        <span className="truncate text-left text-xs">{item.label}</span>
+                        <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
+                          {item.kind === "mesh" ? "mesh" : "splat"}
+                        </span>
+                      </Button>
+                    )}
+                  </div>
+                );
+              })
             )}
           </div>
           <Button
@@ -5102,7 +5229,7 @@ export function UnifiedWorldViewer({
             Open Transform
           </Button>
           <div className="mt-1 text-[10px] text-zinc-500">
-            Meshes and splats are editable with gizmo. Shift+drag in viewer for mesh box select.
+            Meshes and splats are editable with gizmo. F2 or double-click an object row to rename. Shift+drag in viewer for box select.
           </div>
         </div>
       ) : null}
