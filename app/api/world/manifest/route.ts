@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Artifact } from "@prisma/client";
 
 import { prisma } from "@/lib/db";
+import { getObjectBuffer } from "@/lib/storage/s3";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
 
 type BundleMode = "same_node" | "project_fallback";
@@ -34,6 +35,168 @@ interface WorldManifestSplatEntry {
 
 interface ArtifactMetaLike {
   meshObjectStorageKeys?: unknown;
+}
+
+interface WorldManifestEnvironment {
+  enabled: boolean;
+  hdriUrl: string | null;
+  backgroundMode: "solid" | "hdri" | "transparent";
+  backgroundColor: string;
+  toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+  exposure: number;
+  envIntensity: number;
+  hdriRotationY: number;
+  hdriBlur: number;
+  ambientIntensity: number;
+  sunIntensity: number;
+  sunColor: string;
+  groundColor: string;
+}
+
+interface GraphNodeLike {
+  id: string;
+  type: string;
+  data?: {
+    params?: Record<string, unknown>;
+  };
+}
+
+interface GraphEdgeLike {
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+}
+
+const DEFAULT_ENVIRONMENT: WorldManifestEnvironment = {
+  enabled: true,
+  hdriUrl: null,
+  backgroundMode: "solid",
+  backgroundColor: "#05070e",
+  toneMapping: "ACESFilmic",
+  exposure: 1,
+  envIntensity: 1,
+  hdriRotationY: 0,
+  hdriBlur: 0,
+  ambientIntensity: 1.1,
+  sunIntensity: 1.2,
+  sunColor: "#ffffff",
+  groundColor: "#101828"
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sanitizeColor(value: unknown, fallback: string) {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized) ? normalized : fallback;
+}
+
+function normalizeBackgroundMode(value: unknown): WorldManifestEnvironment["backgroundMode"] {
+  if (value === "hdri" || value === "transparent") return value;
+  return "solid";
+}
+
+function normalizeToneMapping(value: unknown): WorldManifestEnvironment["toneMapping"] {
+  if (value === "Neutral" || value === "Reinhard" || value === "None") return value;
+  return "ACESFilmic";
+}
+
+function normalizeEnvironmentConfig(raw: Record<string, unknown> | null | undefined): WorldManifestEnvironment {
+  const params = raw ?? {};
+  const hdriUrlRaw = typeof params.hdriUrl === "string" ? params.hdriUrl.trim() : "";
+  return {
+    enabled: params.enabled !== false,
+    hdriUrl: hdriUrlRaw.length > 0 ? hdriUrlRaw : null,
+    backgroundMode: normalizeBackgroundMode(params.backgroundMode),
+    backgroundColor: sanitizeColor(params.backgroundColor, DEFAULT_ENVIRONMENT.backgroundColor),
+    toneMapping: normalizeToneMapping(params.toneMapping),
+    exposure: clamp(Number.isFinite(Number(params.exposure)) ? Number(params.exposure) : DEFAULT_ENVIRONMENT.exposure, 0, 6),
+    envIntensity: clamp(
+      Number.isFinite(Number(params.envIntensity)) ? Number(params.envIntensity) : DEFAULT_ENVIRONMENT.envIntensity,
+      0,
+      8
+    ),
+    hdriRotationY: clamp(
+      Number.isFinite(Number(params.hdriRotationY)) ? Number(params.hdriRotationY) : DEFAULT_ENVIRONMENT.hdriRotationY,
+      -180,
+      180
+    ),
+    hdriBlur: clamp(
+      Number.isFinite(Number(params.hdriBlur)) ? Number(params.hdriBlur) : DEFAULT_ENVIRONMENT.hdriBlur,
+      0,
+      1
+    ),
+    ambientIntensity: clamp(
+      Number.isFinite(Number(params.ambientIntensity)) ? Number(params.ambientIntensity) : DEFAULT_ENVIRONMENT.ambientIntensity,
+      0,
+      8
+    ),
+    sunIntensity: clamp(
+      Number.isFinite(Number(params.sunIntensity)) ? Number(params.sunIntensity) : DEFAULT_ENVIRONMENT.sunIntensity,
+      0,
+      8
+    ),
+    sunColor: sanitizeColor(params.sunColor, DEFAULT_ENVIRONMENT.sunColor),
+    groundColor: sanitizeColor(params.groundColor, DEFAULT_ENVIRONMENT.groundColor)
+  };
+}
+
+function parseGraphDocument(raw: unknown): { nodes: GraphNodeLike[]; edges: GraphEdgeLike[] } | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const nodesRaw = Array.isArray(record.nodes) ? record.nodes : [];
+  const edgesRaw = Array.isArray(record.edges) ? record.edges : [];
+
+  const nodes = nodesRaw
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+    .map((entry) => {
+      const data =
+        entry.data && typeof entry.data === "object" && !Array.isArray(entry.data)
+          ? (entry.data as Record<string, unknown>)
+          : {};
+      const params =
+        data.params && typeof data.params === "object" && !Array.isArray(data.params)
+          ? (data.params as Record<string, unknown>)
+          : {};
+      return {
+        id: typeof entry.id === "string" ? entry.id : "",
+        type: typeof entry.type === "string" ? entry.type : "",
+        data: { params }
+      };
+    })
+    .filter((node) => node.id.length > 0 && node.type.length > 0);
+
+  const edges = edgesRaw
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+    .map((entry) => ({
+      source: typeof entry.source === "string" ? entry.source : "",
+      target: typeof entry.target === "string" ? entry.target : "",
+      sourceHandle: typeof entry.sourceHandle === "string" ? entry.sourceHandle : null,
+      targetHandle: typeof entry.targetHandle === "string" ? entry.targetHandle : null
+    }))
+    .filter((edge) => edge.source.length > 0 && edge.target.length > 0);
+
+  return { nodes, edges };
+}
+
+function normalizeViewerTargetHandle(handle: string | null | undefined) {
+  if (!handle || handle.length === 0) return "artifact";
+  if (handle === "scene" || handle === "json") return "artifact";
+  if (handle === "env" || handle === "hdri" || handle === "lighting") return "environment";
+  return handle;
+}
+
+function readEnvironmentFromMeta(meta: unknown): WorldManifestEnvironment | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const record = meta as Record<string, unknown>;
+  const source =
+    record.environment && typeof record.environment === "object" && !Array.isArray(record.environment)
+      ? (record.environment as Record<string, unknown>)
+      : record;
+  return normalizeEnvironmentConfig(source);
 }
 
 function parseTilesetMeta(artifact: Artifact) {
@@ -118,6 +281,20 @@ export async function GET(req: NextRequest) {
   if (!selectedArtifact) {
     return NextResponse.json({ error: "Artifact not found" }, { status: 404 });
   }
+
+  const selectedRun = selectedArtifact.runId
+    ? await prisma.run.findUnique({
+        where: { id: selectedArtifact.runId },
+        select: {
+          graph: {
+            select: {
+              graphJson: true
+            }
+          }
+        }
+      })
+    : null;
+  const parsedGraph = parseGraphDocument(selectedRun?.graph?.graphJson ?? null);
 
   const relatedArtifacts = await prisma.artifact.findMany({
     where: {
@@ -319,6 +496,100 @@ export async function GET(req: NextRequest) {
         splatRunIds.some((runId) => runId !== selectedRunId))
   );
 
+  let resolvedEnvironment: WorldManifestEnvironment | null = null;
+  let environmentNodeId: string | null = null;
+  let environmentViewerNodeId: string | null = null;
+  if (parsedGraph) {
+    const nodesById = new Map(parsedGraph.nodes.map((node) => [node.id, node]));
+    const selectedNodeId = selectedArtifact.nodeId ?? null;
+
+    if (selectedNodeId) {
+      const connectedViewerNodeIds = parsedGraph.edges
+        .filter((edge) => edge.source === selectedNodeId)
+        .filter((edge) => nodesById.get(edge.target)?.type === "out.open_in_viewer")
+        .filter((edge) => normalizeViewerTargetHandle(edge.targetHandle) === "artifact")
+        .map((edge) => edge.target);
+
+      const environmentEdge = parsedGraph.edges.find((edge) => {
+        if (!connectedViewerNodeIds.includes(edge.target)) return false;
+        if (normalizeViewerTargetHandle(edge.targetHandle) !== "environment") return false;
+        return nodesById.get(edge.source)?.type === "viewer.environment";
+      });
+      if (environmentEdge) {
+        environmentNodeId = environmentEdge.source;
+        environmentViewerNodeId = environmentEdge.target;
+      }
+    }
+
+    if (!environmentNodeId) {
+      const environmentNodes = parsedGraph.nodes.filter((node) => node.type === "viewer.environment");
+      if (environmentNodes.length === 1) {
+        environmentNodeId = environmentNodes[0].id;
+      }
+    }
+
+    if (environmentNodeId) {
+      const environmentNode = nodesById.get(environmentNodeId);
+      const graphParams =
+        environmentNode?.data?.params && typeof environmentNode.data.params === "object"
+          ? (environmentNode.data.params as Record<string, unknown>)
+          : null;
+      const graphEnvironment = normalizeEnvironmentConfig(graphParams ?? undefined);
+      let artifactEnvironment: WorldManifestEnvironment | null = null;
+
+      const localCandidate = artifacts
+        .filter((artifact) => artifact.nodeId === environmentNodeId && artifact.kind === "json")
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      const dbCandidates = localCandidate
+        ? [localCandidate]
+        : await prisma.artifact.findMany({
+            where: {
+              projectId: selectedArtifact.projectId,
+              nodeId: environmentNodeId,
+              kind: "json"
+            },
+            orderBy: { createdAt: "desc" },
+            take: 8
+          });
+
+      for (const candidate of dbCandidates) {
+        const fromMeta = readEnvironmentFromMeta(candidate.meta);
+        if (fromMeta) {
+          artifactEnvironment = fromMeta;
+          break;
+        }
+        try {
+          const raw = await getObjectBuffer(candidate.storageKey);
+          const parsed = JSON.parse(raw.toString("utf8")) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const fromBody = normalizeEnvironmentConfig(parsed as Record<string, unknown>);
+            artifactEnvironment = fromBody;
+            break;
+          }
+        } catch {
+          // Continue with next candidate.
+        }
+      }
+
+      const hdriStorageKey =
+        graphParams && typeof graphParams.hdriStorageKey === "string" && graphParams.hdriStorageKey.trim().length > 0
+          ? graphParams.hdriStorageKey.trim()
+          : null;
+      let hdriUrlFromStorage: string | null = null;
+      if (hdriStorageKey) {
+        const rawUrl = await safeGetSignedDownloadUrl(hdriStorageKey);
+        hdriUrlFromStorage = toAbsoluteUrlMaybe(rawUrl, req);
+      }
+
+      resolvedEnvironment = {
+        ...DEFAULT_ENVIRONMENT,
+        ...(artifactEnvironment ?? {}),
+        ...graphEnvironment,
+        hdriUrl: hdriUrlFromStorage ?? graphEnvironment.hdriUrl ?? artifactEnvironment?.hdriUrl ?? null
+      };
+    }
+  }
+
   return NextResponse.json({
     artifactId: selectedArtifact.id,
     projectId: selectedArtifact.projectId,
@@ -331,6 +602,11 @@ export async function GET(req: NextRequest) {
       meshRunIds,
       splatRunIds,
       usedCrossRunFallback
+    },
+    environment: resolvedEnvironment,
+    environmentContext: {
+      nodeId: environmentNodeId,
+      viewerNodeId: environmentViewerNodeId
     },
     camera: {
       position: [4, 3, 4],

@@ -17,6 +17,22 @@ const imageInput = z.object({
   filename: z.string().default("image.png")
 });
 const cameraPathInput = z.object({ json: z.string().default("[]") });
+const viewerEnvironmentParams = z.object({
+  enabled: z.boolean().default(true),
+  hdriUrl: z.string().default(""),
+  hdriStorageKey: z.string().default(""),
+  backgroundMode: z.enum(["solid", "hdri", "transparent"]).default("solid"),
+  backgroundColor: z.string().default("#05070e"),
+  toneMapping: z.enum(["ACESFilmic", "Neutral", "Reinhard", "None"]).default("ACESFilmic"),
+  exposure: z.number().min(0).max(6).default(1),
+  envIntensity: z.number().min(0).max(8).default(1),
+  hdriRotationY: z.number().min(-180).max(180).default(0),
+  hdriBlur: z.number().min(0).max(1).default(0),
+  ambientIntensity: z.number().min(0).max(8).default(1.1),
+  sunIntensity: z.number().min(0).max(8).default(1.2),
+  sunColor: z.string().default("#ffffff"),
+  groundColor: z.string().default("#101828")
+});
 const groundingDinoParams = z.object({
   prompt: z.string().default(""),
   threshold: z.number().min(0).max(1).default(0.35)
@@ -115,6 +131,51 @@ export const nodeSpecEntries = [
     paramSchema: cameraPathInput,
     paramFields: [{ key: "json", label: "Camera JSON", input: "json" }],
     defaultParams: { json: "[]" }
+  }),
+  makeSpec("viewer.environment", {
+    type: "viewer.environment",
+    category: "Outputs",
+    title: "ViewerEnvironment",
+    icon: "Sun",
+    description: "Configure viewer lighting and optional HDRI map.",
+    inputPorts: [],
+    outputPorts: [{ id: "environment", label: "environment", artifactType: "JsonData" }],
+    paramSchema: viewerEnvironmentParams,
+    paramFields: [
+      { key: "enabled", label: "Enabled", input: "boolean" },
+      { key: "hdriUrl", label: "HDRI URL", input: "text", placeholder: "https://.../studio.hdr or studio.exr" },
+      { key: "hdriStorageKey", label: "HDRI Storage Key", input: "text", placeholder: "projects/.../studio.hdr" },
+      { key: "backgroundMode", label: "Background Mode", input: "select", options: ["solid", "hdri", "transparent"] },
+      { key: "backgroundColor", label: "Background Color", input: "text", placeholder: "#05070e" },
+      { key: "toneMapping", label: "Tone Mapping", input: "select", options: ["ACESFilmic", "Neutral", "Reinhard", "None"] },
+      { key: "exposure", label: "Exposure", input: "number", min: 0, max: 6, step: 0.05 },
+      { key: "envIntensity", label: "Env Intensity", input: "number", min: 0, max: 8, step: 0.05 },
+      { key: "hdriRotationY", label: "HDRI Rotation Y (deg)", input: "number", min: -180, max: 180, step: 1 },
+      { key: "hdriBlur", label: "HDRI Blur", input: "number", min: 0, max: 1, step: 0.01 },
+      { key: "ambientIntensity", label: "Ambient Intensity", input: "number", min: 0, max: 8, step: 0.05 },
+      { key: "sunIntensity", label: "Sun Intensity", input: "number", min: 0, max: 8, step: 0.05 },
+      { key: "sunColor", label: "Sun Color", input: "text", placeholder: "#ffffff" },
+      { key: "groundColor", label: "Ground Color", input: "text", placeholder: "#101828" }
+    ],
+    defaultParams: {
+      enabled: true,
+      hdriUrl: "",
+      hdriStorageKey: "",
+      backgroundMode: "solid",
+      backgroundColor: "#05070e",
+      toneMapping: "ACESFilmic",
+      exposure: 1,
+      envIntensity: 1,
+      hdriRotationY: 0,
+      hdriBlur: 0,
+      ambientIntensity: 1.1,
+      sunIntensity: 1.2,
+      sunColor: "#ffffff",
+      groundColor: "#101828"
+    },
+    ui: {
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("model.groundingdino", {
     type: "model.groundingdino",
@@ -387,7 +448,10 @@ export const nodeSpecEntries = [
     title: "Preview",
     icon: "ExternalLink",
     description: "Connect any node output to preview its latest artifact.",
-    inputPorts: [{ id: "artifact", label: "Artifact", artifactType: "JsonData", required: true }],
+    inputPorts: [
+      { id: "artifact", label: "Artifact", artifactType: "JsonData", required: true },
+      { id: "environment", label: "Environment", artifactType: "JsonData" }
+    ],
     outputPorts: [],
     paramSchema: z.object({}),
     paramFields: [],

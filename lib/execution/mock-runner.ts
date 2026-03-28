@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 
 import { ArtifactKind } from "@prisma/client";
 
-import { NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "@/lib/execution/contracts";
+import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "@/lib/execution/contracts";
 import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdino";
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
 import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
@@ -20,7 +20,7 @@ function hashBuffer(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-function jsonOutput(outputId: string, data: Record<string, unknown>, hidden = false) {
+function jsonOutput(outputId: string, data: Record<string, unknown>, hidden = false): ExecutorOutputArtifact {
   const buffer = createJsonBuffer(data);
   return {
     outputId,
@@ -32,7 +32,7 @@ function jsonOutput(outputId: string, data: Record<string, unknown>, hidden = fa
     meta: {
       outputKey: outputId,
       hidden
-    }
+    } as Record<string, unknown>
   };
 }
 
@@ -117,6 +117,36 @@ export class MockModelRunner implements NodeExecutor {
         return {
           outputs: [jsonOutput("path", { type: "camera_path", value: ctx.params.json ?? "[]", createdAt: now })]
         };
+      case "viewer.environment": {
+        const payload = {
+          enabled: ctx.params.enabled !== false,
+          hdriUrl: typeof ctx.params.hdriUrl === "string" ? ctx.params.hdriUrl : "",
+          hdriStorageKey: typeof ctx.params.hdriStorageKey === "string" ? ctx.params.hdriStorageKey : "",
+          backgroundMode:
+            typeof ctx.params.backgroundMode === "string" ? ctx.params.backgroundMode : "solid",
+          backgroundColor:
+            typeof ctx.params.backgroundColor === "string" ? ctx.params.backgroundColor : "#05070e",
+          toneMapping:
+            typeof ctx.params.toneMapping === "string" ? ctx.params.toneMapping : "ACESFilmic",
+          exposure: Number.isFinite(Number(ctx.params.exposure)) ? Number(ctx.params.exposure) : 1,
+          envIntensity: Number.isFinite(Number(ctx.params.envIntensity)) ? Number(ctx.params.envIntensity) : 1,
+          hdriRotationY:
+            Number.isFinite(Number(ctx.params.hdriRotationY)) ? Number(ctx.params.hdriRotationY) : 0,
+          hdriBlur: Number.isFinite(Number(ctx.params.hdriBlur)) ? Number(ctx.params.hdriBlur) : 0,
+          ambientIntensity:
+            Number.isFinite(Number(ctx.params.ambientIntensity)) ? Number(ctx.params.ambientIntensity) : 1.1,
+          sunIntensity: Number.isFinite(Number(ctx.params.sunIntensity)) ? Number(ctx.params.sunIntensity) : 1.2,
+          sunColor: typeof ctx.params.sunColor === "string" ? ctx.params.sunColor : "#ffffff",
+          groundColor: typeof ctx.params.groundColor === "string" ? ctx.params.groundColor : "#101828",
+          createdAt: now
+        };
+        const output = jsonOutput("environment", payload);
+        output.meta = {
+          ...(output.meta ?? {}),
+          environment: payload
+        };
+        return { outputs: [output] };
+      }
       case "model.qwen_vl":
         return {
           outputs: [jsonOutput("json", { summary: "Mock VLM analysis output", createdAt: now })]

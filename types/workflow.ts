@@ -21,6 +21,7 @@ export type WorkflowNodeType =
   | "input.image"
   | "input.text"
   | "input.cameraPath"
+  | "viewer.environment"
   | "model.groundingdino"
   | "model.sam2"
   | "model.sam3d_objects"

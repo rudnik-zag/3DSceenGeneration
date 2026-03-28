@@ -46,6 +46,21 @@ interface WorldManifestResponse {
     canBuildTileset?: boolean;
     defaultPresetName?: string;
   };
+  environment?: {
+    enabled: boolean;
+    hdriUrl: string | null;
+    backgroundMode: "solid" | "hdri" | "transparent";
+    backgroundColor: string;
+    toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+    exposure: number;
+    envIntensity: number;
+    hdriRotationY: number;
+    hdriBlur: number;
+    ambientIntensity: number;
+    sunIntensity: number;
+    sunColor: string;
+    groundColor: string;
+  } | null;
 }
 
 interface UnifiedManifest {
@@ -55,6 +70,21 @@ interface UnifiedManifest {
     target?: [number, number, number];
     fov?: number;
   };
+  environment?: {
+    enabled: boolean;
+    hdriUrl: string | null;
+    backgroundMode: "solid" | "hdri" | "transparent";
+    backgroundColor: string;
+    toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+    exposure: number;
+    envIntensity: number;
+    hdriRotationY: number;
+    hdriBlur: number;
+    ambientIntensity: number;
+    sunIntensity: number;
+    sunColor: string;
+    groundColor: string;
+  } | null;
   meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
 }
@@ -306,6 +336,7 @@ export function ViewerLoader({
       baseManifest = {
         artifactId: activeArtifact?.id,
         camera: DEFAULT_CAMERA,
+        environment: null,
         meshes: [],
         splats: []
       };
@@ -340,6 +371,7 @@ export function ViewerLoader({
       baseManifest = {
         artifactId: worldManifest.artifactId,
         camera: DEFAULT_CAMERA,
+        environment: worldManifest.environment ?? null,
         meshes: mergedMeshes,
         splats: worldManifest.splats.map((entry) => ({
           id: entry.id,

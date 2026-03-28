@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent as ReactChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent
 } from "react";
@@ -15,6 +16,8 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { KTX2Loader } from "three/examples/jsm/loaders/KTX2Loader.js";
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
+import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
+import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
 
@@ -43,6 +46,21 @@ interface WorldManifest {
     target?: [number, number, number];
     fov?: number;
   };
+  environment?: {
+    enabled: boolean;
+    hdriUrl: string | null;
+    backgroundMode: "solid" | "hdri" | "transparent";
+    backgroundColor: string;
+    toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+    exposure: number;
+    envIntensity: number;
+    hdriRotationY: number;
+    hdriBlur: number;
+    ambientIntensity: number;
+    sunIntensity: number;
+    sunColor: string;
+    groundColor: string;
+  } | null;
   meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{
     id: string;
@@ -51,6 +69,8 @@ interface WorldManifest {
     formatHint?: "ply" | "splat" | "ksplat" | "spz" | null;
   }>;
 }
+
+type ViewerEnvironmentConfig = NonNullable<WorldManifest["environment"]>;
 
 type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
@@ -196,6 +216,88 @@ const DEFAULT_STATS: ViewerHudStats = {
   activeLodDistribution: { "0": 0, "1": 0, "2": 0 }
 };
 
+const DEFAULT_VIEWER_ENVIRONMENT: ViewerEnvironmentConfig = {
+  enabled: true,
+  hdriUrl: null,
+  backgroundMode: "solid",
+  backgroundColor: "#05070e",
+  toneMapping: "ACESFilmic",
+  exposure: 1,
+  envIntensity: 1,
+  hdriRotationY: 0,
+  hdriBlur: 0,
+  ambientIntensity: 1.1,
+  sunIntensity: 1.2,
+  sunColor: "#ffffff",
+  groundColor: "#101828"
+};
+
+function normalizeEnvironmentConfig(input: WorldManifest["environment"] | null | undefined): ViewerEnvironmentConfig {
+  const base = input ?? null;
+  const hdriUrlRaw = typeof base?.hdriUrl === "string" ? base.hdriUrl.trim() : "";
+  return {
+    ...DEFAULT_VIEWER_ENVIRONMENT,
+    ...(base ?? {}),
+    hdriUrl: hdriUrlRaw.length > 0 ? hdriUrlRaw : null,
+    backgroundColor: safeColorOrFallback(
+      base?.backgroundColor ?? DEFAULT_VIEWER_ENVIRONMENT.backgroundColor,
+      DEFAULT_VIEWER_ENVIRONMENT.backgroundColor
+    ),
+    sunColor: safeColorOrFallback(
+      base?.sunColor ?? DEFAULT_VIEWER_ENVIRONMENT.sunColor,
+      DEFAULT_VIEWER_ENVIRONMENT.sunColor
+    ),
+    groundColor: safeColorOrFallback(
+      base?.groundColor ?? DEFAULT_VIEWER_ENVIRONMENT.groundColor,
+      DEFAULT_VIEWER_ENVIRONMENT.groundColor
+    ),
+    exposure: clampRange(
+      Number.isFinite(Number(base?.exposure)) ? Number(base?.exposure) : DEFAULT_VIEWER_ENVIRONMENT.exposure,
+      0,
+      6
+    ),
+    envIntensity: clampRange(
+      Number.isFinite(Number(base?.envIntensity)) ? Number(base?.envIntensity) : DEFAULT_VIEWER_ENVIRONMENT.envIntensity,
+      0,
+      8
+    ),
+    hdriRotationY: clampRange(
+      Number.isFinite(Number(base?.hdriRotationY)) ? Number(base?.hdriRotationY) : DEFAULT_VIEWER_ENVIRONMENT.hdriRotationY,
+      -180,
+      180
+    ),
+    hdriBlur: clampRange(
+      Number.isFinite(Number(base?.hdriBlur)) ? Number(base?.hdriBlur) : DEFAULT_VIEWER_ENVIRONMENT.hdriBlur,
+      0,
+      1
+    ),
+    ambientIntensity: clampRange(
+      Number.isFinite(Number(base?.ambientIntensity))
+        ? Number(base?.ambientIntensity)
+        : DEFAULT_VIEWER_ENVIRONMENT.ambientIntensity,
+      0,
+      8
+    ),
+    sunIntensity: clampRange(
+      Number.isFinite(Number(base?.sunIntensity)) ? Number(base?.sunIntensity) : DEFAULT_VIEWER_ENVIRONMENT.sunIntensity,
+      0,
+      8
+    ),
+    toneMapping:
+      base?.toneMapping === "None" ||
+      base?.toneMapping === "Reinhard" ||
+      base?.toneMapping === "Neutral" ||
+      base?.toneMapping === "ACESFilmic"
+        ? base.toneMapping
+        : DEFAULT_VIEWER_ENVIRONMENT.toneMapping,
+    backgroundMode:
+      base?.backgroundMode === "transparent" || base?.backgroundMode === "hdri" || base?.backgroundMode === "solid"
+        ? base.backgroundMode
+        : DEFAULT_VIEWER_ENVIRONMENT.backgroundMode,
+    enabled: typeof base?.enabled === "boolean" ? base.enabled : DEFAULT_VIEWER_ENVIRONMENT.enabled
+  };
+}
+
 const PLY_3DGS_PROPERTIES = [
   "x",
   "y",
@@ -299,6 +401,149 @@ function clamp01(value: number): number {
   if (value < 0) return 0;
   if (value > 1) return 1;
   return value;
+}
+
+function clampRange(value: number, min: number, max: number): number {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function safeColorOrFallback(value: string, fallback: string): string {
+  const normalized = value.trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized) ? normalized : fallback;
+}
+
+function resolveToneMapping(mode: "ACESFilmic" | "Neutral" | "Reinhard" | "None"): THREE.ToneMapping {
+  if (mode === "None") return THREE.NoToneMapping;
+  if (mode === "Reinhard") return THREE.ReinhardToneMapping;
+  if (mode === "Neutral" && typeof (THREE as unknown as { NeutralToneMapping?: THREE.ToneMapping }).NeutralToneMapping === "number") {
+    return (THREE as unknown as { NeutralToneMapping: THREE.ToneMapping }).NeutralToneMapping;
+  }
+  return THREE.ACESFilmicToneMapping;
+}
+
+function getUrlPathnameLower(url: string): string {
+  const [withoutHash] = url.split("#");
+  const [withoutQuery] = withoutHash.split("?");
+  return withoutQuery.toLowerCase();
+}
+
+function isLikelyExrUrl(url: string): boolean {
+  return getUrlPathnameLower(url).endsWith(".exr");
+}
+
+function isLikelyHdrUrl(url: string): boolean {
+  const normalized = getUrlPathnameLower(url);
+  return normalized.endsWith(".hdr") || normalized.endsWith(".pic");
+}
+
+async function loadEnvironmentTexture(url: string): Promise<THREE.Texture> {
+  interface ParsedEnvironmentTextureData {
+    image?: THREE.DataTexture["image"];
+    data?: THREE.DataTexture["image"]["data"];
+    width?: number;
+    height?: number;
+    wrapS?: THREE.Wrapping;
+    wrapT?: THREE.Wrapping;
+    magFilter?: THREE.MagnificationTextureFilter;
+    minFilter?: THREE.MinificationTextureFilter;
+    anisotropy?: number;
+    colorSpace?: THREE.ColorSpace;
+    flipY?: boolean;
+    format?: THREE.PixelFormat;
+    type?: THREE.TextureDataType;
+    mipmaps?: unknown[];
+    mipmapCount?: number;
+    generateMipmaps?: boolean;
+  }
+
+  const loadBuffer = async (): Promise<ArrayBuffer> => {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+    return response.arrayBuffer();
+  };
+
+  const buildTextureFromParsedData = (parsed: ParsedEnvironmentTextureData): THREE.DataTexture => {
+    const texture = new THREE.DataTexture();
+    if (parsed.image && typeof parsed.image === "object" && !Array.isArray(parsed.image)) {
+      texture.image = parsed.image;
+    } else {
+      const data = parsed.data;
+      const width = Number(parsed.width);
+      const height = Number(parsed.height);
+      if (!data || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        throw new Error("Environment map parser returned no image data.");
+      }
+      texture.image = { data, width, height };
+    }
+
+    texture.wrapS = typeof parsed.wrapS === "number" ? parsed.wrapS : THREE.ClampToEdgeWrapping;
+    texture.wrapT = typeof parsed.wrapT === "number" ? parsed.wrapT : THREE.ClampToEdgeWrapping;
+    texture.magFilter =
+      typeof parsed.magFilter === "number" ? parsed.magFilter : THREE.LinearFilter;
+    texture.minFilter =
+      typeof parsed.minFilter === "number" ? parsed.minFilter : THREE.LinearFilter;
+    texture.anisotropy = Number.isFinite(Number(parsed.anisotropy)) ? Number(parsed.anisotropy) : 1;
+    if (typeof parsed.colorSpace === "string") {
+      texture.colorSpace = parsed.colorSpace;
+    }
+    if (typeof parsed.flipY === "boolean") {
+      texture.flipY = parsed.flipY;
+    }
+    if (typeof parsed.format === "number") {
+      texture.format = parsed.format;
+    }
+    if (typeof parsed.type === "number") {
+      texture.type = parsed.type;
+    }
+    if (Array.isArray(parsed.mipmaps)) {
+      texture.mipmaps = parsed.mipmaps as unknown as typeof texture.mipmaps;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+    }
+    if (Number(parsed.mipmapCount) === 1) {
+      texture.minFilter = THREE.LinearFilter;
+    }
+    if (typeof parsed.generateMipmaps === "boolean") {
+      texture.generateMipmaps = parsed.generateMipmaps;
+    }
+    texture.needsUpdate = true;
+    return texture;
+  };
+
+  const loadExr = async () => {
+    const buffer = await loadBuffer();
+    const parsed = new EXRLoader().parse(buffer) as unknown as ParsedEnvironmentTextureData;
+    return buildTextureFromParsedData(parsed);
+  };
+  const loadHdr = async () => {
+    const buffer = await loadBuffer();
+    const parsed = new RGBELoader().parse(buffer) as unknown as ParsedEnvironmentTextureData;
+    return buildTextureFromParsedData(parsed);
+  };
+  const preferExr = isLikelyExrUrl(url);
+  const preferHdr = isLikelyHdrUrl(url);
+  if (preferExr) {
+    try {
+      return await loadExr();
+    } catch {
+      return loadHdr();
+    }
+  }
+  if (preferHdr) {
+    try {
+      return await loadHdr();
+    } catch {
+      return loadExr();
+    }
+  }
+  try {
+    return await loadHdr();
+  } catch {
+    return loadExr();
+  }
 }
 
 function normalizeRadiansSigned(value: number): number {
@@ -817,6 +1062,14 @@ export function UnifiedWorldViewer({
   const groupCounterRef = useRef(1);
   const objectListSelectionAnchorRef = useRef<string | null>(null);
   const loadedExternalAdditionIdsRef = useRef<Set<string>>(new Set());
+  const hemiLightRef = useRef<THREE.HemisphereLight | null>(null);
+  const directionalLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const pmremGeneratorRef = useRef<THREE.PMREMGenerator | null>(null);
+  const hdriSourceTextureRef = useRef<THREE.Texture | null>(null);
+  const hdriPmremTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
+  const environmentApplyTokenRef = useRef(0);
+  const hdriLocalObjectUrlRef = useRef<string | null>(null);
+  const hdriFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [viewMode, setViewMode] = useState<ViewMode>("default");
@@ -861,6 +1114,10 @@ export function UnifiedWorldViewer({
     width: number;
     height: number;
   } | null>(null);
+  const [viewerEnvironment, setViewerEnvironment] = useState<ViewerEnvironmentConfig>(() =>
+    normalizeEnvironmentConfig(manifest.environment)
+  );
+  const [hdriUrlDraft, setHdriUrlDraft] = useState<string>(() => normalizeEnvironmentConfig(manifest.environment).hdriUrl ?? "");
 
   const preferredRuntimeOrder = useMemo(
     () => getRuntimeOrderForPreference(getSplatRuntimePreference()),
@@ -975,6 +1232,175 @@ export function UnifiedWorldViewer({
       manifest.artifactId.length > 0 &&
       !manifest.artifactId.startsWith("local-")
   );
+
+  const disposeActiveHdriResources = useCallback(() => {
+    if (hdriPmremTargetRef.current) {
+      hdriPmremTargetRef.current.dispose();
+      hdriPmremTargetRef.current = null;
+    }
+    if (hdriSourceTextureRef.current) {
+      hdriSourceTextureRef.current.dispose();
+      hdriSourceTextureRef.current = null;
+    }
+  }, []);
+
+  const revokeLocalHdriUrl = useCallback(() => {
+    if (!hdriLocalObjectUrlRef.current) return;
+    URL.revokeObjectURL(hdriLocalObjectUrlRef.current);
+    hdriLocalObjectUrlRef.current = null;
+  }, []);
+
+  const applyViewerEnvironment = useCallback(
+    async (config: ViewerEnvironmentConfig) => {
+      const scene = sceneRef.current;
+      const renderer = rendererRef.current;
+      if (!scene || !renderer) return;
+
+      const sceneWithEnvironment = scene as THREE.Scene & {
+        backgroundBlurriness?: number;
+        backgroundIntensity?: number;
+        backgroundRotation?: THREE.Euler;
+        environmentIntensity?: number;
+        environmentRotation?: THREE.Euler;
+      };
+      renderer.toneMapping = resolveToneMapping(config.toneMapping);
+      renderer.toneMappingExposure = config.exposure;
+      sceneWithEnvironment.environmentIntensity = config.envIntensity;
+      sceneWithEnvironment.backgroundIntensity = config.envIntensity;
+      sceneWithEnvironment.backgroundBlurriness = config.hdriBlur;
+
+      if (hemiLightRef.current) {
+        hemiLightRef.current.color.set(config.sunColor);
+        hemiLightRef.current.groundColor.set(config.groundColor);
+        hemiLightRef.current.intensity = config.ambientIntensity;
+      }
+      if (directionalLightRef.current) {
+        directionalLightRef.current.color.set(config.sunColor);
+        directionalLightRef.current.intensity = config.sunIntensity;
+      }
+
+      const applyBackgroundMode = () => {
+        if (config.backgroundMode === "transparent") {
+          scene.background = null;
+          return;
+        }
+        if (config.backgroundMode === "solid") {
+          scene.background = new THREE.Color(config.backgroundColor);
+        }
+      };
+
+      const token = ++environmentApplyTokenRef.current;
+      sceneWithEnvironment.environmentRotation = new THREE.Euler(0, 0, 0);
+      sceneWithEnvironment.backgroundRotation = new THREE.Euler(0, 0, 0);
+      disposeActiveHdriResources();
+
+      if (!config.enabled || !config.hdriUrl) {
+        scene.environment = null;
+        applyBackgroundMode();
+        return;
+      }
+
+      try {
+        const texture = await loadEnvironmentTexture(config.hdriUrl);
+        if (token !== environmentApplyTokenRef.current) {
+          texture.dispose();
+          return;
+        }
+
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        hdriSourceTextureRef.current = texture;
+        if (!pmremGeneratorRef.current) {
+          pmremGeneratorRef.current = new THREE.PMREMGenerator(renderer);
+          pmremGeneratorRef.current.compileEquirectangularShader();
+        }
+        const pmremTarget = pmremGeneratorRef.current.fromEquirectangular(texture);
+        hdriPmremTargetRef.current = pmremTarget;
+        scene.environment = pmremTarget.texture;
+        const rotationY = THREE.MathUtils.degToRad(config.hdriRotationY);
+        sceneWithEnvironment.environmentRotation = new THREE.Euler(0, rotationY, 0);
+        if (config.backgroundMode === "hdri") {
+          scene.background = texture;
+          sceneWithEnvironment.backgroundRotation = new THREE.Euler(0, rotationY, 0);
+        } else {
+          applyBackgroundMode();
+        }
+        setRuntimeNotice(null);
+      } catch (hdriError) {
+        if (token !== environmentApplyTokenRef.current) return;
+        const message = hdriError instanceof Error ? hdriError.message : "Unable to load HDR/EXR environment.";
+        setRuntimeNotice(`Environment map load failed. Falling back to solid background. (${message})`);
+        scene.environment = null;
+        applyBackgroundMode();
+      }
+    },
+    [disposeActiveHdriResources]
+  );
+
+  const applyHdriUrlDraft = useCallback(() => {
+    const trimmed = hdriUrlDraft.trim();
+    setViewerEnvironment((current) =>
+      normalizeEnvironmentConfig({
+        ...current,
+        enabled: true,
+        hdriUrl: trimmed.length > 0 ? trimmed : null
+      })
+    );
+  }, [hdriUrlDraft]);
+
+  const clearHdriEnvironment = useCallback(() => {
+    revokeLocalHdriUrl();
+    setHdriUrlDraft("");
+    setViewerEnvironment((current) =>
+      normalizeEnvironmentConfig({
+        ...current,
+        hdriUrl: null,
+        backgroundMode: current.backgroundMode === "hdri" ? "solid" : current.backgroundMode
+      })
+    );
+  }, [revokeLocalHdriUrl]);
+
+  const pickLocalHdri = useCallback(() => {
+    hdriFileInputRef.current?.click();
+  }, []);
+
+  const onHdriFilePicked = useCallback(
+    (event: ReactChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      revokeLocalHdriUrl();
+      const objectUrl = URL.createObjectURL(file);
+      hdriLocalObjectUrlRef.current = objectUrl;
+      setHdriUrlDraft(objectUrl);
+      setViewerEnvironment((current) =>
+        normalizeEnvironmentConfig({
+          ...current,
+          enabled: true,
+          hdriUrl: objectUrl
+        })
+      );
+      setRuntimeNotice(`Loaded local HDRI: ${file.name}`);
+      event.currentTarget.value = "";
+    },
+    [revokeLocalHdriUrl]
+  );
+
+  useEffect(() => {
+    const normalized = normalizeEnvironmentConfig(manifest.environment);
+    environmentApplyTokenRef.current += 1;
+    revokeLocalHdriUrl();
+    setViewerEnvironment(normalized);
+    setHdriUrlDraft(normalized.hdriUrl ?? "");
+  }, [manifest.artifactId, manifest.environment, revokeLocalHdriUrl]);
+
+  useEffect(() => {
+    void applyViewerEnvironment(viewerEnvironment);
+  }, [applyViewerEnvironment, viewerEnvironment]);
+
+  useEffect(() => {
+    return () => {
+      revokeLocalHdriUrl();
+    };
+  }, [revokeLocalHdriUrl]);
 
   useEffect(() => {
     navModeRef.current = navMode;
@@ -2306,10 +2732,14 @@ export function UnifiedWorldViewer({
 
     let disposed = false;
     let cancelled = false;
+    const initialEnvironment = normalizeEnvironmentConfig(manifest.environment);
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#05070e");
+    scene.background =
+      initialEnvironment.backgroundMode === "transparent"
+        ? null
+        : new THREE.Color(initialEnvironment.backgroundColor);
     sceneRef.current = scene;
     meshRootsRef.current = [];
     setMeshItems([]);
@@ -2345,9 +2775,9 @@ export function UnifiedWorldViewer({
     cameraRef.current = camera;
 
     const rendererCandidates: THREE.WebGLRendererParameters[] = [
-      { antialias: true, alpha: false, powerPreference: "high-performance" },
-      { antialias: false, alpha: false, powerPreference: "high-performance" },
-      { antialias: false, alpha: false, powerPreference: "low-power" }
+      { antialias: true, alpha: true, powerPreference: "high-performance" },
+      { antialias: false, alpha: true, powerPreference: "high-performance" },
+      { antialias: false, alpha: true, powerPreference: "low-power" }
     ];
     let renderer: THREE.WebGLRenderer | null = null;
     let rendererCreationError: Error | null = null;
@@ -2381,14 +2811,32 @@ export function UnifiedWorldViewer({
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+    renderer.toneMapping = resolveToneMapping(initialEnvironment.toneMapping);
+    renderer.toneMappingExposure = initialEnvironment.exposure;
+    environmentApplyTokenRef.current += 1;
+    disposeActiveHdriResources();
+    pmremGeneratorRef.current?.dispose();
+    pmremGeneratorRef.current = new THREE.PMREMGenerator(renderer);
+    pmremGeneratorRef.current.compileEquirectangularShader();
 
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x101828, 1.1);
+    const hemi = new THREE.HemisphereLight(
+      new THREE.Color(initialEnvironment.sunColor),
+      new THREE.Color(initialEnvironment.groundColor),
+      initialEnvironment.ambientIntensity
+    );
     hemi.position.set(0, 30, 0);
     scene.add(hemi);
+    hemiLightRef.current = hemi;
 
-    const directional = new THREE.DirectionalLight(0xffffff, 1.2);
+    const directional = new THREE.DirectionalLight(
+      new THREE.Color(initialEnvironment.sunColor),
+      initialEnvironment.sunIntensity
+    );
     directional.position.set(8, 12, 6);
     scene.add(directional);
+    directionalLightRef.current = directional;
+
+    void applyViewerEnvironment(initialEnvironment);
 
     const grid = new THREE.GridHelper(24, 48, 0x263245, 0x111827);
     grid.visible = showGridRef.current;
@@ -3515,6 +3963,12 @@ export function UnifiedWorldViewer({
       }
       tempBlobUrlsRef.current = [];
       splatSupportSampleCacheRef.current.clear();
+      environmentApplyTokenRef.current += 1;
+      disposeActiveHdriResources();
+      pmremGeneratorRef.current?.dispose();
+      pmremGeneratorRef.current = null;
+      hemiLightRef.current = null;
+      directionalLightRef.current = null;
 
       clearGroundAlignDebug();
       disposeObjectTree(root);
@@ -3530,9 +3984,11 @@ export function UnifiedWorldViewer({
     };
   }, [
     applyMarkedSelectionKeys,
+    applyViewerEnvironment,
     applyPersistedSceneAlignment,
     applyMeshTransforms,
     clearGroundAlignDebug,
+    disposeActiveHdriResources,
     directSplats,
     applyViewModeProfile,
     fitScene,
@@ -4174,6 +4630,66 @@ export function UnifiedWorldViewer({
               {Math.round(splatDensityDraft[0] ?? 100)}% requested • {Math.round(splatDensityApplied)}% applied
             </p>
           </div>
+          <div className="mt-3 border-t border-border/50 pt-3">
+            <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-400">Environment HDRI</p>
+            <Input
+              className="h-8 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+              placeholder="https://.../studio.hdr or studio.exr"
+              value={hdriUrlDraft}
+              onChange={(event) => setHdriUrlDraft(event.target.value)}
+              onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                applyHdriUrlDraft();
+              }}
+            />
+            <div className="mt-2 grid grid-cols-3 gap-1">
+              <Button size="sm" className="h-7 rounded-md text-xs" onClick={applyHdriUrlDraft}>
+                Apply URL
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={pickLocalHdri}>
+                Open .hdr
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={clearHdriEnvironment}>
+                Clear
+              </Button>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-1">
+              <Button
+                size="sm"
+                variant={viewerEnvironment.enabled ? "default" : "outline"}
+                className="h-7 rounded-md text-xs"
+                onClick={() =>
+                  setViewerEnvironment((current) =>
+                    normalizeEnvironmentConfig({
+                      ...current,
+                      enabled: !current.enabled
+                    })
+                  )
+                }
+              >
+                {viewerEnvironment.enabled ? "HDRI On" : "HDRI Off"}
+              </Button>
+              <Button
+                size="sm"
+                variant={viewerEnvironment.backgroundMode === "hdri" ? "default" : "outline"}
+                className="h-7 rounded-md text-xs"
+                onClick={() =>
+                  setViewerEnvironment((current) =>
+                    normalizeEnvironmentConfig({
+                      ...current,
+                      backgroundMode: current.backgroundMode === "hdri" ? "solid" : "hdri"
+                    })
+                  )
+                }
+              >
+                BG {viewerEnvironment.backgroundMode === "hdri" ? "HDRI" : "Solid"}
+              </Button>
+            </div>
+            <p className="mt-2 text-[10px] text-zinc-500">
+              Use `.hdr` or `.exr` files. URL must be reachable from browser (CORS).
+            </p>
+          </div>
         </div>
       ) : null}
 
@@ -4580,6 +5096,14 @@ export function UnifiedWorldViewer({
           }}
         />
       ) : null}
+
+      <input
+        ref={hdriFileInputRef}
+        type="file"
+        accept=".hdr,.HDR,.pic,.PIC,.exr,.EXR,image/vnd.radiance,image/x-exr"
+        className="hidden"
+        onChange={onHdriFilePicked}
+      />
 
       <div ref={containerRef} className="h-full w-full" />
 

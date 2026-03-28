@@ -126,6 +126,7 @@ const nodeTypes = {
   "input.image": WorkflowNode,
   "input.text": WorkflowNode,
   "input.cameraPath": WorkflowNode,
+  "viewer.environment": WorkflowNode,
   "model.groundingdino": WorkflowNode,
   "model.sam2": WorkflowNode,
   "model.sam3d_objects": WorkflowNode,
@@ -160,6 +161,7 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "T",
   "input.image": "I",
   "input.cameraPath": "C",
+  "viewer.environment": "H",
   "model.groundingdino": "G",
   "model.sam2": "S",
   "model.sam3d_objects": "3",
@@ -187,6 +189,7 @@ function getContextRowIcon(type: WorkflowNodeType) {
   if (type.startsWith("input.text")) return Type;
   if (type.startsWith("input.image")) return ImageIcon;
   if (type.startsWith("input.cameraPath")) return Camera;
+  if (type.startsWith("viewer.environment")) return Sparkles;
   if (type.startsWith("model.groundingdino")) return Scan;
   if (type.startsWith("model.sam")) return Boxes;
   if (type.startsWith("pipeline.scene_generation")) return Boxes;

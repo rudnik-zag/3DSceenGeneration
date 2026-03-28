@@ -46,6 +46,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
   "input.image": ImageIcon,
   "input.text": TypeIcon,
   "input.cameraPath": Camera,
+  "viewer.environment": Sparkles,
   "model.groundingdino": Boxes,
   "model.sam2": Layers,
   "model.sam3d_objects": Boxes,
@@ -65,6 +66,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
 const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "GPT-5.2",
   "input.image": "Reference",
+  "viewer.environment": "Lighting",
   "model.groundingdino": "ObjectDetection",
   "model.sam2": "SegmentScene",
   "model.sam3d_objects": "CustomSceneGen",

@@ -39,6 +39,22 @@ function normalizeHandleId(nodeType: WorkflowNodeType, handleId: string | null |
     return "artifact";
   }
 
+  if (
+    nodeType === "out.open_in_viewer" &&
+    direction === "target" &&
+    (handleId === "env" || handleId === "hdri" || handleId === "lighting")
+  ) {
+    return "environment";
+  }
+
+  if (
+    nodeType === "viewer.environment" &&
+    direction === "source" &&
+    (handleId === "env" || handleId === "hdri" || handleId === "lighting")
+  ) {
+    return "environment";
+  }
+
   return handleId;
 }
 
