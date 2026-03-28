@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 
 import { WorkflowNode } from "@/components/canvas/workflow-node";
+import { FlowingEdge } from "@/components/canvas/flowing-edge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -140,6 +141,20 @@ const nodeTypes = {
   "out.export_scene": WorkflowNode,
   "out.open_in_viewer": WorkflowNode
 };
+
+const edgeTypes = {
+  flowing: FlowingEdge
+};
+
+const defaultEdgeOptions = {
+  type: "flowing",
+  animated: false,
+  style: { stroke: "rgba(145, 145, 145, 0.65)", strokeWidth: 1.4 }
+};
+
+const connectionLineStyle = { stroke: "rgba(169, 169, 169, 0.75)", strokeWidth: 1.35 };
+const proOptions = { hideAttribution: true };
+const miniMapStyle = { background: "rgba(26,26,26,0.96)" };
 
 const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "T",
@@ -420,8 +435,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
 function withStyledEdge(edge: Edge): Edge {
   return {
     ...edge,
-    type: edge.type ?? "smoothstep",
-    animated: edge.animated ?? true,
+    type: edge.type ?? "flowing",
+    animated: edge.animated ?? false,
     style: {
       stroke: "rgba(176, 191, 221, 0.42)",
       strokeWidth: 1.45,
@@ -1362,6 +1377,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         prev.map((node) => {
           if (node.id !== nodeId) return node;
           const nodeType = node.type as WorkflowNodeType;
+          const spec = nodeSpecRegistry[nodeType];
           const nextParams = {
             ...node.data.params,
             [key]: value
@@ -1370,11 +1386,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           if (nodeType === "model.sam3d_objects") {
             if (key === "configPreset" && typeof value === "string") {
               const applied = applySceneGenerationPreset(nextParams, value as "Default" | "HighQuality" | "FastPreview" | "Custom");
+              const outputArtifacts = node.data.outputArtifactHistory
+                ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, applied)
+                : node.data.outputArtifacts;
+              const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+              const previewArtifact =
+                (spec.ui?.previewOutputIds ?? [])
+                  .map((outputId) => outputArtifacts?.[outputId])
+                  .find((artifact) => Boolean(artifact?.id)) ??
+                Object.entries(outputArtifacts ?? {})
+                  .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
+                  .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
+                Object.values(outputArtifacts ?? {})[0] ??
+                null;
               return {
                 ...node,
                 data: {
                   ...node.data,
-                  params: applied
+                  params: applied,
+                  outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
+                  latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
+                  latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
+                  previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null
                 }
               };
             }
@@ -1384,11 +1417,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             }
           }
 
+          const outputArtifacts = node.data.outputArtifactHistory
+            ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, nextParams)
+            : node.data.outputArtifacts;
+          const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+          const previewArtifact =
+            (spec.ui?.previewOutputIds ?? [])
+              .map((outputId) => outputArtifacts?.[outputId])
+              .find((artifact) => Boolean(artifact?.id)) ??
+            Object.entries(outputArtifacts ?? {})
+              .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
+              .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
+            Object.values(outputArtifacts ?? {})[0] ??
+            null;
+          const selectedScenePreviewStage =
+            nodeType === "pipeline.scene_generation" && typeof nextParams.ScenePreviewStage === "string"
+              ? nextParams.ScenePreviewStage
+              : "final";
+          const selectedScenePreview =
+            nodeType === "pipeline.scene_generation"
+              ? node.data.scenePreviewStages?.[selectedScenePreviewStage] ?? node.data.scenePreviewStages?.final ?? null
+              : null;
+          const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
+
           return {
             ...node,
             data: {
               ...node.data,
-              params: nextParams
+              params: nextParams,
+              outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
+              latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
+              latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+              previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null
             }
           };
         })
@@ -1820,10 +1880,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           }
         } else if (data.run.status === "error") {
           const errorLine = [...logLines].reverse().find((line) => line.includes("ERROR:"));
+          const errorLineIndex = errorLine ? logLines.lastIndexOf(errorLine) : -1;
+          const detailsAfterError = errorLineIndex >= 0 ? logLines.slice(errorLineIndex + 1) : [];
+          const detailLine = [...detailsAfterError].reverse().find((line) =>
+            /(ReadTimeout|Timeout|No such file|not found|failed|Exception|ERROR conda)/i.test(line)
+          );
           if (errorLine) {
             const shortError = errorLine.replace(/^.*ERROR:\s*/, "").trim();
             if (shortError.length > 0) {
-              description = `${descriptionBase} | ${shortError}`;
+              description = detailLine
+                ? `${descriptionBase} | ${shortError} (${detailLine.slice(0, 140)})`
+                : `${descriptionBase} | ${shortError}`;
             }
           }
         }
@@ -2612,6 +2679,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -2632,16 +2700,12 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             snapToGrid={snapToGrid}
             snapGrid={[20, 20]}
             className="h-full"
-            defaultEdgeOptions={{
-              type: "smoothstep",
-              animated: true,
-              style: { stroke: "rgba(145, 145, 145, 0.65)", strokeWidth: 1.4 }
-            }}
-            connectionLineStyle={{ stroke: "rgba(169, 169, 169, 0.75)", strokeWidth: 1.35 }}
-            proOptions={{ hideAttribution: true }}
+            defaultEdgeOptions={defaultEdgeOptions}
+            connectionLineStyle={connectionLineStyle}
+            proOptions={proOptions}
           >
             <Background color="rgba(255,255,255,0.06)" gap={16} />
-            {showMiniMap ? <MiniMap pannable zoomable style={{ background: "rgba(26,26,26,0.96)" }} /> : null}
+            {showMiniMap ? <MiniMap pannable zoomable style={miniMapStyle} /> : null}
           </ReactFlow>
 
           {paneMenu ? (

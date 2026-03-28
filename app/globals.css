@@ -85,6 +85,28 @@ canvas {
   animation: dashdraw 0.85s linear infinite;
 }
 
+.rf-flow-edge-glow {
+  animation: rf-flow-edge-dash 1.05s linear infinite;
+}
+
+@keyframes rf-flow-edge-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -34;
+  }
+}
+
+@keyframes dashdraw {
+  from {
+    stroke-dashoffset: 18;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
 .react-flow__node {
   transition: box-shadow 180ms ease, border-color 180ms ease;
 }

@@ -2279,6 +2279,31 @@ export function UnifiedWorldViewer({
     const container = containerRef.current;
     if (!container) return;
 
+    const releaseRenderer = (instance: THREE.WebGLRenderer | null) => {
+      if (!instance) return;
+      try {
+        instance.forceContextLoss?.();
+      } catch {
+        // Ignore context-loss cleanup failures.
+      }
+      try {
+        instance.dispose();
+      } catch {
+        // Ignore dispose failures during teardown.
+      }
+      const canvas = instance.domElement;
+      if (canvas.parentNode) {
+        canvas.parentNode.removeChild(canvas);
+      }
+    };
+
+    // Defensive cleanup if a previous renderer was not fully released (for example after a hard runtime error).
+    releaseRenderer(rendererRef.current);
+    rendererRef.current = null;
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
+
     let disposed = false;
     let cancelled = false;
     const raycaster = new THREE.Raycaster();
@@ -2319,7 +2344,38 @@ export function UnifiedWorldViewer({
     camera.position.set(...(manifest.camera?.position ?? [4, 3, 4]));
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    const rendererCandidates: THREE.WebGLRendererParameters[] = [
+      { antialias: true, alpha: false, powerPreference: "high-performance" },
+      { antialias: false, alpha: false, powerPreference: "high-performance" },
+      { antialias: false, alpha: false, powerPreference: "low-power" }
+    ];
+    let renderer: THREE.WebGLRenderer | null = null;
+    let rendererCreationError: Error | null = null;
+    for (const candidate of rendererCandidates) {
+      try {
+        renderer = new THREE.WebGLRenderer(candidate);
+        break;
+      } catch (err) {
+        rendererCreationError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    if (!renderer) {
+      const message = rendererCreationError?.message?.trim() || "Error creating WebGL context.";
+      setRuntimeNotice(
+        "WebGL initialization failed. Close other 3D tabs/apps and reload, or disable canvas-related browser extensions."
+      );
+      setError(`WebGL init failed: ${message}`);
+      setLoading(false);
+      cameraRef.current = null;
+      sceneRef.current = null;
+      rootRef.current = null;
+      alignmentRootRef.current = null;
+      orbitRef.current = null;
+      return () => {
+        releaseRenderer(rendererRef.current);
+        rendererRef.current = null;
+      };
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -3464,11 +3520,13 @@ export function UnifiedWorldViewer({
       disposeObjectTree(root);
       scene.clear();
       gridRef.current = null;
-      renderer.dispose();
+      releaseRenderer(renderer);
+      rendererRef.current = null;
+      sceneRef.current = null;
+      rootRef.current = null;
       alignmentRootRef.current = null;
-      if (renderer.domElement.parentNode) {
-        renderer.domElement.parentNode.removeChild(renderer.domElement);
-      }
+      cameraRef.current = null;
+      orbitRef.current = null;
     };
   }, [
     applyMarkedSelectionKeys,
