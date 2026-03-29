@@ -18,24 +18,15 @@ import {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import {
-  Boxes,
-  Camera,
-  ChevronRight,
   ExternalLink,
-  Image as ImageIcon,
   LocateFixed,
   Map as MapIcon,
   Minus,
-  PanelLeft,
   Play,
-  Plus,
   Save,
-  Scan,
   Share2,
   SlidersHorizontal,
-  Sparkles,
   Square,
-  Type,
   WandSparkles,
   Zap,
   ZoomIn
@@ -43,6 +34,7 @@ import {
 
 import { WorkflowNode } from "@/components/canvas/workflow-node";
 import { FlowingEdge } from "@/components/canvas/flowing-edge";
+import { CascadingMenuEntry, RightClickMenu } from "@/components/canvas/right-click-menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -106,6 +98,8 @@ interface PaneContextMenuState {
   y: number;
   flowX: number;
   flowY: number;
+  clientX: number;
+  clientY: number;
 }
 
 interface PendingConnectState {
@@ -120,7 +114,40 @@ interface NodeContextMenuState {
   y: number;
 }
 
-type ContextMenuCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
+interface NodeSearchMenuState {
+  x: number;
+  y: number;
+  flowX: number;
+  flowY: number;
+  query: string;
+  highlighted: number;
+}
+
+interface ClipboardSnapshotNode {
+  id: string;
+  type: WorkflowNodeType;
+  position: { x: number; y: number };
+  data: {
+    label: string;
+    params: Record<string, unknown>;
+    uiScale?: NodeUiScale;
+  };
+}
+
+interface ClipboardSnapshot {
+  nodes: ClipboardSnapshotNode[];
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    sourceHandle?: string;
+    targetHandle?: string;
+  }>;
+  bounds: {
+    minX: number;
+    minY: number;
+  };
+}
 
 const nodeTypes = {
   "input.image": WorkflowNode,
@@ -178,25 +205,12 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "out.open_in_viewer": "V"
 };
 
-const categoryLabelMap: Record<ContextMenuCategory, string> = {
-  Inputs: "Add Source",
-  Models: "Add Model",
-  Geometry: "Add Geometry",
-  Outputs: "Add Output"
-};
+const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
 
-function getContextRowIcon(type: WorkflowNodeType) {
-  if (type.startsWith("input.text")) return Type;
-  if (type.startsWith("input.image")) return ImageIcon;
-  if (type.startsWith("input.cameraPath")) return Camera;
-  if (type.startsWith("viewer.environment")) return Sparkles;
-  if (type.startsWith("model.groundingdino")) return Scan;
-  if (type.startsWith("model.sam")) return Boxes;
-  if (type.startsWith("pipeline.scene_generation")) return Boxes;
-  if (type.startsWith("model.")) return WandSparkles;
-  if (type.startsWith("out.")) return ExternalLink;
-  if (type.startsWith("geo.")) return Sparkles;
-  return Sparkles;
+function formatMenuCategoryLabel(category: string) {
+  const normalized = category.trim();
+  if (!normalized) return "uncategorized";
+  return normalized.toLowerCase();
 }
 
 type OutputArtifactView = NonNullable<GraphNodeData["outputArtifacts"]>[string];
@@ -474,8 +488,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const [inspectedJsonLoading, setInspectedJsonLoading] = useState(false);
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
   const [nodeMenu, setNodeMenu] = useState<NodeContextMenuState | null>(null);
+  const [nodeSearchMenu, setNodeSearchMenu] = useState<NodeSearchMenuState | null>(null);
   const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
-  const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
   const [showMiniMap, setShowMiniMap] = useState(true);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -486,6 +500,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
   const nodeMenuRef = useRef<HTMLDivElement>(null);
+  const nodeSearchMenuRef = useRef<HTMLDivElement>(null);
+  const nodeSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const clipboardRef = useRef<ClipboardSnapshot | null>(null);
+  const pasteSerialRef = useRef(0);
+  const lastPointerRef = useRef<{ clientX: number; clientY: number; flowX: number; flowY: number } | null>(null);
   const suppressNextPaneClickRef = useRef(false);
   const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didHydrateDraftRef = useRef(false);
@@ -494,7 +513,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
   const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
-  const orderedCategories = useMemo<ContextMenuCategory[]>(() => ["Inputs", "Models", "Geometry", "Outputs"], []);
+  const orderedCategories = useMemo(() => {
+    const known = new Set<string>(preferredCategoryOrder);
+    const dynamicCategories = Object.keys(nodeGroups).filter((category) => !known.has(category));
+    return [...preferredCategoryOrder, ...dynamicCategories.sort((a, b) => a.localeCompare(b))];
+  }, []);
   const contextMenuGroups = useMemo(
     () =>
       orderedCategories
@@ -505,6 +528,23 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         .filter((group) => group.specs.length > 0),
     [orderedCategories]
   );
+  const flatNodeSpecs = useMemo(
+    () =>
+      contextMenuGroups
+        .flatMap((group) => group.specs)
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [contextMenuGroups]
+  );
+  const filteredNodeSpecs = useMemo(() => {
+    const query = menuSearch.trim().toLowerCase();
+    if (!query) return flatNodeSpecs;
+    return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
+  }, [flatNodeSpecs, menuSearch]);
+  const filteredNodeSearchSpecs = useMemo(() => {
+    const query = nodeSearchMenu?.query.trim().toLowerCase() ?? "";
+    if (!query) return flatNodeSpecs;
+    return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
+  }, [flatNodeSpecs, nodeSearchMenu?.query]);
   const canNodeRun = useCallback((node: Node<GraphNodeData> | undefined) => {
     if (!node) return false;
     const nodeType = node.type as WorkflowNodeType;
@@ -515,19 +555,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     const model = typeof node.data.params?.generatorModel === "string" ? node.data.params.generatorModel : "";
     return sourceMode === "generate" && model.trim().length > 0;
   }, []);
-  const activeMenuGroup = useMemo(
-    () => contextMenuGroups.find((group) => group.category === activeMenuCategory) ?? null,
-    [activeMenuCategory, contextMenuGroups]
-  );
-  const filteredActiveMenuSpecs = useMemo(() => {
-    if (!activeMenuGroup) return [];
-    const query = menuSearch.trim().toLowerCase();
-    if (!query) return activeMenuGroup.specs;
-    return activeMenuGroup.specs.filter((spec) => {
-      return spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query);
-    });
-  }, [activeMenuGroup, menuSearch]);
-
   useEffect(() => {
     setNodes((prev) => {
       const byId = new Map(prev.map((node) => [node.id, node]));
@@ -677,7 +704,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, []);
 
   useEffect(() => {
-    if (!paneMenu && !nodeMenu) return;
+    if (!paneMenu && !nodeMenu && !nodeSearchMenu) return;
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
@@ -687,14 +714,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (target && nodeMenuRef.current?.contains(target)) {
         return;
       }
+      if (target && nodeSearchMenuRef.current?.contains(target)) {
+        return;
+      }
       setPaneMenu(null);
       setNodeMenu(null);
+      setNodeSearchMenu(null);
     };
 
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPaneMenu(null);
         setNodeMenu(null);
+        setNodeSearchMenu(null);
       }
     };
 
@@ -704,22 +736,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onEscape);
     };
-  }, [nodeMenu, paneMenu]);
+  }, [nodeMenu, nodeSearchMenu, paneMenu]);
 
   useEffect(() => {
     if (!paneMenu) {
-      setActiveMenuCategory(null);
       setMenuSearch("");
       setPendingConnect(null);
       return;
     }
-    if (!activeMenuCategory) {
-      const firstCategory = contextMenuGroups[0]?.category;
-      if (firstCategory) {
-        setActiveMenuCategory(firstCategory);
-      }
-    }
-  }, [activeMenuCategory, contextMenuGroups, paneMenu]);
+  }, [paneMenu]);
+
+  useEffect(() => {
+    if (!nodeSearchMenu) return;
+    const handle = window.setTimeout(() => {
+      nodeSearchInputRef.current?.focus();
+      nodeSearchInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [nodeSearchMenu?.x, nodeSearchMenu?.y]);
+
+  useEffect(() => {
+    if (!nodeSearchMenu) return;
+    const maxIndex = Math.max(0, filteredNodeSearchSpecs.length - 1);
+    if (nodeSearchMenu.highlighted <= maxIndex) return;
+    setNodeSearchMenu((current) =>
+      current
+        ? {
+            ...current,
+            highlighted: maxIndex
+          }
+        : current
+    );
+  }, [filteredNodeSearchSpecs.length, nodeSearchMenu]);
 
   useEffect(() => {
     if (didHydrateDraftRef.current) return;
@@ -754,71 +802,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.localStorage.removeItem(draftStorageKey);
     }
   }, [draftStorageKey, nodeArtifacts, setEdges, setNodes]);
-
-  useEffect(() => {
-    const onDeleteShortcut = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isTyping =
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable;
-      if (isTyping) return;
-
-      const wantsDisconnectShortcut =
-        (event.ctrlKey || event.metaKey) &&
-        event.shiftKey &&
-        event.key.toLowerCase() === "x";
-      if (wantsDisconnectShortcut) {
-        event.preventDefault();
-        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-        if (selectedEdgeIds.length > 0) {
-          const edgeSet = new Set(selectedEdgeIds);
-          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-          toast({
-            title: "Connections removed",
-            description: selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections removed` : "1 connection removed"
-          });
-          return;
-        }
-        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-        if (selectedNodeIds.length === 0) return;
-        const nodeSet = new Set(selectedNodeIds);
-        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-        const removedCount = edges.filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target)).length;
-        toast({
-          title: "Node disconnected",
-          description: removedCount > 0 ? `${removedCount} connections removed` : "No connected edges to remove"
-        });
-        return;
-      }
-
-      if (event.key !== "Delete" && event.key !== "Backspace") return;
-      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
-      event.preventDefault();
-      if (selectedNodeIds.length > 0) {
-        const nodeSet = new Set(selectedNodeIds);
-        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
-        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-      }
-      if (selectedEdgeIds.length > 0) {
-        const edgeSet = new Set(selectedEdgeIds);
-        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-      }
-      const parts: string[] = [];
-      if (selectedNodeIds.length > 0) {
-        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
-      }
-      if (selectedEdgeIds.length > 0) {
-        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
-      }
-      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
-    };
-
-    window.addEventListener("keydown", onDeleteShortcut);
-    return () => window.removeEventListener("keydown", onDeleteShortcut);
-  }, [edges, nodes, setEdges, setNodes]);
 
   useEffect(() => {
     setShowAdvancedInspector(false);
@@ -972,7 +955,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         setTimeout(() => {
           suppressNextPaneClickRef.current = false;
         }, 0);
-        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, clientX, clientY });
         return;
       }
 
@@ -986,24 +969,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       setTimeout(() => {
         suppressNextPaneClickRef.current = false;
       }, 0);
-      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
+      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y, clientX, clientY });
     },
     [pendingConnect, reactFlow]
   );
 
-  const addNode = useCallback(
-    (nodeType: WorkflowNodeType, x = 80, y = 80) => {
+  const makeCanvasNode = useCallback(
+    (
+      nodeType: WorkflowNodeType,
+      id: string,
+      position: { x: number; y: number },
+      options?: { label?: string; params?: Record<string, unknown>; uiScale?: NodeUiScale }
+    ): Node<GraphNodeData> => {
       const spec = nodeSpecRegistry[nodeType];
-      const id = `${nodeType}-${Date.now().toString(36)}`;
-      const newNode: Node<GraphNodeData> = {
+      return {
         id,
         type: nodeType,
-        position: { x, y },
+        position,
         data: {
-          label: spec.title,
-          params: { ...spec.defaultParams },
+          label: options?.label?.trim() || spec.title,
+          params: options?.params ? mergeNodeParamsWithDefaults(nodeType, options.params) : { ...spec.defaultParams },
           status: "idle",
-          uiScale: nodeScalePreset,
+          uiScale: options?.uiScale ?? nodeScalePreset,
           onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
           onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
           onUpdateParam: (currentNodeId: string, key: string, value: string | number | boolean) =>
@@ -1011,10 +998,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           onOpenViewer: (payload?: { artifactId?: string; nodeId?: string }) => openViewerRef.current(payload)
         }
       };
+    },
+    [nodeScalePreset]
+  );
+
+  const addNode = useCallback(
+    (nodeType: WorkflowNodeType, x = 80, y = 80) => {
+      const id = `${nodeType}-${Date.now().toString(36)}`;
+      const newNode = makeCanvasNode(nodeType, id, { x, y });
       setNodes((prev) => [...prev, newNode]);
       return id;
     },
-    [nodeScalePreset, setNodes]
+    [makeCanvasNode, setNodes]
   );
 
   const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1078,51 +1073,192 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     deleteEdgesByIds(selectedIds);
   }, [deleteEdgesByIds, edges]);
 
+  const copySelectionToClipboard = useCallback(() => {
+    const selectedNodes = nodes.filter((node) => node.selected);
+    if (selectedNodes.length === 0) {
+      return false;
+    }
+    const selectedNodeIdSet = new Set(selectedNodes.map((node) => node.id));
+    const selectedEdges = edges.filter((edge) => selectedNodeIdSet.has(edge.source) && selectedNodeIdSet.has(edge.target));
+    const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+    const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+
+    const snapshot: ClipboardSnapshot = {
+      nodes: selectedNodes.map((node) => ({
+        id: node.id,
+        type: node.type as WorkflowNodeType,
+        position: { x: node.position.x, y: node.position.y },
+        data: {
+          label: node.data.label,
+          params: JSON.parse(JSON.stringify(node.data.params ?? {})) as Record<string, unknown>,
+          uiScale: node.data.uiScale
+        }
+      })),
+      edges: selectedEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle ?? undefined,
+        targetHandle: edge.targetHandle ?? undefined
+      })),
+      bounds: { minX, minY }
+    };
+
+    clipboardRef.current = snapshot;
+    return true;
+  }, [edges, nodes]);
+
+  const resolveFlowAnchor = useCallback(
+    (flowOverride?: { x: number; y: number }) => {
+      if (flowOverride) return flowOverride;
+      if (lastPointerRef.current) {
+        return { x: lastPointerRef.current.flowX, y: lastPointerRef.current.flowY };
+      }
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      if (!rect) return { x: 120, y: 120 };
+      return reactFlow.screenToFlowPosition({
+        x: rect.left + rect.width * 0.5,
+        y: rect.top + rect.height * 0.5
+      });
+    },
+    [reactFlow]
+  );
+
+  const pasteClipboardAt = useCallback(
+    (flowOverride?: { x: number; y: number }) => {
+      const snapshot = clipboardRef.current;
+      if (!snapshot || snapshot.nodes.length === 0) return false;
+
+      const anchor = resolveFlowAnchor(flowOverride);
+      pasteSerialRef.current += 1;
+      const offset = 28 * Math.min(12, pasteSerialRef.current);
+      const idStamp = Date.now().toString(36);
+      const idMap = new Map<string, string>();
+
+      const pastedNodes = snapshot.nodes.map((node, index) => {
+        const newId = `${node.type}-${idStamp}-${index}`;
+        idMap.set(node.id, newId);
+        const relativeX = node.position.x - snapshot.bounds.minX;
+        const relativeY = node.position.y - snapshot.bounds.minY;
+        const built = makeCanvasNode(
+          node.type,
+          newId,
+          { x: anchor.x + relativeX + offset, y: anchor.y + relativeY + offset },
+          {
+            label: node.data.label,
+            params: node.data.params,
+            uiScale: node.data.uiScale
+          }
+        );
+        return {
+          ...built,
+          selected: true
+        };
+      });
+
+      const pastedEdges = snapshot.edges
+        .map((edge, index) => {
+          const source = idMap.get(edge.source);
+          const target = idMap.get(edge.target);
+          if (!source || !target) return null;
+          return withStyledEdge({
+            id: `${source}-${target}-${idStamp}-${index}`,
+            source,
+            target,
+            sourceHandle: edge.sourceHandle,
+            targetHandle: edge.targetHandle
+          } as Edge);
+        })
+        .filter((edge): edge is Edge => Boolean(edge));
+
+      setNodes((prev) => [
+        ...prev.map((node) => ({ ...node, selected: false })),
+        ...pastedNodes
+      ]);
+      setEdges((prev) => [
+        ...prev.map((edge) => ({ ...edge, selected: false })),
+        ...pastedEdges
+      ]);
+      return true;
+    },
+    [makeCanvasNode, resolveFlowAnchor, setEdges, setNodes]
+  );
+
   const openPaneMenuAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
       const rect = canvasPanelRef.current?.getBoundingClientRect();
       const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
 
       if (!rect) {
-        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, clientX, clientY });
         return;
       }
 
-      const menuWidth = 318;
-      const menuHeight = 540;
       const rawX = clientX - rect.left;
       const rawY = clientY - rect.top;
-      const x = Math.max(10, Math.min(rawX, rect.width - menuWidth - 10));
-      const y = Math.max(10, Math.min(rawY, rect.height - menuHeight - 10));
+      const x = Math.max(8, Math.min(rawX, rect.width - 8));
+      const y = Math.max(8, Math.min(rawY, rect.height - 8));
 
-      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
+      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y, clientX, clientY });
+    },
+    [reactFlow]
+  );
+
+  const openNodeSearchAtScreenPoint = useCallback(
+    (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+      if (!rect) {
+        setNodeSearchMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, query: "", highlighted: 0 });
+        return;
+      }
+      const panelWidth = 320;
+      const panelHeight = 360;
+      const rawX = clientX - rect.left;
+      const rawY = clientY - rect.top;
+      const x = Math.max(12, Math.min(rawX, rect.width - panelWidth - 12));
+      const y = Math.max(12, Math.min(rawY, rect.height - panelHeight - 12));
+      setNodeSearchMenu({ x, y, flowX: flow.x, flowY: flow.y, query: "", highlighted: 0 });
     },
     [reactFlow]
   );
 
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) {
+        return;
+      }
       event.preventDefault();
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
+      const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY, flowX: flow.x, flowY: flow.y };
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
-    [openPaneMenuAtScreenPoint]
+    [openPaneMenuAtScreenPoint, reactFlow]
   );
 
   const onPaneClick = useCallback(
     (event: React.MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) {
+        return;
+      }
       if (suppressNextPaneClickRef.current) {
         return;
       }
       if (event.detail >= 2) {
         setNodeMenu(null);
+        setNodeSearchMenu(null);
         setPendingConnect(null);
         openPaneMenuAtScreenPoint(event.clientX, event.clientY);
         return;
       }
       setPaneMenu(null);
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
     },
     [openPaneMenuAtScreenPoint]
@@ -1131,17 +1267,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const onCanvasDoubleClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) return;
       if (target.closest(".react-flow__node")) return;
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
+  );
+
+  const onPaneMouseMove = useCallback(
+    (event: React.MouseEvent) => {
+      const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY, flowX: flow.x, flowY: flow.y };
+    },
+    [reactFlow]
   );
 
   const onNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node<GraphNodeData>) => {
       event.preventDefault();
       setPaneMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
       setNodes((prev) =>
         prev.map((entry) => ({
@@ -1247,44 +1394,164 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     [addNode, nodes, paneMenu, pendingConnect, setEdges]
   );
 
-  useEffect(() => {
-    if (!paneMenu) return;
+  const addNodeFromSearchMenu = useCallback(
+    (nodeType: WorkflowNodeType) => {
+      if (!nodeSearchMenu) return;
+      addNode(nodeType, nodeSearchMenu.flowX, nodeSearchMenu.flowY);
+      setNodeSearchMenu(null);
+    },
+    [addNode, nodeSearchMenu]
+  );
 
-    const onShortcut = (event: KeyboardEvent) => {
+  useEffect(() => {
+    const onCanvasShortcuts = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === "INPUT" ||
         target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable;
+      const keyLower = event.key.toLowerCase();
+
+      if (!isTyping && (event.ctrlKey || event.metaKey) && !event.shiftKey && keyLower === "c") {
+        if (copySelectionToClipboard()) {
+          event.preventDefault();
+          const selectedNodeCount = nodes.filter((node) => node.selected).length;
+          toast({
+            title: "Copied",
+            description: selectedNodeCount > 1 ? `${selectedNodeCount} nodes` : "1 node"
+          });
+        }
+        return;
+      }
+
+      if (!isTyping && (event.ctrlKey || event.metaKey) && !event.shiftKey && keyLower === "v") {
+        const flowOverride = paneMenu ? { x: paneMenu.flowX, y: paneMenu.flowY } : undefined;
+        if (pasteClipboardAt(flowOverride)) {
+          event.preventDefault();
+          setPaneMenu(null);
+          setNodeMenu(null);
+          setNodeSearchMenu(null);
+          toast({ title: "Pasted", description: "Nodes inserted on canvas." });
+        }
+        return;
+      }
+
+      if (!isTyping && event.key === "Tab") {
+        event.preventDefault();
+        setPaneMenu(null);
+        setNodeMenu(null);
+        const pointer = lastPointerRef.current;
+        if (pointer) {
+          openNodeSearchAtScreenPoint(pointer.clientX, pointer.clientY, { x: pointer.flowX, y: pointer.flowY });
+        } else {
+          const rect = canvasPanelRef.current?.getBoundingClientRect();
+          if (!rect) {
+            openNodeSearchAtScreenPoint(100, 100, { x: 120, y: 120 });
+          } else {
+            const clientX = rect.left + rect.width * 0.5;
+            const clientY = rect.top + rect.height * 0.42;
+            const flow = reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+            openNodeSearchAtScreenPoint(clientX, clientY, flow);
+          }
+        }
+        return;
+      }
+
+      if (isTyping) return;
+
+      const wantsDisconnectShortcut =
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        keyLower === "x";
+      if (wantsDisconnectShortcut) {
+        event.preventDefault();
+        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+        if (selectedEdgeIds.length > 0) {
+          const edgeSet = new Set(selectedEdgeIds);
+          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+          toast({
+            title: "Connections removed",
+            description: selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections removed` : "1 connection removed"
+          });
+          return;
+        }
+        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+        if (selectedNodeIds.length === 0) return;
+        const nodeSet = new Set(selectedNodeIds);
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+        const removedCount = edges.filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target)).length;
+        toast({
+          title: "Node disconnected",
+          description: removedCount > 0 ? `${removedCount} connections removed` : "No connected edges to remove"
+        });
+        return;
+      }
+
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
+      event.preventDefault();
+      if (selectedNodeIds.length > 0) {
+        const nodeSet = new Set(selectedNodeIds);
+        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+      }
+      if (selectedEdgeIds.length > 0) {
+        const edgeSet = new Set(selectedEdgeIds);
+        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+      }
+      const parts: string[] = [];
+      if (selectedNodeIds.length > 0) {
+        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+      }
+      if (selectedEdgeIds.length > 0) {
+        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+      }
+      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
+    };
+
+    window.addEventListener("keydown", onCanvasShortcuts);
+    return () => window.removeEventListener("keydown", onCanvasShortcuts);
+  }, [
+    copySelectionToClipboard,
+    edges,
+    nodes,
+    openNodeSearchAtScreenPoint,
+    paneMenu,
+    pasteClipboardAt,
+    reactFlow,
+    setEdges,
+    setNodes
+  ]);
+
+  useEffect(() => {
+    if (!paneMenu) return;
+
+    const onMenuSearchType = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
         target?.isContentEditable;
       if (isTyping) return;
 
-      const pressed = event.key.toUpperCase();
-      const match = (Object.entries(shortcutByNodeType) as Array<[WorkflowNodeType, string]>).find(
-        ([, shortcut]) => shortcut.toUpperCase() === pressed
-      );
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        setMenuSearch((current) => current.slice(0, -1));
+        return;
+      }
 
-      if (!match) return;
+      if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) return;
       event.preventDefault();
-      addNodeFromContextMenu(match[0]);
+      setMenuSearch((current) => `${current}${event.key.toLowerCase()}`);
     };
 
-    window.addEventListener("keydown", onShortcut);
-    return () => window.removeEventListener("keydown", onShortcut);
-  }, [paneMenu, addNodeFromContextMenu]);
-
-  const addNodeAtViewportCenter = (nodeType: WorkflowNodeType) => {
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    if (!rect) {
-      addNode(nodeType);
-      return;
-    }
-
-    const flow = reactFlow.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2
-    });
-    addNode(nodeType, flow.x, flow.y);
-  };
+    window.addEventListener("keydown", onMenuSearchType);
+    return () => window.removeEventListener("keydown", onMenuSearchType);
+  }, [paneMenu]);
 
   const applyNodeScalePreset = (preset: NodeUiScale) => {
     setNodeScalePreset(preset);
@@ -1298,25 +1565,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       }))
     );
   };
-
-  const openNodeMenuAtViewportCenter = useCallback(() => {
-    setNodeMenu(null);
-    if (paneMenu) {
-      setPaneMenu(null);
-      return;
-    }
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    if (!rect) {
-      openPaneMenuAtScreenPoint(92, 72, { x: 80, y: 80 });
-      return;
-    }
-
-    const flow = reactFlow.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2
-    });
-    openPaneMenuAtScreenPoint(rect.left + 92, rect.top + 72, { x: flow.x, y: flow.y });
-  }, [openPaneMenuAtScreenPoint, paneMenu, reactFlow]);
 
   const resolvePresetAnchor = useCallback(
     (baseAnchor: { x: number; y: number }) => {
@@ -1372,6 +1620,110 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     },
     [nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes]
   );
+
+  const addNodeMenuItems = useMemo<CascadingMenuEntry[]>(() => {
+    const noop = () => {};
+    const grouped = orderedCategories
+      .map((category) => ({
+        category,
+        specs: filteredNodeSpecs.filter((spec) => spec.category === category)
+      }))
+      .filter((entry) => entry.specs.length > 0);
+
+    const items: CascadingMenuEntry[] = [
+      {
+        id: "add-node-filter",
+        kind: "action",
+        label: menuSearch.trim().length > 0 ? `Filter: ${menuSearch}` : "Type to filter nodes",
+        disabled: true,
+        onSelect: noop
+      },
+      { id: "add-node-sep-filter", kind: "separator" }
+    ];
+
+    grouped.forEach((group) => {
+      items.push({
+        id: `add-node-category-${group.category}`,
+        kind: "submenu",
+        label: formatMenuCategoryLabel(group.category),
+        items: group.specs.map((spec) => ({
+          id: `add-node-spec-${spec.type}`,
+          kind: "action",
+          label: spec.title,
+          shortcut: shortcutByNodeType[spec.type],
+          onSelect: () => addNodeFromContextMenu(spec.type)
+        }))
+      });
+    });
+
+    if (grouped.length === 0) {
+      items.push({
+        id: "add-node-empty",
+        kind: "action",
+        label: "No nodes match current filter",
+        disabled: true,
+        onSelect: noop
+      });
+    }
+
+    return items;
+  }, [addNodeFromContextMenu, filteredNodeSpecs, menuSearch, orderedCategories]);
+
+  const rightClickMenuItems = useMemo<CascadingMenuEntry[]>(() => {
+    const pasteDisabled = !clipboardRef.current || clipboardRef.current.nodes.length === 0;
+    const templateItems: CascadingMenuEntry[] =
+      workflowPresets.length > 0
+        ? workflowPresets.map((preset) => ({
+            id: `preset-${preset.id}`,
+            kind: "action" as const,
+            label: preset.label,
+            onSelect: () => insertWorkflowPreset(preset.id)
+          }))
+        : [
+            {
+              id: "preset-none",
+              kind: "action",
+              label: "No templates available",
+              disabled: true,
+              onSelect: () => {}
+            }
+          ];
+
+    return [
+      {
+        id: "menu-add-node",
+        kind: "submenu",
+        label: "Add Node",
+        items: addNodeMenuItems
+      },
+      {
+        id: "menu-add-group",
+        kind: "action",
+        label: "Add Group",
+        onSelect: () => {
+          toast({ title: "Group", description: "Group nodes are not enabled in this editor yet." });
+        }
+      },
+      {
+        id: "menu-paste",
+        kind: "action",
+        label: "Paste",
+        shortcut: "Ctrl+V",
+        disabled: pasteDisabled,
+        onSelect: () => {
+          const flowOverride = paneMenu ? { x: paneMenu.flowX, y: paneMenu.flowY } : undefined;
+          pasteClipboardAt(flowOverride);
+        }
+      },
+      { id: "menu-sep-main", kind: "separator" },
+      {
+        id: "menu-node-templates",
+        kind: "submenu",
+        label: "Node Templates",
+        items: templateItems
+      }
+    ];
+  }, [addNodeMenuItems, insertWorkflowPreset, paneMenu, pasteClipboardAt]);
 
   const updateNodeParamById = useCallback(
     (nodeId: string, key: string, value: string | number | boolean) => {
@@ -2239,56 +2591,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button size="sm" variant="outline" className="rounded-xl">
-                <PanelLeft className="mr-1 h-4 w-4" /> Nodes
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-[360px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
-              <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">Node Palette</p>
-              <p className="mb-2 text-xs text-zinc-500">Right-click on canvas to add at cursor, or add at viewport center below.</p>
-              <div className="mb-2 grid grid-cols-2 gap-1.5">
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("input.image")}>
-                  Input Image
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.groundingdino")}>
-                  ObjectDetection
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
-                  SegmentScene
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("pipeline.scene_generation")}>
-                  SceneGeneration
-                </Button>
-              </div>
-              <ScrollArea className="h-[62vh] pr-2">
-                <div className="space-y-3">
-                  {contextMenuGroups.map((group) => (
-                    <div key={`dropdown-${group.category}`} className="rounded-xl border border-border/70 bg-background/35 p-2">
-                      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300">
-                        {group.category}
-                      </p>
-                      <div className="space-y-1.5">
-                        {group.specs.map((item) => (
-                          <button
-                            key={`dropdown-node-${item.type}`}
-                            type="button"
-                            onClick={() => addNodeAtViewportCenter(item.type)}
-                            className="w-full rounded-lg border border-border/70 bg-background/45 px-2.5 py-1.5 text-left text-xs transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent"
-                          >
-                            <p className="font-medium text-zinc-100">{item.title}</p>
-                            <p className="text-[10px] text-zinc-400">{item.type}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="rounded-xl">
                 <SlidersHorizontal className="mr-1 h-4 w-4" /> Inspector
               </Button>
             </DropdownMenuTrigger>
@@ -2656,9 +2958,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             data-no-connect-menu="true"
             className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2"
           >
-            <Button size="icon" variant="outline" className="h-10 w-10 rounded-full" onClick={openNodeMenuAtViewportCenter}>
-              <Plus className="h-4 w-4" />
-            </Button>
             <Button size="icon" variant="ghost" className="h-8 w-8 rounded-lg" onClick={() => reactFlow.zoomIn({ duration: 180 })}>
               <ZoomIn className="h-4 w-4" />
             </Button>
@@ -2693,10 +2992,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             onNodeContextMenu={onNodeContextMenu}
             onPaneContextMenu={onPaneContextMenu}
             onPaneClick={onPaneClick}
+            onPaneMouseMove={onPaneMouseMove}
             fitView
-            panOnScroll
+            panOnScroll={false}
             panOnDrag
             selectionOnDrag
+            selectionKeyCode={["Shift"]}
+            multiSelectionKeyCode={["Shift"]}
+            panActivationKeyCode={["Space"]}
+            zoomOnScroll
             zoomOnDoubleClick={false}
             minZoom={0.2}
             maxZoom={1.8}
@@ -2712,125 +3016,111 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </ReactFlow>
 
           {paneMenu ? (
-            <div
-              ref={paneMenuRef}
-              data-no-connect-menu="true"
-              className="absolute z-30 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md"
-              style={{ left: paneMenu.x, top: paneMenu.y }}
-            >
-              <div className="mb-2">
-                <p className="text-xs text-zinc-500">Add Node</p>
-              </div>
-              <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.015] p-2">
-                <p className="mb-1 text-xs text-zinc-500">Quick Add</p>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("input.image")}
-                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
-                  >
-                    Input
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("model.groundingdino")}
-                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
-                  >
-                    Detect
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("model.sam2")}
-                    className="rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-400/20"
-                  >
-                    Segment
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("pipeline.scene_generation")}
-                    className="rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200 transition hover:bg-cyan-400/20"
-                  >
-                    SceneGeneration
-                  </button>
-                </div>
-              </div>
+            <div ref={paneMenuRef} data-no-connect-menu="true">
+              <RightClickMenu
+                x={paneMenu.x}
+                y={paneMenu.y}
+                items={rightClickMenuItems}
+                onClose={() => setPaneMenu(null)}
+              />
+            </div>
+          ) : null}
 
-              <ScrollArea className="max-h-[24rem] pr-2">
-                <div className="space-y-2">
-                  {contextMenuGroups.map((group) => (
-                    <button
-                      key={`ctx-${group.category}`}
-                      type="button"
-                      onClick={() => {
-                        setActiveMenuCategory(group.category);
-                        setMenuSearch("");
-                      }}
-                      className={`flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition ${
-                        activeMenuCategory === group.category
-                          ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
-                          : "border-white/10 bg-white/[0.015] text-zinc-300 hover:bg-white/[0.05]"
-                      }`}
-                    >
-                      <span className="text-sm">{categoryLabelMap[group.category]}</span>
-                      <span className="inline-flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-500">{group.specs.length}</span>
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      </span>
-                    </button>
-                  ))}
+          {nodeSearchMenu ? (
+            <div
+              ref={nodeSearchMenuRef}
+              data-no-connect-menu="true"
+              className="absolute z-40 w-[320px] rounded-md border border-[#34363d] bg-[#1b1d23] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.52)]"
+              style={{ left: nodeSearchMenu.x, top: nodeSearchMenu.y }}
+            >
+              <Input
+                ref={nodeSearchInputRef}
+                value={nodeSearchMenu.query}
+                onChange={(event) =>
+                  setNodeSearchMenu((current) =>
+                    current
+                      ? {
+                          ...current,
+                          query: event.target.value,
+                          highlighted: 0
+                        }
+                      : current
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setNodeSearchMenu(null);
+                    return;
+                  }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setNodeSearchMenu((current) => {
+                      if (!current) return current;
+                      const max = Math.max(0, filteredNodeSearchSpecs.length - 1);
+                      return {
+                        ...current,
+                        highlighted: Math.min(max, current.highlighted + 1)
+                      };
+                    });
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setNodeSearchMenu((current) => {
+                      if (!current) return current;
+                      return {
+                        ...current,
+                        highlighted: Math.max(0, current.highlighted - 1)
+                      };
+                    });
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const target = filteredNodeSearchSpecs[nodeSearchMenu.highlighted] ?? filteredNodeSearchSpecs[0];
+                    if (!target) return;
+                    addNodeFromSearchMenu(target.type);
+                  }
+                }}
+                className="h-8 rounded-md border-[#32343b] bg-[#0a0c12] text-xs text-zinc-100"
+                placeholder="Search nodes (Tab)"
+              />
+              <ScrollArea className="mt-2 h-[292px] pr-1">
+                <div className="space-y-0.5">
+                  {filteredNodeSearchSpecs.map((spec, index) => {
+                    const isHighlighted = index === nodeSearchMenu.highlighted;
+                    return (
+                      <button
+                        key={`search-node-${spec.type}`}
+                        type="button"
+                        className={`flex h-7 w-full items-center justify-between rounded px-2 text-left text-[13px] transition ${
+                          isHighlighted
+                            ? "border border-cyan-400/50 bg-cyan-400/10 text-zinc-100"
+                            : "border border-transparent text-zinc-200 hover:border-[#2f2f2f] hover:bg-[#181a20]"
+                        }`}
+                        onMouseEnter={() =>
+                          setNodeSearchMenu((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  highlighted: index
+                                }
+                              : current
+                          )
+                        }
+                        onClick={() => addNodeFromSearchMenu(spec.type)}
+                      >
+                        <span className="truncate">{spec.title}</span>
+                        <span className="ml-2 text-[11px] text-zinc-500">{spec.type}</span>
+                      </button>
+                    );
+                  })}
+                  {filteredNodeSearchSpecs.length === 0 ? (
+                    <p className="px-2 py-5 text-center text-xs text-zinc-500">No matching nodes</p>
+                  ) : null}
                 </div>
               </ScrollArea>
-
-              <div className="mt-3 flex items-center justify-between border-t border-white/10 px-1 pt-2 text-xs text-zinc-500">
-                <span>↕ Navigate</span>
-                <span>↵ Select</span>
-              </div>
-
-              {activeMenuGroup ? (
-                <div className="absolute left-full top-0 ml-2 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs text-zinc-400">{categoryLabelMap[activeMenuGroup.category]}</p>
-                    <button
-                      type="button"
-                      onClick={() => setActiveMenuCategory(null)}
-                      className="rounded-md border border-white/10 px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:bg-white/[0.06]"
-                    >
-                      Close
-                    </button>
-                  </div>
-                  <Input
-                    value={menuSearch}
-                    onChange={(event) => setMenuSearch(event.target.value)}
-                    className="mb-2 h-8 rounded-lg border-white/10 bg-black/35 text-xs"
-                    placeholder={`Search ${activeMenuGroup.category.toLowerCase()}...`}
-                  />
-                  <ScrollArea className="max-h-[25rem] pr-2">
-                    <div className="space-y-1">
-                      {filteredActiveMenuSpecs.map((spec) => {
-                        const RowIcon = getContextRowIcon(spec.type);
-                        const shortcut = shortcutByNodeType[spec.type];
-                        return (
-                          <button
-                            key={`ctx-node-${spec.type}`}
-                            type="button"
-                            onClick={() => addNodeFromContextMenu(spec.type)}
-                            className="group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-2 text-left text-sm text-zinc-200 transition hover:border-white/10 hover:bg-white/5"
-                          >
-                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-200">
-                              <RowIcon className="h-4 w-4" />
-                            </span>
-                            <span className="flex-1 leading-none">{spec.title}</span>
-                            {shortcut ? <span className="text-xs text-zinc-500">{shortcut}</span> : null}
-                          </button>
-                        );
-                      })}
-                      {filteredActiveMenuSpecs.length === 0 ? (
-                        <p className="px-2 py-6 text-center text-xs text-zinc-500">No nodes found.</p>
-                      ) : null}
-                    </div>
-                  </ScrollArea>
-                </div>
-              ) : null}
             </div>
           ) : null}
 
@@ -2838,7 +3128,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <div
               ref={nodeMenuRef}
               data-no-connect-menu="true"
-              className="absolute z-30 w-56 rounded-xl border border-white/10 bg-[#151515]/95 p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md"
+              className="absolute z-30 w-56 rounded-xl border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
               style={{ left: nodeMenu.x, top: nodeMenu.y }}
             >
               <button

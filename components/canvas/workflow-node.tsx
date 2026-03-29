@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
-import { Handle, NodeProps, Position } from "reactflow";
+import { Handle, NodeProps, NodeResizer, Position } from "reactflow";
 import {
   Boxes,
   Camera,
@@ -158,6 +158,7 @@ async function fetchSam3dConfigs() {
 
 export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [hasCustomImageWidth, setHasCustomImageWidth] = useState(false);
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
@@ -184,30 +185,57 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const isTextNode = nodeType === "input.text";
   const effectivePreviewUrl = data.previewUrl ?? null;
   const effectiveArtifactKind = data.latestArtifactKind;
-  const isImageNode = nodeType === "input.image" || isPreviewNode;
+  const isImageNode = isInputImageNode || isPreviewNode;
+  const usesImageSizing = isInputImageNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
     (!isInputImageNode || (isImageGenerationNode && inputImageModel.trim().length > 0));
   const promptText = pickPromptText(data);
   const scale = data.uiScale ?? "balanced";
+  const defaultImageWidth = scale === "compact" ? 224 : scale === "cinematic" ? 296 : 252;
+  const minNodeWidth =
+    scale === "compact"
+      ? isTextNode
+        ? 228
+        : usesImageSizing
+          ? 224
+          : 210
+      : scale === "cinematic"
+        ? isTextNode
+          ? 300
+          : usesImageSizing
+            ? 296
+            : 280
+        : isTextNode
+          ? 260
+          : usesImageSizing
+            ? 252
+            : 238;
+  const minNodeHeight = usesImageSizing ? 180 : isTextNode ? 140 : 120;
   const sizeClass =
     scale === "compact"
       ? isTextNode
-        ? "min-w-[228px] max-w-[260px]"
-        : isImageNode
-          ? "w-[224px] max-w-[224px] min-w-[224px]"
+        ? "min-w-[228px]"
+        : usesImageSizing
+          ? hasCustomImageWidth
+            ? "w-full min-w-0 max-w-none"
+            : "w-[224px] max-w-[224px] min-w-[224px]"
           : "min-w-[210px]"
       : scale === "cinematic"
         ? isTextNode
-          ? "min-w-[300px] max-w-[360px]"
-          : isImageNode
-            ? "w-[296px] max-w-[296px] min-w-[296px]"
+          ? "min-w-[300px]"
+          : usesImageSizing
+            ? hasCustomImageWidth
+              ? "w-full min-w-0 max-w-none"
+              : "w-[296px] max-w-[296px] min-w-[296px]"
             : "min-w-[280px]"
         : isTextNode
-          ? "min-w-[260px] max-w-[300px]"
-          : isImageNode
-            ? "w-[252px] max-w-[252px] min-w-[252px]"
+          ? "min-w-[260px]"
+          : usesImageSizing
+            ? hasCustomImageWidth
+              ? "w-full min-w-0 max-w-none"
+              : "w-[252px] max-w-[252px] min-w-[252px]"
             : "min-w-[238px]";
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
@@ -266,11 +294,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     : isCustomSceneGenNode
       ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
       : data.latestArtifactId;
-  const previewViewerArtifactId =
-    isPreviewNode &&
-    (effectiveArtifactKind === "mesh_glb" || effectiveArtifactKind === "point_ply" || effectiveArtifactKind === "splat_ksplat")
-      ? data.latestArtifactId
-      : undefined;
   const outputVersionChoices = spec.outputPorts
     .filter((port) => !port.hidden)
     .map((port) => {
@@ -334,6 +357,24 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         selected && "border-[#78a9d3] shadow-[0_0_0_1px_rgba(120,169,211,0.65),0_10px_30px_rgba(0,0,0,0.6)]"
       )}
     >
+      <NodeResizer
+        isVisible={selected}
+        minWidth={minNodeWidth}
+        minHeight={minNodeHeight}
+        maxWidth={720}
+        maxHeight={900}
+        color="#7ba8cf"
+        onResize={(_, params) => {
+          if (!usesImageSizing) return;
+          const changed = Math.abs(params.width - defaultImageWidth) > 6;
+          setHasCustomImageWidth((current) => (current === changed ? current : changed));
+        }}
+        onResizeEnd={(_, params) => {
+          if (!usesImageSizing) return;
+          setHasCustomImageWidth(Math.abs(params.width - defaultImageWidth) > 6);
+        }}
+      />
+
       {(isCustomSceneGenNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
         return (
@@ -817,26 +858,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           )}
         </div>
       )}
-
-      {isPreviewNode ? (
-        <div className="mb-2 space-y-2 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
-          <p className="text-[10px] text-zinc-400">
-            {data.latestArtifactId
-              ? `Connected artifact #${data.latestArtifactId.slice(0, 8)}`
-              : "Connect any node output to preview it here."}
-          </p>
-          <button
-            type="button"
-            className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-md border border-[#4f6478] bg-[#253341] px-2 text-[10px] font-medium text-[#c9def1] transition hover:bg-[#2b3d4e] disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={() => data.onOpenViewer?.({ artifactId: previewViewerArtifactId, nodeId: id })}
-            disabled={!previewViewerArtifactId}
-            title={previewViewerArtifactId ? "Open connected scene in viewer" : "Viewer opens scene artifacts only"}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Open Viewer
-          </button>
-        </div>
-      ) : null}
 
       {outputVersionChoices.length > 0 ? (
         <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
