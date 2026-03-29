@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/db";
+import { parseGraphDocument } from "@/lib/graph/plan";
 
 export async function GET(
   _req: NextRequest,
@@ -39,6 +41,16 @@ export async function POST(
     return NextResponse.json({ error: "Invalid graphJson payload" }, { status: 400 });
   }
 
+  let normalizedGraphJson;
+  try {
+    normalizedGraphJson = parseGraphDocument(graphJson);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Invalid graphJson payload" },
+      { status: 400 }
+    );
+  }
+
   const latest = await prisma.graph.findFirst({
     where: { projectId },
     orderBy: { version: "desc" },
@@ -50,7 +62,7 @@ export async function POST(
       projectId,
       name,
       version: (latest?.version ?? 0) + 1,
-      graphJson
+      graphJson: normalizedGraphJson as unknown as Prisma.InputJsonValue
     }
   });
 

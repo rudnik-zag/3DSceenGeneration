@@ -1,33 +1,14 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FileUp, X } from "lucide-react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { ViewerCanvas } from "@/components/viewer/viewer-canvas";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { UnifiedWorldViewer } from "@/components/viewer/unified-world-viewer";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
-import { extractArtifactExtension, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
-
-const BabylonSplatViewer = dynamic(
-  () => import("@/components/viewer/BabylonSplatViewer").then((mod) => mod.BabylonSplatViewer),
-  {
-    ssr: false,
-    loading: () => (
-      <Card className="rounded-2xl border-border/70 panel-blur">
-        <CardHeader>
-          <CardTitle className="text-white">Loading Babylon renderer...</CardTitle>
-        </CardHeader>
-      </Card>
-    )
-  }
-);
 
 interface ViewerArtifact {
   id: string;
-  kind: "mesh_glb" | "point_ply" | "splat_ksplat" | string;
+  kind: "mesh_glb" | "mesh_ply" | "point_ply" | "splat_ksplat" | string;
   url: string;
   mimeType: string;
   meta: Record<string, unknown> | null;
@@ -37,91 +18,555 @@ interface ViewerArtifact {
   additionalSceneUrls?: string[] | null;
 }
 
+type SplatFormatHint = "ply" | "splat" | "ksplat" | "spz" | null;
+type BundleMode = "same_node" | "project_fallback";
+
+interface WorldManifestResponse {
+  artifactId: string;
+  context?: {
+    selectedRunId?: string | null;
+    selectedNodeId?: string | null;
+  };
+  bundle?: {
+    mode?: BundleMode;
+    meshRunIds?: string[];
+    splatRunIds?: string[];
+    usedCrossRunFallback?: boolean;
+  };
+  meshes: Array<{ id: string; url: string; runId?: string | null }>;
+  splats: Array<{
+    id: string;
+    artifactId: string;
+    runId?: string | null;
+    kind?: string;
+    tilesetUrl: string | null;
+    sourceUrl: string | null;
+  }>;
+  build?: {
+    canBuildTileset?: boolean;
+    defaultPresetName?: string;
+  };
+  environment?: {
+    enabled: boolean;
+    hdriUrl: string | null;
+    backgroundMode: "solid" | "hdri" | "transparent";
+    backgroundColor: string;
+    toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+    exposure: number;
+    envIntensity: number;
+    hdriRotationY: number;
+    hdriBlur: number;
+    ambientIntensity: number;
+    sunIntensity: number;
+    sunColor: string;
+    groundColor: string;
+  } | null;
+}
+
+interface UnifiedManifest {
+  artifactId?: string;
+  camera?: {
+    position?: [number, number, number];
+    target?: [number, number, number];
+    fov?: number;
+  };
+  environment?: {
+    enabled: boolean;
+    hdriUrl: string | null;
+    backgroundMode: "solid" | "hdri" | "transparent";
+    backgroundColor: string;
+    toneMapping: "ACESFilmic" | "Neutral" | "Reinhard" | "None";
+    exposure: number;
+    envIntensity: number;
+    hdriRotationY: number;
+    hdriBlur: number;
+    ambientIntensity: number;
+    sunIntensity: number;
+    sunColor: string;
+    groundColor: string;
+  } | null;
+  meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
+  splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
+}
+
+interface ViewerArtifactPickerOption {
+  id: string;
+  kind: string;
+  href: string;
+  label: string;
+  selected: boolean;
+}
+
+interface ViewerArtifactPicker {
+  selectedKind: string;
+  selectedArtifactText: string;
+  activeNodeScope: string | null;
+  rendererLabel: string | null;
+  options: ViewerArtifactPickerOption[];
+}
+
+function shortId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
+}
+
+function normalizeAssetUrlForDedup(url: string): string {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    if (parsed.pathname === "/api/storage/object" && keyParam) {
+      return `storage:${keyParam}`;
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+function meshIdFromUrl(url: string, fallback: string): string {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = keyParam && keyParam.length > 0 ? keyParam : parsed.pathname;
+    const filename = source.split("/").pop() || fallback;
+    const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    return safe.length > 0 ? safe : fallback;
+  } catch {
+    const filename = url.split("/").pop() || fallback;
+    const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    return safe.length > 0 ? safe : fallback;
+  }
+}
+
 function inferKindFromFilename(filename: string): ViewerArtifact["kind"] | null {
   const lower = filename.toLowerCase();
-  if (lower.endsWith(".compressed.ply")) return "gsplat";
+  if (lower.endsWith(".compressed.ply")) return "splat_ksplat";
   if (lower.endsWith(".ply")) return "point_ply";
   if (lower.endsWith(".glb") || lower.endsWith(".gltf")) return "mesh_glb";
-  if (lower.endsWith(".ksplat")) return "ksplat";
-  if (lower.endsWith(".spz")) return "spz";
-  if (lower.endsWith(".splat")) return "splat";
+  if (lower.endsWith(".ksplat")) return "splat_ksplat";
+  if (lower.endsWith(".spz")) return "splat_ksplat";
+  if (lower.endsWith(".splat")) return "splat_ksplat";
+  return null;
+}
+
+function inferSplatFormatHintFromUrl(url: string): SplatFormatHint {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = (keyParam && keyParam.length > 0 ? keyParam : parsed.pathname).toLowerCase();
+    if (source.endsWith(".compressed.ply")) return "ply";
+    if (source.endsWith(".ply")) return "ply";
+    if (source.endsWith(".ksplat")) return "ksplat";
+    if (source.endsWith(".spz")) return "spz";
+    if (source.endsWith(".splat")) return "splat";
+    return null;
+  } catch {
+    const lower = url.toLowerCase();
+    if (lower.endsWith(".compressed.ply")) return "ply";
+    if (lower.endsWith(".ply")) return "ply";
+    if (lower.endsWith(".ksplat")) return "ksplat";
+    if (lower.endsWith(".spz")) return "spz";
+    if (lower.endsWith(".splat")) return "splat";
+  }
+  return null;
+}
+
+function inferSplatFormatHintFromKind(kind: string | null | undefined): SplatFormatHint {
+  const normalized = (kind ?? "").toLowerCase();
+  if (normalized === "point_ply") return "ply";
+  if (normalized === "splat_ksplat") return "ksplat";
+  if (normalized === "splat" || normalized === "gsplat") return "splat";
+  if (normalized === "spz") return "spz";
+  return null;
+}
+
+function inferMeshFormatHintFromUrl(url: string): "ply" | "glb" | "gltf" | null {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const keyParam = parsed.searchParams.get("key");
+    const source = (keyParam && keyParam.length > 0 ? keyParam : parsed.pathname).toLowerCase();
+    if (source.endsWith(".ply") || source.endsWith(".compressed.ply")) return "ply";
+    if (source.endsWith(".glb")) return "glb";
+    if (source.endsWith(".gltf")) return "gltf";
+    return null;
+  } catch {
+    const lower = url.toLowerCase();
+    if (lower.endsWith(".ply") || lower.endsWith(".compressed.ply")) return "ply";
+    if (lower.endsWith(".glb")) return "glb";
+    if (lower.endsWith(".gltf")) return "gltf";
+  }
   return null;
 }
 
 async function detectKindForLocalFile(file: File): Promise<ViewerArtifact["kind"] | null> {
   const directKind = inferKindFromFilename(file.name);
   if (!directKind) return null;
-
-  if (directKind !== "point_ply") {
-    return directKind;
-  }
-
-  try {
-    const headerText = await file.slice(0, 256 * 1024).text();
-    const isGaussianHeader =
-      headerText.includes("end_header") &&
-      headerText.includes("f_dc_0") &&
-      headerText.includes("f_dc_1") &&
-      headerText.includes("f_dc_2");
-
-    if (isGaussianHeader) {
-      return "gsplat";
+  if (directKind === "point_ply" || directKind === "splat_ksplat") {
+    try {
+      const headerSlice = await file.slice(0, 256 * 1024).arrayBuffer();
+      const rawHeader = new TextDecoder("utf-8").decode(headerSlice);
+      const endMatch = rawHeader.match(/end_header(?:\r?\n|$)/);
+      if (endMatch) {
+        const header = rawHeader.slice(0, endMatch.index !== undefined ? endMatch.index + endMatch[0].length : undefined);
+        const faceMatch = header.match(/element\s+face\s+(\d+)/i);
+        const faceCount = faceMatch ? Number(faceMatch[1]) : 0;
+        if (Number.isFinite(faceCount) && faceCount > 0) {
+          return "mesh_ply";
+        }
+      }
+    } catch {
+      // Fall back to extension-based detection.
     }
-  } catch {
-    // Keep default point_ply when header detection fails.
   }
-
-  return "point_ply";
+  return directKind;
 }
 
 function isBlobUrl(url: string) {
   return url.startsWith("blob:");
 }
 
-export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtifact | null }) {
+function withBundleModeHref(href: string, bundleMode: BundleMode) {
+  if (typeof window === "undefined") return href;
+  try {
+    const nextUrl = new URL(href, window.location.origin);
+    nextUrl.searchParams.set("bundleMode", bundleMode);
+    return `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+  } catch {
+    return href;
+  }
+}
+
+function buildSingleArtifactManifest(artifact: ViewerArtifact): UnifiedManifest {
+  const extraMeshUrls = Array.isArray(artifact.additionalSceneUrls)
+    ? artifact.additionalSceneUrls.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const meshLike =
+    artifact.kind === "mesh_glb" ||
+    artifact.kind === "mesh_ply" ||
+    artifact.url.toLowerCase().endsWith(".glb") ||
+    artifact.url.toLowerCase().endsWith(".gltf");
+  if (meshLike) {
+    const preferPerObjectMeshes = extraMeshUrls.length > 0;
+    const meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }> = [];
+    const knownUrls = new Set<string>();
+    if (!preferPerObjectMeshes) {
+      meshes.push({
+        id: `mesh-${artifact.id}`,
+        url: artifact.url,
+        formatHint: artifact.kind === "mesh_ply" ? "ply" : inferMeshFormatHintFromUrl(artifact.url)
+      });
+      knownUrls.add(normalizeAssetUrlForDedup(artifact.url));
+    }
+    extraMeshUrls.forEach((url, index) => {
+      const dedupKey = normalizeAssetUrlForDedup(url);
+      if (knownUrls.has(dedupKey)) return;
+      knownUrls.add(dedupKey);
+      meshes.push({
+        id: `mesh-extra-${meshIdFromUrl(url, `${artifact.id}-${index}`)}-${index}`,
+        url,
+        formatHint: inferMeshFormatHintFromUrl(url)
+      });
+    });
+    return {
+      artifactId: artifact.id,
+      camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+      meshes,
+      splats: []
+    };
+  }
+
+  const splatLike = artifact.kind === "point_ply" || artifact.kind === "splat_ksplat";
+  if (splatLike) {
+    const formatHint =
+      inferSplatFormatHintFromKind(artifact.kind) ??
+      inferSplatFormatHintFromUrl(artifact.url) ??
+      inferSplatFormatHintFromUrl(artifact.filename ?? "");
+    return {
+      artifactId: artifact.id,
+      camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+      meshes: [],
+      splats: [{ id: `splat-${artifact.id}`, tilesetUrl: null, sourceUrl: artifact.url, formatHint }]
+    };
+  }
+
+  return {
+    artifactId: artifact.id,
+    camera: { position: [4, 3, 4], target: [0, 0, 0], fov: 50 },
+    meshes: [],
+    splats: []
+  };
+}
+
+const DEFAULT_CAMERA = { position: [4, 3, 4] as [number, number, number], target: [0, 0, 0] as [number, number, number], fov: 50 };
+
+function revokeLocalArtifactUrl(artifact: ViewerArtifact | null | undefined) {
+  if (!artifact?.url || !isBlobUrl(artifact.url)) return;
+  URL.revokeObjectURL(artifact.url);
+}
+
+export function ViewerLoader({
+  initialArtifact,
+  artifactPicker,
+  initialBundleMode
+}: {
+  initialArtifact: ViewerArtifact | null;
+  artifactPicker?: ViewerArtifactPicker | null;
+  initialBundleMode?: BundleMode;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const appendInputRef = useRef<HTMLInputElement>(null);
   const [localArtifact, setLocalArtifact] = useState<ViewerArtifact | null>(null);
-  const [plyRendererOverride, setPlyRendererOverride] = useState<"three" | "babylon-gs" | null>(null);
+  const [localSceneAdditions, setLocalSceneAdditions] = useState<ViewerArtifact[]>([]);
+  const [worldManifest, setWorldManifest] = useState<WorldManifestResponse | null>(null);
+  const [worldManifestLoading, setWorldManifestLoading] = useState(false);
+  const [worldManifestError, setWorldManifestError] = useState<string | null>(null);
+  const [buildTilesetLoading, setBuildTilesetLoading] = useState(false);
+  const [buildJobId, setBuildJobId] = useState<string | null>(null);
+  const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
+  const [viewerResetVersion, setViewerResetVersion] = useState(0);
+  const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "project_fallback");
+  const [sceneCleared, setSceneCleared] = useState(false);
+  const localArtifactRef = useRef<ViewerArtifact | null>(null);
+  const localSceneAdditionsRef = useRef<ViewerArtifact[]>([]);
 
   const activeArtifact = useMemo(() => localArtifact ?? initialArtifact, [initialArtifact, localArtifact]);
-  const renderer = useMemo(() => (activeArtifact ? selectViewerRenderer(activeArtifact) : null), [activeArtifact]);
-  const artifactExt = useMemo(
-    () => (activeArtifact ? extractArtifactExtension(activeArtifact.filename ?? activeArtifact.url) : null),
-    [activeArtifact]
-  );
-  const effectiveRenderer = useMemo(() => {
-    if (artifactExt === ".ply" && plyRendererOverride) {
-      return plyRendererOverride;
+
+  const unifiedManifest = useMemo<UnifiedManifest | null>(() => {
+    let baseManifest: UnifiedManifest | null = null;
+    if (sceneCleared) {
+      baseManifest = {
+        artifactId: activeArtifact?.id,
+        camera: DEFAULT_CAMERA,
+        environment: null,
+        meshes: [],
+        splats: []
+      };
     }
-    return renderer;
-  }, [artifactExt, plyRendererOverride, renderer]);
-  const threeCompatibleArtifact = useMemo(() => {
-    if (!activeArtifact) return null;
-    if (effectiveRenderer !== "three") return activeArtifact;
-    if (artifactExt !== ".ply") return activeArtifact;
-    return {
-      ...activeArtifact,
-      kind: "point_ply"
-    };
-  }, [activeArtifact, artifactExt, effectiveRenderer]);
+    if (localArtifact) {
+      baseManifest = buildSingleArtifactManifest(localArtifact);
+    }
+    if (!baseManifest && worldManifest) {
+      const extraMeshUrls =
+        activeArtifact && Array.isArray(activeArtifact.additionalSceneUrls)
+          ? activeArtifact.additionalSceneUrls.filter(
+              (value): value is string => typeof value === "string" && value.length > 0
+            )
+          : [];
+      const baseMeshes = worldManifest.meshes.map((entry) => ({
+        id: entry.id,
+        url: entry.url,
+        formatHint: inferMeshFormatHintFromUrl(entry.url)
+      }));
+      const mergedMeshes = [...baseMeshes];
+      const knownUrls = new Set(mergedMeshes.map((entry) => normalizeAssetUrlForDedup(entry.url)));
+      extraMeshUrls.forEach((url, index) => {
+        const dedupKey = normalizeAssetUrlForDedup(url);
+        if (knownUrls.has(dedupKey)) return;
+        knownUrls.add(dedupKey);
+        mergedMeshes.push({
+          id: `mesh-extra-${meshIdFromUrl(url, `${worldManifest.artifactId}-${index}`)}-${index}`,
+          url,
+          formatHint: inferMeshFormatHintFromUrl(url)
+        });
+      });
+      baseManifest = {
+        artifactId: worldManifest.artifactId,
+        camera: DEFAULT_CAMERA,
+        environment: worldManifest.environment ?? null,
+        meshes: mergedMeshes,
+        splats: worldManifest.splats.map((entry) => ({
+          id: entry.id,
+          tilesetUrl: entry.tilesetUrl,
+          sourceUrl: entry.sourceUrl,
+          formatHint:
+            inferSplatFormatHintFromKind(entry.kind) ??
+            (entry.sourceUrl ? inferSplatFormatHintFromUrl(entry.sourceUrl) : null)
+        }))
+      };
+    }
+    if (!baseManifest && activeArtifact) {
+      baseManifest = buildSingleArtifactManifest(activeArtifact);
+    }
+    if (!baseManifest) {
+      return null;
+    }
+    return baseManifest;
+  }, [activeArtifact, localArtifact, sceneCleared, worldManifest]);
 
   useEffect(() => {
-    return () => {
-      if (localArtifact?.url && isBlobUrl(localArtifact.url)) {
-        URL.revokeObjectURL(localArtifact.url);
-      }
-    };
+    localArtifactRef.current = localArtifact;
   }, [localArtifact]);
 
   useEffect(() => {
-    setPlyRendererOverride(null);
-  }, [activeArtifact?.id]);
+    localSceneAdditionsRef.current = localSceneAdditions;
+  }, [localSceneAdditions]);
+
+  useEffect(() => {
+    return () => {
+      revokeLocalArtifactUrl(localArtifactRef.current);
+      localSceneAdditionsRef.current.forEach((artifact) => revokeLocalArtifactUrl(artifact));
+    };
+  }, []);
+
+  useEffect(() => {
+    if (sceneCleared || !activeArtifact || localArtifact) {
+      setWorldManifest(null);
+      setWorldManifestError(null);
+      setWorldManifestLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadWorldManifest = async () => {
+      setWorldManifestLoading(true);
+      setWorldManifestError(null);
+      try {
+        const params = new URLSearchParams({
+          artifactId: activeArtifact.id,
+          bundleMode
+        });
+        const response = await fetch(`/api/world/manifest?${params.toString()}`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to load world manifest (${response.status})`);
+        }
+        const payload = (await response.json()) as WorldManifestResponse;
+        if (cancelled) return;
+        setWorldManifest(payload);
+      } catch (error) {
+        if (cancelled) return;
+        setWorldManifestError(error instanceof Error ? error.message : "Failed to load world manifest");
+        setWorldManifest(null);
+      } finally {
+        if (!cancelled) setWorldManifestLoading(false);
+      }
+    };
+
+    void loadWorldManifest();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeArtifact, localArtifact, bundleMode, sceneCleared]);
+
+  useEffect(() => {
+    if (!buildJobId) return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/splats/buildTileset?jobId=${encodeURIComponent(buildJobId)}`, {
+          cache: "no-store"
+        });
+        if (!response.ok) return;
+        const payload = (await response.json()) as {
+          state?: string;
+          failedReason?: string | null;
+        };
+        if (cancelled) return;
+        if (payload.state === "completed") {
+          window.clearInterval(timer);
+          setBuildJobId(null);
+          setBuildTilesetLoading(false);
+          toast({
+            title: "Tileset Ready",
+            description: "Splat tileset build completed."
+          });
+          if (activeArtifact && !localArtifact) {
+            const refreshParams = new URLSearchParams({
+              artifactId: activeArtifact.id,
+              bundleMode
+            });
+            const refresh = await fetch(`/api/world/manifest?${refreshParams.toString()}`, { cache: "no-store" });
+            if (refresh.ok) {
+              const nextManifest = (await refresh.json()) as WorldManifestResponse;
+              if (!cancelled) setWorldManifest(nextManifest);
+            }
+          }
+        }
+        if (payload.state === "failed") {
+          window.clearInterval(timer);
+          setBuildJobId(null);
+          setBuildTilesetLoading(false);
+          toast({
+            title: "Tileset Build Failed",
+            description: payload.failedReason ?? "Background build failed."
+          });
+        }
+      } catch {
+        // keep polling
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeArtifact, buildJobId, localArtifact, bundleMode]);
+
+  const onBuildTileset = async () => {
+    if (!activeArtifact || localArtifact) return;
+    try {
+      setBuildTilesetLoading(true);
+      const response = await fetch("/api/splats/buildTileset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          artifactId: activeArtifact.id,
+          presetName: worldManifest?.build?.defaultPresetName ?? "Default"
+        })
+      });
+      const payload = (await response.json().catch(() => ({}))) as { jobId?: string; error?: string };
+      if (!response.ok || !payload.jobId) {
+        throw new Error(payload.error ?? `Build request failed (${response.status})`);
+      }
+      setBuildJobId(payload.jobId);
+      toast({
+        title: "Tileset Build Queued",
+        description: "Streaming tileset generation started."
+      });
+    } catch (error) {
+      setBuildTilesetLoading(false);
+      toast({
+        title: "Tileset Build Error",
+        description: error instanceof Error ? error.message : "Failed to start tileset build."
+      });
+    }
+  };
+
+  const canBuildTileset = Boolean(!localArtifact && worldManifest?.build?.canBuildTileset);
+  const bundleSourceNote = useMemo(() => {
+    if (!worldManifest || localArtifact) return null;
+    const selectedRunId = worldManifest.context?.selectedRunId ?? null;
+    const meshRunIds =
+      worldManifest.bundle?.meshRunIds?.filter((value): value is string => typeof value === "string" && value.length > 0) ??
+      [];
+    const splatRunIds =
+      worldManifest.bundle?.splatRunIds?.filter((value): value is string => typeof value === "string" && value.length > 0) ??
+      [];
+
+    const renderPart = (label: string, runIds: string[]) => {
+      if (runIds.length === 0) return `${label}: none`;
+      if (runIds.length === 1) {
+        const id = runIds[0];
+        return selectedRunId && id === selectedRunId ? `${label}: selected run` : `${label}: ${shortId(id)}`;
+      }
+      return `${label}: ${runIds.length} runs`;
+    };
+
+    const parts = [renderPart("Meshes", meshRunIds), renderPart("Splats", splatRunIds)];
+    parts.unshift(worldManifest.bundle?.mode === "same_node" ? "mode: same node" : "mode: project fallback");
+    if (worldManifest.bundle?.usedCrossRunFallback) {
+      parts.push("cross-run fallback");
+    }
+    return parts.join(" • ");
+  }, [localArtifact, worldManifest]);
 
   const onPickLocalFile = () => {
     inputRef.current?.click();
   };
 
-  const onFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const onAddExternalFile = () => {
+    appendInputRef.current?.click();
+  };
+
+  const onFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -135,10 +580,9 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
     }
 
     const url = URL.createObjectURL(file);
+    setSceneCleared(false);
     setLocalArtifact((prev) => {
-      if (prev?.url && isBlobUrl(prev.url)) {
-        URL.revokeObjectURL(prev.url);
-      }
+      revokeLocalArtifactUrl(prev);
       return {
         id: `local-${Date.now()}`,
         kind,
@@ -155,74 +599,190 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
     event.target.value = "";
   };
 
-  const clearLocalArtifact = () => {
-    setLocalArtifact((prev) => {
-      if (prev?.url && isBlobUrl(prev.url)) {
-        URL.revokeObjectURL(prev.url);
+  const onAppendFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const kind = await detectKindForLocalFile(file);
+    if (!kind) {
+      toast({
+        title: "Unsupported file",
+        description: "Use .ply, .compressed.ply, .glb/.gltf, .splat, .spz, .ksplat."
+      });
+      event.target.value = "";
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    setSceneCleared(false);
+    setLocalSceneAdditions((prev) => [
+      ...prev,
+      {
+        id: `local-external-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind,
+        url,
+        mimeType: file.type || "application/octet-stream",
+        filename: file.name,
+        byteSize: file.size,
+        meta: {
+          filename: file.name,
+          byteSize: file.size
+        }
       }
+    ]);
+    toast({
+      title: "External Object Added",
+      description: `${file.name} appended to current scene`
+    });
+    event.target.value = "";
+  };
+
+  const clearLocalArtifact = () => {
+    setSceneCleared(false);
+    setLocalArtifact((prev) => {
+      revokeLocalArtifactUrl(prev);
       return null;
     });
   };
 
-  return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 panel-blur p-3">
-        <Button size="sm" className="rounded-xl" onClick={onPickLocalFile}>
-          <FileUp className="mr-1 h-4 w-4" />
-          Open local file
-        </Button>
-        {localArtifact ? (
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={clearLocalArtifact}>
-            <X className="mr-1 h-4 w-4" />
-            Use run artifact
-          </Button>
-        ) : null}
-        <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
-          {localArtifact ? "Source: local file" : activeArtifact ? "Source: run artifact" : "No artifact selected"}
-        </Badge>
-        {renderer ? (
-          <Badge variant="secondary" className="rounded-full border border-border/70 bg-background/65">
-            Renderer: {effectiveRenderer === "babylon-gs" ? "Babylon GS" : "Three.js"}
-          </Badge>
-        ) : null}
-        {artifactExt === ".ply" && activeArtifact ? (
-          <Button
-            size="sm"
-            variant={effectiveRenderer === "babylon-gs" ? "default" : "outline"}
-            className="rounded-xl"
-            onClick={() =>
-              setPlyRendererOverride((current) => {
-                const baseline = current ?? renderer ?? "three";
-                return baseline === "three" ? "babylon-gs" : "three";
-              })
-            }
-          >
-            {effectiveRenderer === "babylon-gs" ? "Use Three PLY" : "Render PLY as GS"}
-          </Button>
-        ) : null}
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
-          className="hidden"
-          onChange={onFileChange}
-        />
-      </div>
+  const clearLocalSceneAdditions = () => {
+    setLocalSceneAdditions((prev) => {
+      prev.forEach((artifact) => revokeLocalArtifactUrl(artifact));
+      return [];
+    });
+  };
 
+  const onResetViewer = () => {
+    setSceneCleared(false);
+    clearLocalArtifact();
+    clearLocalSceneAdditions();
+    setWorldManifest(null);
+    setWorldManifestError(null);
+    setWorldManifestLoading(false);
+    setBuildTilesetLoading(false);
+    setBuildJobId(null);
+    setViewerResetVersion((value) => value + 1);
+  };
+  const onClearScene = () => {
+    clearLocalArtifact();
+    clearLocalSceneAdditions();
+    setWorldManifest(null);
+    setWorldManifestError(null);
+    setWorldManifestLoading(false);
+    setBuildTilesetLoading(false);
+    setBuildJobId(null);
+    setSceneCleared(true);
+    setViewerResetVersion((value) => value + 1);
+  };
+  const onBundleModeChange = (nextMode: BundleMode) => {
+    setBundleMode(nextMode);
+    if (typeof window !== "undefined") {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("bundleMode", nextMode);
+      window.history.replaceState(null, "", nextUrl.toString());
+    }
+  };
+
+  const onDeleteArtifact = async (artifactId: string, label?: string) => {
+    if (!artifactId) return;
+    const confirmed = window.confirm(`Delete artifact ${label ?? artifactId}? This will remove it from storage and history.`);
+    if (!confirmed) return;
+
+    try {
+      setDeletingArtifactId(artifactId);
+      const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+        method: "DELETE"
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Delete failed (${response.status})`);
+      }
+
+      toast({
+        title: "Artifact Deleted",
+        description: label ?? artifactId
+      });
+
+      const remaining = (artifactPicker?.options ?? []).filter((option) => option.id !== artifactId);
+      if (remaining.length > 0) {
+        const nextOption = remaining.find((option) => option.selected) ?? remaining[0];
+        window.location.assign(withBundleModeHref(nextOption.href, bundleMode));
+        return;
+      }
+
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("artifactId");
+      nextUrl.searchParams.delete("nodeId");
+      nextUrl.searchParams.set("bundleMode", bundleMode);
+      window.location.assign(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    } catch (error) {
+      toast({
+        title: "Delete Failed",
+        description: error instanceof Error ? error.message : "Failed to delete artifact."
+      });
+    } finally {
+      setDeletingArtifactId(null);
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
-        {activeArtifact && effectiveRenderer === "babylon-gs" ? (
-          <BabylonSplatViewer artifact={activeArtifact} />
-        ) : activeArtifact && effectiveRenderer === "three" ? (
-          <ViewerCanvas artifact={threeCompatibleArtifact ?? activeArtifact} />
-        ) : activeArtifact ? (
+        {worldManifestLoading && !localArtifact ? (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>
-              <CardTitle className="text-white">Unsupported artifact type</CardTitle>
+              <CardTitle className="text-white">Loading world manifest...</CardTitle>
             </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              Could not infer renderer for this artifact. Try .glb/.gltf/.ply for Three.js or .splat/.spz/.compressed.ply for Babylon GS.
-            </CardContent>
           </Card>
+        ) : worldManifestError && !localArtifact ? (
+          <Card className="rounded-2xl border-border/70 panel-blur">
+            <CardHeader>
+              <CardTitle className="text-white">World manifest unavailable</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">{worldManifestError}</CardContent>
+          </Card>
+        ) : unifiedManifest ? (
+          <UnifiedWorldViewer
+            key={`${activeArtifact?.id ?? "no-artifact"}:${viewerResetVersion}`}
+            manifest={unifiedManifest}
+            externalSceneAdditions={localSceneAdditions.map((artifact) => ({
+              id: artifact.id,
+              kind: artifact.kind,
+              url: artifact.url,
+              filename: artifact.filename ?? null
+            }))}
+            fileMenu={{
+              selectedKind: artifactPicker?.selectedKind ?? null,
+              activeNodeScope: artifactPicker?.activeNodeScope ?? null,
+              rendererLabel: artifactPicker?.rendererLabel ?? "Unified",
+              selectedArtifactText:
+                artifactPicker?.selectedArtifactText ??
+                (activeArtifact ? `Artifact ${activeArtifact.id}` : "No artifact selected"),
+              options:
+                artifactPicker?.options.map((option) => ({
+                  ...option,
+                  href: withBundleModeHref(option.href, bundleMode)
+                })) ?? [],
+              sourceLabel:
+                (localArtifact ? "local file" : activeArtifact ? "run artifact" : "none") +
+                (localSceneAdditions.length > 0 ? ` + ${localSceneAdditions.length} external` : ""),
+              viewerLabel: "Unified",
+              canUseRunArtifact: Boolean(localArtifact),
+              canBuildTileset,
+              buildTilesetLoading: buildTilesetLoading || Boolean(buildJobId),
+              bundleSourceNote,
+              bundleMode,
+              onPickLocalFile,
+              onAddExternalFile,
+              onUseRunArtifact: localArtifact ? clearLocalArtifact : undefined,
+              onBuildTileset: canBuildTileset ? onBuildTileset : undefined,
+              onBundleModeChange,
+              onDeleteArtifact,
+              deletingArtifactId,
+              onClearScene,
+              onResetViewer
+            }}
+          />
         ) : (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>
@@ -234,6 +794,20 @@ export function ViewerLoader({ initialArtifact }: { initialArtifact: ViewerArtif
           </Card>
         )}
       </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
+        className="hidden"
+        onChange={onFileChange}
+      />
+      <input
+        ref={appendInputRef}
+        type="file"
+        accept=".ply,.compressed.ply,.glb,.gltf,.ksplat,.spz,.splat"
+        className="hidden"
+        onChange={onAppendFileChange}
+      />
     </div>
   );
 }

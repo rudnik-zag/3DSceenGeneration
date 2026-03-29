@@ -439,7 +439,7 @@ async function loadManifest(outputDir: string, stdout: string): Promise<SceneMan
     .filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const parsed = safeJsonParse<SceneManifest>(lines[i]);
-    if (parsed && parsed.scene_path) return parsed;
+    if (parsed) return parsed;
   }
   return {};
 }
@@ -483,53 +483,135 @@ async function collectRealOutputs(params: {
   }
 
   const expected = resolveOutputKind(params.mode);
-  const fallbackPath = path.join(params.command.outputDir, `scene.${expected.extension}`);
-  const scenePath = manifest.scene_path ?? fallbackPath;
-  const sceneBuffer = await fs.readFile(scenePath).catch((error) => {
-    throw new Error(`SceneGeneration output not found at ${scenePath}: ${(error as Error).message}`);
-  });
+  let scenePath = "";
+  let sceneBuffer: Buffer;
   let meshObjectStorageKeys: string[] = [];
-  if (params.mode === "mesh") {
-    const meshObjectsDir =
-      manifest.output_paths?.mesh_objects_dir ??
-      path.join(params.command.outputDir, "mesh_objects_transformed");
-    try {
-      const files = await fs.readdir(meshObjectsDir);
-      const glbFiles = files
-        .filter((name) => name.toLowerCase().endsWith(".glb"))
-        .sort((a, b) => a.localeCompare(b));
-
-      if (glbFiles.length > 0) {
-        for (const fileName of glbFiles) {
-          const localPath = path.join(meshObjectsDir, fileName);
-          if (path.resolve(localPath) === path.resolve(scenePath)) {
-            continue;
+  if (params.mode === "gaussian") {
+    const fallbackPath = path.join(params.command.outputDir, `scene.${expected.extension}`);
+    scenePath = manifest.scene_path ?? fallbackPath;
+    sceneBuffer = await fs.readFile(scenePath).catch((error) => {
+      throw new Error(`SceneGeneration output not found at ${scenePath}: ${(error as Error).message}`);
+    });
+  } else {
+    const meshObjectPathSet = new Set<string>();
+    const resolveCandidateFile = async (candidate: string | null | undefined) => {
+      if (!candidate || candidate.trim().length === 0) return null;
+      const trimmed = candidate.trim();
+      const candidates = path.isAbsolute(trimmed)
+        ? [trimmed]
+        : [path.resolve(params.command.outputDir, trimmed), path.resolve(process.cwd(), trimmed)];
+      for (const resolved of candidates) {
+        try {
+          const stat = await fs.stat(resolved);
+          if (stat.isFile() && resolved.toLowerCase().endsWith(".glb")) {
+            return resolved;
           }
-          const fileBuffer = await fs.readFile(localPath);
-          const storageKey = [
-            "projects",
-            params.ctx.projectSlug || params.ctx.projectId,
-            "runs",
-            params.ctx.runId,
-            "nodes",
-            params.ctx.nodeId,
-            "scene_generation",
-            "outputs",
-            "mesh_objects_transformed",
-            fileName
-          ].join("/");
-          await putObjectToStorage({
-            key: storageKey,
-            body: fileBuffer,
-            contentType: "model/gltf-binary"
-          });
-          meshObjectStorageKeys.push(storageKey);
+        } catch {
+          // Try the next candidate.
         }
       }
-    } catch {
-      // Keep scene output even if per-object files are unavailable.
-      meshObjectStorageKeys = [];
+      return null;
+    };
+    const resolveCandidateDir = async (candidate: string | null | undefined) => {
+      if (!candidate || candidate.trim().length === 0) return null;
+      const trimmed = candidate.trim();
+      const candidates = path.isAbsolute(trimmed)
+        ? [trimmed]
+        : [path.resolve(params.command.outputDir, trimmed), path.resolve(process.cwd(), trimmed)];
+      for (const resolved of candidates) {
+        try {
+          const stat = await fs.stat(resolved);
+          if (stat.isDirectory()) {
+            return resolved;
+          }
+        } catch {
+          // Try the next candidate.
+        }
+      }
+      return null;
+    };
+
+    if (Array.isArray(manifest.objects)) {
+      for (const object of manifest.objects) {
+        const resolved = await resolveCandidateFile(object?.transformed_object_path);
+        if (resolved) meshObjectPathSet.add(path.resolve(resolved));
+      }
     }
+
+    const meshDirCandidates = [
+      manifest.output_paths?.mesh_objects_dir,
+      path.join(params.command.outputDir, "mesh_objects_transformed")
+    ];
+    for (const dirCandidate of meshDirCandidates) {
+      const resolvedDir = await resolveCandidateDir(dirCandidate);
+      if (!resolvedDir) continue;
+      const files = await fs.readdir(resolvedDir);
+      for (const fileName of files) {
+        if (!fileName.toLowerCase().endsWith(".glb")) continue;
+        meshObjectPathSet.add(path.resolve(path.join(resolvedDir, fileName)));
+      }
+    }
+
+    const manifestScenePath = await resolveCandidateFile(manifest.scene_path);
+    let primaryScenePath = manifestScenePath;
+    const meshObjectPaths = [...meshObjectPathSet].sort((a, b) => a.localeCompare(b));
+    if (!primaryScenePath && meshObjectPaths.length > 0) {
+      primaryScenePath = meshObjectPaths[0];
+    }
+    if (!primaryScenePath) {
+      throw new Error(
+        `SceneGeneration mesh output missing transformed GLB files under ${path.join(
+          params.command.outputDir,
+          "mesh_objects_transformed"
+        )}`
+      );
+    }
+
+    scenePath = primaryScenePath;
+    sceneBuffer = await fs.readFile(scenePath);
+
+    const uploadCandidates = [...meshObjectPaths];
+    if (!uploadCandidates.some((value) => path.resolve(value) === path.resolve(scenePath))) {
+      uploadCandidates.unshift(scenePath);
+    }
+
+    const usedFileNames = new Set<string>();
+    const uploadedKeys = new Set<string>();
+    for (const localPath of uploadCandidates) {
+      const fileNameBase = path.basename(localPath);
+      let storageFileName = fileNameBase;
+      let collisionIndex = 1;
+      while (usedFileNames.has(storageFileName)) {
+        const ext = path.extname(fileNameBase);
+        const stem = ext ? fileNameBase.slice(0, -ext.length) : fileNameBase;
+        storageFileName = `${stem}_${collisionIndex}${ext}`;
+        collisionIndex += 1;
+      }
+      usedFileNames.add(storageFileName);
+
+      const fileBuffer =
+        path.resolve(localPath) === path.resolve(scenePath) ? sceneBuffer : await fs.readFile(localPath);
+      const storageKey = [
+        "projects",
+        params.ctx.projectSlug || params.ctx.projectId,
+        "runs",
+        params.ctx.runId,
+        "nodes",
+        params.ctx.nodeId,
+        "scene_generation",
+        "outputs",
+        "mesh_objects_transformed",
+        storageFileName
+      ].join("/");
+
+      await putObjectToStorage({
+        key: storageKey,
+        body: fileBuffer,
+        contentType: "model/gltf-binary"
+      });
+      uploadedKeys.add(storageKey);
+    }
+    meshObjectStorageKeys = [...uploadedKeys];
   }
 
   const metaPayload = {
@@ -620,7 +702,7 @@ async function executePerMaskReal(params: {
   await fs.mkdir(meshObjectsDir, { recursive: true });
 
   let keptCount = 0;
-  let firstScenePath: string | null = null;
+  let firstMeshObjectPath: string | null = null;
   let mergedRunConfig: Record<string, unknown> | null = null;
   const mergedObjects: NonNullable<SceneManifest["objects"]> = [];
   try {
@@ -656,15 +738,47 @@ async function executePerMaskReal(params: {
         if (!mergedRunConfig && perMaskManifest.run_config && typeof perMaskManifest.run_config === "object") {
           mergedRunConfig = perMaskManifest.run_config;
         }
-        const perMaskScenePath =
-          perMaskManifest.scene_path ?? path.join(maskOutDir, params.mode === "mesh" ? "scene.glb" : "scene.ply");
-
-        await fs.access(perMaskScenePath);
+        const resolvedFromManifest =
+          typeof perMaskManifest.objects?.[0]?.transformed_object_path === "string"
+            ? perMaskManifest.objects[0].transformed_object_path
+            : null;
+        const manifestPathCandidates = resolvedFromManifest
+          ? path.isAbsolute(resolvedFromManifest)
+            ? [resolvedFromManifest]
+            : [path.resolve(maskOutDir, resolvedFromManifest), path.resolve(process.cwd(), resolvedFromManifest)]
+          : [];
+        let perMaskObjectPath: string | null = null;
+        for (const candidate of manifestPathCandidates) {
+          try {
+            const stat = await fs.stat(candidate);
+            if (stat.isFile() && candidate.toLowerCase().endsWith(".glb")) {
+              perMaskObjectPath = candidate;
+              break;
+            }
+          } catch {
+            // Try the next candidate.
+          }
+        }
+        if (!perMaskObjectPath) {
+          const perMaskObjectsDirCandidate =
+            perMaskManifest.output_paths?.mesh_objects_dir ?? path.join(maskOutDir, "mesh_objects_transformed");
+          const perMaskObjectsDir = path.isAbsolute(perMaskObjectsDirCandidate)
+            ? perMaskObjectsDirCandidate
+            : path.resolve(maskOutDir, perMaskObjectsDirCandidate);
+          const files = await fs.readdir(perMaskObjectsDir);
+          const glbFile = files
+            .filter((name) => name.toLowerCase().endsWith(".glb"))
+            .sort((a, b) => a.localeCompare(b))[0];
+          if (!glbFile) {
+            throw new Error(`No transformed object GLB found in ${perMaskObjectsDir}`);
+          }
+          perMaskObjectPath = path.join(perMaskObjectsDir, glbFile);
+        }
         const copiedScenePath = path.join(
           meshObjectsDir,
           `object_${index.toString().padStart(3, "0")}_posed.glb`
         );
-        await fs.copyFile(perMaskScenePath, copiedScenePath);
+        await fs.copyFile(perMaskObjectPath, copiedScenePath);
         const sourceMeshPart = path.join(maskOutDir, "mesh_parts", `object_${index.toString().padStart(3, "0")}.glb`);
         const targetMeshPart = path.join(meshPartsDir, `object_${index.toString().padStart(3, "0")}.glb`);
         let meshPartPath: string | undefined;
@@ -674,8 +788,8 @@ async function executePerMaskReal(params: {
           // Some runs may not produce per-mask mesh part files.
         });
 
-        if (!firstScenePath) {
-          firstScenePath = copiedScenePath;
+        if (!firstMeshObjectPath) {
+          firstMeshObjectPath = copiedScenePath;
         }
         mergedObjects.push({
           index,
@@ -700,23 +814,20 @@ async function executePerMaskReal(params: {
     });
   }
 
-  if (!firstScenePath || keptCount === 0) {
+  if (!firstMeshObjectPath || keptCount === 0) {
     throw new Error("SceneGeneration per-mask mode produced no valid mesh objects.");
   }
-
-  const scenePath = path.join(params.outputDir, "scene.glb");
-  await fs.copyFile(firstScenePath, scenePath);
 
   const composedManifest: SceneManifest = {
     mode: params.mode,
     config: typeof params.ctx.params.config === "string" ? params.ctx.params.config : getDefaultSam3dConfig(),
-    scene_path: scenePath,
+    scene_path: firstMeshObjectPath,
     masks_count: keptCount,
     image_path: params.imagePath,
     masks_dir: params.masksDir,
     output_paths: {
       output_dir: params.outputDir,
-      scene: scenePath,
+      scene: firstMeshObjectPath,
       mesh_parts_dir: meshPartsDir,
       mesh_objects_dir: meshObjectsDir
     },

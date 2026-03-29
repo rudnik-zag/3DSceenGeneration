@@ -1,22 +1,25 @@
 import { ArtifactKind } from "@prisma/client";
 
-import { WorkflowNodeType } from "@/types/workflow";
+import { ArtifactType, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
 
 export interface ResolvedArtifactInput {
   artifactId: string;
   nodeId: string;
   outputId: string;
   kind: ArtifactKind;
+  artifactType: ArtifactType;
   hash: string;
   mimeType: string;
   storageKey: string;
   byteSize: number;
   meta: Record<string, unknown>;
+  ref: NodeArtifactRef;
 }
 
 export interface ExecutorOutputArtifact {
   outputId: string;
   kind: ArtifactKind;
+  artifactType?: ArtifactType;
   mimeType: string;
   extension: string;
   buffer: Buffer;

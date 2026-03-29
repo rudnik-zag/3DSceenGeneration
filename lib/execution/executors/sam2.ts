@@ -329,7 +329,7 @@ async function buildSam2Command(params: {
       : path.join(getSam2RepoRoot(), "sam2", "configs", "sam2.1", path.basename(resolvedCfg.absolutePath));
 
   if (mode === "guided" && !boxesConfigPath) {
-    throw new Error("Requires ObjectDetection config JSON input.");
+    throw new Error("Requires ObjectDetection descriptor JSON input.");
   }
 
   const scriptPath = path.join(toolsDir, "inference_for_webapp.py");
@@ -776,13 +776,13 @@ async function buildMockOutputs(params: {
 }
 
 export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
-  const boxesInput = ctx.inputs.boxes?.[0] ?? ctx.inputs.boxesConfig?.[0] ?? null;
+  const boxesInput = ctx.inputs.descriptor?.[0] ?? ctx.inputs.boxes?.[0] ?? ctx.inputs.boxesConfig?.[0] ?? null;
   const imageInput = ctx.inputs.image?.[0] ?? null;
   const mode = resolveRequestedMode(ctx, Boolean(boxesInput));
   const warnings = [...(ctx.warnings ?? [])];
 
   if (mode === "guided" && !boxesInput) {
-    throw new Error("Requires ObjectDetection config JSON input.");
+    throw new Error("Requires ObjectDetection descriptor JSON input.");
   }
 
   const nodeOutputRoot = path.join(

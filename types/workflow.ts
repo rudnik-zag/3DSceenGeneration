@@ -2,30 +2,30 @@ import { z } from "zod";
 
 export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 
-export type PayloadKind =
+export type ArtifactType =
   | "Image"
-  | "Mask"
-  | "MaskDir"
-  | "Boxes"
-  | "BoxesJson"
-  | "MaskImage"
-  | "OverlayImage"
-  | "JsonMeta"
-  | "Text"
-  | "Json"
-  | "Depth"
+  | "Descriptor"
+  | "MaskSet"
+  | "SceneAsset"
+  | "JsonData"
+  | "DepthMap"
   | "PointCloud"
   | "Mesh"
   | "TextureSet"
-  | "Scene";
+  | "GaussianSplat";
+
+// Legacy alias kept for backwards compatibility with older code paths.
+export type PayloadKind = ArtifactType;
 
 export type WorkflowNodeType =
   | "input.image"
   | "input.text"
   | "input.cameraPath"
+  | "viewer.environment"
   | "model.groundingdino"
   | "model.sam2"
   | "model.sam3d_objects"
+  | "pipeline.scene_generation"
   | "model.qwen_vl"
   | "model.qwen_image_edit"
   | "model.texturing"
@@ -43,7 +43,7 @@ export type NodeUiScale = "compact" | "balanced" | "cinematic";
 export interface PortSpec {
   id: string;
   label: string;
-  payload: PayloadKind;
+  artifactType: ArtifactType;
   required?: boolean;
   hidden?: boolean;
   advancedOnly?: boolean;
@@ -107,6 +107,30 @@ export interface GraphNodeData {
       createdAt?: string;
     }
   >;
+  outputArtifactHistory?: Record<
+    string,
+    Array<{
+      id: string;
+      kind: string;
+      hidden?: boolean;
+      url?: string | null;
+      previewUrl?: string | null;
+      createdAt?: string;
+    }>
+  >;
+  scenePreviewStages?: Record<
+    string,
+    {
+      id: string;
+      kind: string;
+      label: string;
+      hidden?: boolean;
+      outputKey?: string;
+      url?: string | null;
+      previewUrl?: string | null;
+      createdAt?: string;
+    }
+  >;
   onRunNode?: (nodeId: string) => void;
   onUploadImage?: (nodeId: string, file: File) => void;
   onUpdateParam?: (nodeId: string, key: string, value: string | number | boolean) => void;
@@ -163,5 +187,16 @@ export interface ArtifactRef {
   hash: string;
   meta?: Record<string, unknown>;
 }
+
+export type NodeArtifactRef = {
+  id: string;
+  type: ArtifactType;
+  name: string;
+  mimeType?: string;
+  storageKey?: string;
+  metadata?: Record<string, unknown>;
+  producerNodeId: string;
+  createdAt: string;
+};
 
 export type GraphJson = GraphDocument;

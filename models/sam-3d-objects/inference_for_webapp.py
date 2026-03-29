@@ -34,15 +34,16 @@ def build_manifest(
     image_path: Path,
     masks_dir: Path,
     output_dir: Path,
-    scene_path: Path,
+    scene_path: Path | None,
     masks_count: int,
     run_config: dict,
     mesh_parts_dir: Path | None = None,
 ) -> dict:
     output_paths = {
         "output_dir": str(output_dir.resolve()),
-        "scene": str(scene_path.resolve()),
     }
+    if scene_path is not None:
+        output_paths["scene"] = str(scene_path.resolve())
     if mesh_parts_dir is not None:
         output_paths["mesh_parts_dir"] = str(mesh_parts_dir.resolve())
 
@@ -50,7 +51,7 @@ def build_manifest(
         # Keep top-level keys used by executor loader for backward compatibility.
         "mode": mode,
         "config": config_tag,
-        "scene_path": str(scene_path.resolve()),
+        "scene_path": str(scene_path.resolve()) if scene_path is not None else None,
         "masks_count": int(masks_count),
         "image_path": str(image_path.resolve()),
         "masks_dir": str(masks_dir.resolve()),
@@ -141,7 +142,7 @@ def run_gaussian(args: argparse.Namespace, config_path: Path, output_dir: Path) 
 
 def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> dict:
     from notebook.inference import Inference, load_image, load_masks
-    from demo_multi_object_mesh import build_mesh_scene, cleanup_cuda, run_one_mask, select_autocast_dtype
+    from demo_multi_object_mesh import cleanup_cuda, run_one_mask, select_autocast_dtype
 
     inference = Inference(str(config_path), compile=False)
     image = load_image(str(Path(args.image)))
@@ -169,26 +170,20 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
         "store_on_cpu": True,
     }
 
-    mesh_scene_items = []
+    transformed_paths: list[Path] = []
     for idx, mask in enumerate(masks):
         obj = run_one_mask(inference, image, mask, seed=42, cfg=cfg, idx=idx, mesh_dir=str(mesh_dir))
         pose_ok = obj.get("rotation") is not None and obj.get("translation") is not None and obj.get("scale") is not None
-        if cfg["enable_mesh_scene"] and obj.get("mesh_data") is not None and pose_ok:
-            mesh_scene_items.append(
-                {
-                    "mesh": obj["mesh_data"],
-                    "rotation": obj["rotation"],
-                    "translation": obj["translation"],
-                    "scale": obj["scale"],
-                }
-            )
+        transformed_path = mesh_dir / f"object_{idx:03d}.glb"
+        if cfg["enable_mesh_scene"] and transformed_path.exists() and pose_ok:
+            transformed_paths.append(transformed_path)
         cleanup_cuda()
 
-    if not mesh_scene_items:
+    if not transformed_paths:
         raise RuntimeError("No mesh scene items were generated from provided masks.")
 
-    scene_path = output_dir / "scene.glb"
-    build_mesh_scene(mesh_scene_items, str(scene_path))
+    # Mesh mode exports transformed per-object GLBs only.
+    scene_path = transformed_paths[0]
 
     return build_manifest(
         mode="mesh",
@@ -198,7 +193,7 @@ def run_mesh(args: argparse.Namespace, config_path: Path, output_dir: Path) -> d
         masks_dir=Path(args.masks_dir),
         output_dir=output_dir,
         scene_path=scene_path,
-        masks_count=len(masks),
+        masks_count=len(transformed_paths),
         run_config=cfg,
         mesh_parts_dir=mesh_dir,
     )

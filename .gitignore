@@ -27,6 +27,7 @@ weights/
 .next/
 dist/
 downloads/
+test_data/
 eggs/
 .eggs/
 lib64/

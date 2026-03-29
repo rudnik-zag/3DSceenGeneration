@@ -44,11 +44,14 @@ function getLocalStorageRoot() {
   return process.env.LOCAL_STORAGE_ROOT || path.join(process.cwd(), ".local-storage");
 }
 
-async function runProcess(command: string, args: string[], cwd: string) {
+async function runProcess(command: string, args: string[], cwd: string, envOverrides?: Record<string, string>) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env
+      env: {
+        ...process.env,
+        ...(envOverrides ?? {})
+      }
     });
 
     let stdout = "";
@@ -301,7 +304,32 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
     args.push("--cpu-only");
   }
 
-  const processResult = await runProcess(command, args, modelRoot);
+  const hfTimeoutSeconds =
+    process.env.GROUNDING_DINO_HF_TIMEOUT_SECONDS && process.env.GROUNDING_DINO_HF_TIMEOUT_SECONDS.trim().length > 0
+      ? process.env.GROUNDING_DINO_HF_TIMEOUT_SECONDS.trim()
+      : "120";
+
+  const envOverrides: Record<string, string> = {};
+  if (!process.env.HF_HUB_DOWNLOAD_TIMEOUT) {
+    envOverrides.HF_HUB_DOWNLOAD_TIMEOUT = hfTimeoutSeconds;
+  }
+  if (!process.env.HF_HUB_ETAG_TIMEOUT) {
+    envOverrides.HF_HUB_ETAG_TIMEOUT = hfTimeoutSeconds;
+  }
+
+  let processResult: { stdout: string; stderr: string };
+  try {
+    processResult = await runProcess(command, args, modelRoot, envOverrides);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("ReadTimeout") || message.includes("httpx.ReadTimeout")) {
+      throw new Error(
+        `${message}\nHint: GroundingDINO timed out while downloading Hugging Face assets. ` +
+          "Retry once, or pre-download tokenizer/model files in the grounding_dino env."
+      );
+    }
+    throw error;
+  }
   const manifest = await loadManifest(outputDir, processResult.stdout);
   const overlayPath = manifest.overlay_path ?? path.join(outputDir, "detected_overlay.jpg");
   const boxesJsonPath = manifest.boxes_json_path ?? path.join(outputDir, "detections_web.json");
@@ -351,15 +379,18 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
 
   const outputs: ExecutorOutputArtifact[] = [
     {
-      outputId: "boxes",
+      outputId: "descriptor",
       kind: "json",
       mimeType: "application/json",
       extension: "json",
-      hidden: true,
       buffer: boxesBuffer,
+      preview: {
+        extension: path.extname(overlayPath).replace(".", "") || "jpg",
+        mimeType: mimeFromExtension(overlayPath),
+        buffer: overlayBuffer
+      },
       meta: {
-        outputKey: "boxes",
-        hidden: true,
+        outputKey: "descriptor",
         sourceImageArtifactId: sourceImage.artifactId,
         sourceImageHash: sourceImage.hash,
         sourceImageStorageKey: sourceImage.storageKey,
@@ -371,26 +402,6 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
         prompt: resolvedPrompt,
         threshold,
         configFormat: configJsonPath.endsWith("detections_full.json") ? "detections_full" : "detections_web"
-      }
-    },
-    {
-      outputId: "overlay",
-      kind: "image",
-      mimeType: mimeFromExtension(overlayPath),
-      extension: path.extname(overlayPath).replace(".", "") || "jpg",
-      buffer: overlayBuffer,
-      preview: {
-        extension: path.extname(overlayPath).replace(".", "") || "jpg",
-        mimeType: mimeFromExtension(overlayPath),
-        buffer: overlayBuffer
-      },
-      meta: {
-        outputKey: "overlay",
-        sourceImageArtifactId: sourceImage.artifactId,
-        sourceImageHash: sourceImage.hash,
-        prompt: resolvedPrompt,
-        threshold,
-        boxesCount: normalizedBoxes.length
       }
     }
   ];

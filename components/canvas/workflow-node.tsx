@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
-import { Handle, NodeProps, Position } from "reactflow";
+import { Handle, NodeProps, NodeResizer, Position } from "reactflow";
 import {
   Boxes,
   Camera,
@@ -26,29 +26,31 @@ import { cn } from "@/lib/utils";
 import { GraphNodeData, WorkflowNodeType } from "@/types/workflow";
 
 const statusClass: Record<string, string> = {
-  idle: "border-zinc-700/80 bg-zinc-900/85 text-zinc-300",
-  running: "border-sky-500/55 bg-sky-500/15 text-sky-200",
-  success: "border-emerald-500/55 bg-emerald-500/15 text-emerald-200",
-  error: "border-rose-500/55 bg-rose-500/15 text-rose-200",
-  "cache-hit": "border-amber-500/55 bg-amber-500/15 text-amber-200"
+  idle: "border-[#505050] bg-[#2a2a2a] text-[#b6b6b6]",
+  running: "border-[#4e6f8f] bg-[#283443] text-[#b7d4ee]",
+  success: "border-[#50745a] bg-[#2b3a2f] text-[#b8dcc0]",
+  error: "border-[#7f4b4b] bg-[#3a2a2a] text-[#e7bcbc]",
+  "cache-hit": "border-[#7d6a47] bg-[#3a3226] text-[#e8d6b1]"
 };
 
 const previewTint: Record<string, string> = {
-  image: "from-sky-500/35 via-cyan-400/20 to-blue-600/25",
-  mask: "from-violet-500/25 to-fuchsia-400/20",
-  json: "from-zinc-500/20 to-slate-500/20",
-  mesh_glb: "from-emerald-500/25 to-teal-400/20",
-  point_ply: "from-orange-500/25 to-amber-500/20",
-  splat_ksplat: "from-pink-500/25 to-purple-500/20"
+  image: "from-[#424242] to-[#2e2e2e]",
+  mask: "from-[#3f3f3f] to-[#2c2c2c]",
+  json: "from-[#414141] to-[#2f2f2f]",
+  mesh_glb: "from-[#3e3e3e] to-[#2a2a2a]",
+  point_ply: "from-[#3e3e3e] to-[#2a2a2a]",
+  splat_ksplat: "from-[#3e3e3e] to-[#2a2a2a]"
 };
 
 const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: string }>>> = {
   "input.image": ImageIcon,
   "input.text": TypeIcon,
   "input.cameraPath": Camera,
+  "viewer.environment": Sparkles,
   "model.groundingdino": Boxes,
   "model.sam2": Layers,
   "model.sam3d_objects": Boxes,
+  "pipeline.scene_generation": Boxes,
   "model.qwen_vl": Sparkles,
   "model.qwen_image_edit": WandSparkles,
   "model.texturing": WandSparkles,
@@ -64,16 +66,19 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
 const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "GPT-5.2",
   "input.image": "Reference",
+  "viewer.environment": "Lighting",
   "model.groundingdino": "ObjectDetection",
   "model.sam2": "SegmentScene",
-  "model.sam3d_objects": "SceneGen",
+  "model.sam3d_objects": "CustomSceneGen",
+  "pipeline.scene_generation": "SceneGeneration",
   "model.qwen_vl": "Qwen-VL",
   "model.qwen_image_edit": "Flux 2",
   "model.texturing": "Texturing",
   "geo.depth_estimation": "Depth",
   "geo.pointcloud_from_depth": "Points",
   "geo.mesh_reconstruction": "Mesher",
-  "out.export_scene": "Exporter"
+  "out.export_scene": "Exporter",
+  "out.open_in_viewer": "Preview"
 };
 
 function pickPromptText(data: GraphNodeData) {
@@ -82,6 +87,16 @@ function pickPromptText(data: GraphNodeData) {
   const prompt = data.params?.prompt;
   if (typeof prompt === "string" && prompt.trim().length > 0) return prompt.trim();
   return "";
+}
+
+function formatArtifactVersionLabel(artifact: {
+  id: string;
+  kind: string;
+  createdAt?: string;
+}) {
+  const ts = artifact.createdAt ? new Date(artifact.createdAt) : null;
+  const timeLabel = ts && !Number.isNaN(ts.getTime()) ? ts.toLocaleTimeString() : "unknown time";
+  return `${artifact.id.slice(0, 8)} · ${artifact.kind} · ${timeLabel}`;
 }
 
 let sam2ConfigCache: string[] | null = null;
@@ -143,12 +158,16 @@ async function fetchSam3dConfigs() {
 
 export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [hasCustomImageWidth, setHasCustomImageWidth] = useState(false);
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
   const isSam2Node = nodeType === "model.sam2";
-  const isSceneGenerationNode = nodeType === "model.sam3d_objects";
+  const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
+  const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
+  const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
+  const isPreviewNode = nodeType === "out.open_in_viewer";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
@@ -163,36 +182,65 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ? data.params.prompt
       : "";
   const isImageGenerationNode = isInputImageNode && inputImageSourceMode === "generate";
-  const isTextNode = nodeType === "input.text" || (spec.category === "Models" && "prompt" in (data.params ?? {}));
-  const isImageNode = nodeType === "input.image" || nodeType === "model.sam2" || data.latestArtifactKind === "image";
+  const isTextNode = nodeType === "input.text";
+  const effectivePreviewUrl = data.previewUrl ?? null;
+  const effectiveArtifactKind = data.latestArtifactKind;
+  const isImageNode = isInputImageNode || isPreviewNode;
+  const usesImageSizing = isInputImageNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
     (!isInputImageNode || (isImageGenerationNode && inputImageModel.trim().length > 0));
   const promptText = pickPromptText(data);
   const scale = data.uiScale ?? "balanced";
+  const defaultImageWidth = scale === "compact" ? 224 : scale === "cinematic" ? 296 : 252;
+  const minNodeWidth =
+    scale === "compact"
+      ? isTextNode
+        ? 228
+        : usesImageSizing
+          ? 224
+          : 210
+      : scale === "cinematic"
+        ? isTextNode
+          ? 300
+          : usesImageSizing
+            ? 296
+            : 280
+        : isTextNode
+          ? 260
+          : usesImageSizing
+            ? 252
+            : 238;
+  const minNodeHeight = usesImageSizing ? 180 : isTextNode ? 140 : 120;
   const sizeClass =
     scale === "compact"
       ? isTextNode
-        ? "min-w-[228px] max-w-[260px]"
-        : isImageNode
-          ? "w-[224px] max-w-[224px] min-w-[224px]"
+        ? "min-w-[228px]"
+        : usesImageSizing
+          ? hasCustomImageWidth
+            ? "w-full min-w-0 max-w-none"
+            : "w-[224px] max-w-[224px] min-w-[224px]"
           : "min-w-[210px]"
       : scale === "cinematic"
         ? isTextNode
-          ? "min-w-[300px] max-w-[360px]"
-          : isImageNode
-            ? "w-[296px] max-w-[296px] min-w-[296px]"
+          ? "min-w-[300px]"
+          : usesImageSizing
+            ? hasCustomImageWidth
+              ? "w-full min-w-0 max-w-none"
+              : "w-[296px] max-w-[296px] min-w-[296px]"
             : "min-w-[280px]"
         : isTextNode
-          ? "min-w-[260px] max-w-[300px]"
-          : isImageNode
-            ? "w-[252px] max-w-[252px] min-w-[252px]"
+          ? "min-w-[260px]"
+          : usesImageSizing
+            ? hasCustomImageWidth
+              ? "w-full min-w-0 max-w-none"
+              : "w-[252px] max-w-[252px] min-w-[252px]"
             : "min-w-[238px]";
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
-  const hasOpenablePreview = Boolean(data.previewUrl);
+  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
     isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
@@ -205,23 +253,70 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ? data.params.sam2Cfg.trim()
       : "sam2.1_hiera_l.yaml";
   const sceneConfig =
-    isSceneGenerationNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
+    isCustomSceneGenNode && typeof data.params?.config === "string" && data.params.config.trim().length > 0
       ? data.params.config.trim()
       : "hf";
   const scenePreset =
-    isSceneGenerationNode &&
+    isCustomSceneGenNode &&
     typeof data.params?.configPreset === "string" &&
     getSceneGenerationPresetNames().includes(data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
       ? (data.params.configPreset as "Default" | "HighQuality" | "FastPreview" | "Custom")
+      : isSceneGenerationPipelineNode &&
+          typeof data.params?.SceneDetailedOption === "string" &&
+          getSceneGenerationPresetNames().includes(
+            data.params.SceneDetailedOption as "Default" | "HighQuality" | "FastPreview" | "Custom"
+          )
+        ? (data.params.SceneDetailedOption as "Default" | "HighQuality" | "FastPreview" | "Custom")
       : "Default";
   const sceneFormat =
-    isSceneGenerationNode &&
+    isCustomSceneGenNode &&
     typeof data.params?.format === "string" &&
     (data.params.format === "mesh_glb" || data.params.format === "point_ply")
       ? data.params.format
+      : isSceneGenerationPipelineNode &&
+          typeof data.params?.SceneOutputFormat === "string" &&
+          (data.params.SceneOutputFormat === "mesh_glb" || data.params.SceneOutputFormat === "point_ply")
+        ? data.params.SceneOutputFormat
       : "mesh_glb";
-  const sceneRunAllMasksInOneProcess =
-    isSceneGenerationNode ? data.params?.runAllMasksInOneProcess !== false : true;
+  const sceneRunAllMasksInOneProcess = isCustomSceneGenNode
+    ? data.params?.runAllMasksInOneProcess !== false
+    : isSceneGenerationPipelineNode
+      ? typeof data.params?.SceneMaskExecution === "string"
+        ? data.params.SceneMaskExecution !== "per_mask"
+        : data.params?.runAllMasksInOneProcess !== false
+      : true;
+  const sceneObjectPrompt =
+    isSceneGenerationPipelineNode && typeof data.params?.objectPrompt === "string"
+      ? data.params.objectPrompt
+      : "";
+  const sceneViewerArtifactId = isSceneGenerationPipelineNode
+    ? data.outputArtifacts?.generatedScene?.id ?? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+    : isCustomSceneGenNode
+      ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+      : data.latestArtifactId;
+  const outputVersionChoices = spec.outputPorts
+    .filter((port) => !port.hidden)
+    .map((port) => {
+      const history = data.outputArtifactHistory?.[port.id] ?? [];
+      if (history.length < 2) return null;
+      const selectionKey = `__selectedArtifact__${port.id}`;
+      const selectedRaw =
+        typeof data.params?.[selectionKey] === "string"
+          ? String(data.params[selectionKey]).trim()
+          : "__latest__";
+      const selectedValue =
+        selectedRaw.length > 0 && (selectedRaw === "__latest__" || history.some((entry) => entry.id === selectedRaw))
+          ? selectedRaw
+          : "__latest__";
+      return {
+        portId: port.id,
+        portLabel: port.label,
+        selectionKey,
+        selectedValue,
+        history
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -236,7 +331,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   }, [isSam2Node]);
 
   useEffect(() => {
-    if (!isSceneGenerationNode) return;
+    if (!isCustomSceneGenNode) return;
     let mounted = true;
     fetchSam3dConfigs().then((configs) => {
       if (!mounted) return;
@@ -245,7 +340,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     return () => {
       mounted = false;
     };
-  }, [isSceneGenerationNode]);
+  }, [isCustomSceneGenNode]);
 
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
@@ -257,12 +352,30 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   return (
     <div
       className={cn(
-        "relative rounded-2xl border border-white/10 bg-[#11131b]/94 p-3 text-zinc-100 shadow-[0_20px_45px_rgba(0,0,0,0.5)] transition",
+        "relative rounded-[9px] border border-[#494949] bg-[#2f2f2f]/95 p-2.5 text-zinc-100 shadow-[0_8px_22px_rgba(0,0,0,0.55)] transition",
         sizeClass,
-        selected && "border-primary/60 shadow-[0_0_0_2px_rgba(74,222,128,0.35),0_24px_50px_rgba(0,0,0,0.55)]"
+        selected && "border-[#78a9d3] shadow-[0_0_0_1px_rgba(120,169,211,0.65),0_10px_30px_rgba(0,0,0,0.6)]"
       )}
     >
-      {(isSceneGenerationNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
+      <NodeResizer
+        isVisible={selected}
+        minWidth={minNodeWidth}
+        minHeight={minNodeHeight}
+        maxWidth={720}
+        maxHeight={900}
+        color="#7ba8cf"
+        onResize={(_, params) => {
+          if (!usesImageSizing) return;
+          const changed = Math.abs(params.width - defaultImageWidth) > 6;
+          setHasCustomImageWidth((current) => (current === changed ? current : changed));
+        }}
+        onResizeEnd={(_, params) => {
+          if (!usesImageSizing) return;
+          setHasCustomImageWidth(Math.abs(params.width - defaultImageWidth) > 6);
+        }}
+      />
+
+      {(isCustomSceneGenNode ? spec.inputPorts.filter((port) => port.id !== "masksDir") : spec.inputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
         return (
           <div key={`${port.id}-${idx}`}>
@@ -270,11 +383,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               id={port.id}
               type="target"
               position={Position.Left}
-              style={{ top, width: 9, height: 9, background: "#8ab4c7", border: "1px solid #1f2937", left: -4.5 }}
+              style={{ top, width: 9, height: 9, background: "#d1a03f", border: "1px solid #141414", left: -4.5 }}
             />
             <span
               className={cn(
-                "pointer-events-none absolute -left-1 -translate-x-full rounded-md border border-white/10 bg-black/75 px-1.5 py-0.5 text-[10px] text-zinc-400",
+                "pointer-events-none absolute -left-1 -translate-x-full px-1 py-0.5 text-[10px] text-[#a9a9a9]",
                 port.advancedOnly && "opacity-70"
               )}
               style={{ top: top - 8 }}
@@ -285,30 +398,29 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         );
       })}
 
-      <div className="mb-2 flex items-start justify-between gap-2">
+      <div className="-mx-2.5 -mt-2.5 mb-2 flex items-center justify-between gap-2 rounded-t-[8px] border-b border-[#484848] bg-gradient-to-b from-[#3a3a3a] to-[#333333] px-2.5 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="grid h-7 w-7 place-items-center rounded-lg border border-white/10 bg-white/5 text-zinc-200">
-            <Icon className="h-3.5 w-3.5" />
+          <div className="grid h-5 w-5 place-items-center rounded-full border border-[#5b5b5b] bg-[#2c2c2c] text-zinc-300">
+            <Icon className="h-3 w-3" />
           </div>
           <div className="min-w-0">
-            <p className="truncate text-[10px] uppercase tracking-[0.16em] text-zinc-500">{spec.category}</p>
-            <h4 className="truncate text-sm font-medium leading-tight text-zinc-100">{spec.title}</h4>
+            <h4 className="truncate text-[15px] font-medium leading-tight text-[#dfdfdf]">{spec.title}</h4>
           </div>
         </div>
         <div className="flex items-center gap-1">
           {tag ? (
-            <Badge className="rounded-full border border-white/10 bg-black/35 px-1.5 py-0.5 text-[10px] text-zinc-300" variant="secondary">
+            <Badge className="rounded border border-[#525252] bg-[#2a2a2a] px-1.5 py-0.5 text-[10px] text-zinc-300" variant="secondary">
               {tag}
             </Badge>
           ) : null}
-          <Badge className={cn("rounded-full border px-2 py-0.5 text-[10px] capitalize", statusClass[data.status ?? "idle"])} variant="secondary">
+          <Badge className={cn("rounded border px-1.5 py-0.5 text-[10px] capitalize", statusClass[data.status ?? "idle"])} variant="secondary">
             {data.status ?? "idle"}
           </Badge>
         </div>
       </div>
 
       {nodeType === "model.sam2" ? (
-        <div className="mb-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-2 py-1 text-[10px] text-cyan-100">
+        <div className="mb-2 rounded-md border border-[#4b5f70] bg-[#24303a] px-2 py-1 text-[10px] text-[#c4d8ea]">
           {(data.runtimeMode ?? sam2ComputedMode) === "guided"
             ? "Guided segmentation (from ObjectDetection)"
             : "Full segmentation"}
@@ -316,11 +428,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isSam2Node ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Mode</p>
             <select
-              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
               value={sam2DisplayedMode}
               onChange={(event) => {
                 const next = event.target.value;
@@ -331,7 +443,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <option
                 value="guided"
                 disabled={!hasSam2BoxesConfig}
-                title={!hasSam2BoxesConfig ? "Requires ObjectDetection config JSON input." : undefined}
+                title={!hasSam2BoxesConfig ? "Requires ObjectDetection descriptor JSON input." : undefined}
               >
                 Guided (DINO config)
               </option>
@@ -342,7 +454,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">SegmentScene Config</p>
             <select
-              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
               value={sam2Cfg}
               onChange={(event) => data.onUpdateParam?.(id, "sam2Cfg", event.target.value)}
             >
@@ -356,12 +468,12 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         </div>
       ) : null}
 
-      {isSceneGenerationNode ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-lg border border-white/10 bg-black/25 p-2">
+      {isCustomSceneGenNode ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Config Preset</p>
             <select
-              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
               value={scenePreset}
               onChange={(event) => data.onUpdateParam?.(id, "configPreset", event.target.value)}
             >
@@ -375,7 +487,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Output Format</p>
             <select
-              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
               value={sceneFormat}
               onChange={(event) => data.onUpdateParam?.(id, "format", event.target.value)}
             >
@@ -386,7 +498,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Config</p>
             <select
-              className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
               value={sceneConfig}
               onChange={(event) => data.onUpdateParam?.(id, "config", event.target.value)}
             >
@@ -400,10 +512,80 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           {sceneFormat === "mesh_glb" ? (
             <div className="space-y-1">
               <p className="text-[10px] text-zinc-400">Mask Execution</p>
-              <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-black/35 p-1">
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-[#555] bg-[#1f1f1f] p-1">
                 <button
                   type="button"
                   onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", true)}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    sceneRunAllMasksInOneProcess
+                      ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-200"
+                        : "border border-transparent text-zinc-300 hover:bg-white/[0.08]"
+                  )}
+                  title="One process handles all masks."
+                >
+                  All masks
+                </button>
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
+                  className={cn(
+                    "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                    !sceneRunAllMasksInOneProcess
+                      ? "border border-amber-400/40 bg-amber-500/15 text-amber-200"
+                        : "border border-transparent text-zinc-300 hover:bg-white/[0.08]"
+                  )}
+                  title="Run one process per mask to reduce OOM risk."
+                >
+                  Per mask
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : isSceneGenerationPipelineNode ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">objectPrompt</p>
+            <input
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+              value={sceneObjectPrompt}
+              onChange={(event) => data.onUpdateParam?.(id, "objectPrompt", event.target.value)}
+              placeholder="chair, house, car, tree ..."
+            />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">SceneDetailedOption</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+              value={scenePreset}
+              onChange={(event) => data.onUpdateParam?.(id, "SceneDetailedOption", event.target.value)}
+            >
+              {getSceneGenerationPresetNames().map((preset) => (
+                <option key={preset} value={preset}>
+                  {preset}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <p className="text-[10px] text-zinc-400">SceneOutputFormat</p>
+            <select
+              className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+              value={sceneFormat}
+              onChange={(event) => data.onUpdateParam?.(id, "SceneOutputFormat", event.target.value)}
+            >
+              <option value="mesh_glb">mesh_glb</option>
+              <option value="point_ply">point_ply</option>
+            </select>
+          </div>
+          {sceneFormat === "mesh_glb" ? (
+            <div className="space-y-1">
+              <p className="text-[10px] text-zinc-400">Mask Execution</p>
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-[#555] bg-[#1f1f1f] p-1">
+                <button
+                  type="button"
+                  onClick={() => data.onUpdateParam?.(id, "SceneMaskExecution", "all_masks")}
                   className={cn(
                     "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
                     sceneRunAllMasksInOneProcess
@@ -416,7 +598,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 </button>
                 <button
                   type="button"
-                  onClick={() => data.onUpdateParam?.(id, "runAllMasksInOneProcess", false)}
+                  onClick={() => data.onUpdateParam?.(id, "SceneMaskExecution", "per_mask")}
                   className={cn(
                     "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
                     !sceneRunAllMasksInOneProcess
@@ -434,10 +616,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isGroundingDinoNode ? (
-        <div className="nodrag mb-2 space-y-1 rounded-lg border border-white/10 bg-black/25 p-2">
+        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
           <p className="text-[10px] text-zinc-400">Classes to detect</p>
           <input
-            className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
+            className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
             value={dinoPrompt}
             onChange={(event) => data.onUpdateParam?.(id, "prompt", event.target.value)}
             placeholder="chair, house, car, tree ..."
@@ -503,31 +685,35 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isSceneGenerationNode ? (
-        <div className="mb-2 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/15 to-cyan-500/10 p-2.5">
-          <div className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-2">
+        <div className="mb-2 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+          <div className="rounded-md border border-[#565656] bg-[#1f1f1f] px-2 py-1.5">
             <p className="text-[11px] text-zinc-300">Output format: {sceneFormat}</p>
-            {data.latestArtifactId ? (
-              <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{data.latestArtifactId.slice(0, 8)}</p>
+            {sceneViewerArtifactId ? (
+              <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{sceneViewerArtifactId.slice(0, 8)}</p>
             ) : (
-              <p className="mt-1 text-[10px] text-zinc-500">Run SceneGeneration to create scene assets.</p>
+              <p className="mt-1 text-[10px] text-zinc-500">
+                {isCustomSceneGenNode ? "Run CustomSceneGen to create scene assets." : "Run SceneGeneration to create scene assets."}
+              </p>
             )}
           </div>
-          <button
-            type="button"
-            className="mt-2 inline-flex h-8 items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 text-[11px] font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={() => data.onOpenViewer?.({ artifactId: data.latestArtifactId, nodeId: id })}
-            disabled={!data.latestArtifactId}
-            title={data.latestArtifactId ? "Open scene in viewer" : "No scene artifact yet"}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Scene Viewer
-          </button>
+          <div className="mt-2">
+            <button
+              type="button"
+              className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-md border border-[#4f6478] bg-[#253341] px-2 text-[10px] font-medium text-[#c9def1] transition hover:bg-[#2b3d4e] disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => data.onOpenViewer?.({ artifactId: sceneViewerArtifactId, nodeId: id })}
+              disabled={!sceneViewerArtifactId}
+              title={sceneViewerArtifactId ? "Open scene in viewer" : "No scene artifact yet"}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Scene Viewer
+            </button>
+          </div>
         </div>
       ) : isImageNode ? (
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br p-2",
-            previewTint[data.latestArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+            previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
           )}
           onDragOver={
             isInputImageNode
@@ -563,10 +749,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               </div>
             ) : data.status === "running" ? (
               <div className="h-full w-full animate-pulse bg-white/10" />
-            ) : data.previewUrl ? (
+            ) : effectivePreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={data.previewUrl}
+                src={effectivePreviewUrl}
                 alt={`${spec.title} preview`}
                 className="nodrag h-full w-full cursor-zoom-in object-contain"
                 onDoubleClick={openPreviewModal}
@@ -575,7 +761,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ) : (
               <div className="grid h-full w-full place-items-center bg-black/35">
                 <p className="px-3 text-center text-[10px] text-zinc-400">
-                  {isImageGenerationNode ? "Choose prompt and run to generate preview." : "Upload an image."}
+                  {isImageGenerationNode
+                    ? "Choose prompt and run to generate preview."
+                    : isPreviewNode
+                      ? "Connect an artifact to preview."
+                      : "Upload an image."}
                 </p>
               </div>
             )}
@@ -602,8 +792,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               ? `${inputImageModel || "Z-Image-Turbo"}${inputImagePrompt ? ` • ${inputImagePrompt}` : ""}`
               : typeof data.params?.filename === "string" && data.params.filename.length > 0
               ? data.params.filename
-              : data.latestArtifactKind
-                ? `Output: ${data.latestArtifactKind}`
+              : effectiveArtifactKind
+                ? `Output: ${effectiveArtifactKind}`
                 : spec.description}
           </p>
           {isInputImageNode && !hasImagePreview && !isImageGenerationNode ? (
@@ -639,7 +829,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br px-2.5 py-2 text-[11px] text-zinc-300",
-            previewTint[data.latestArtifactKind ?? ""] ?? "from-zinc-700/20 to-zinc-800/30"
+            previewTint[effectiveArtifactKind ?? ""] ?? "from-zinc-700/20 to-zinc-800/30"
           )}
         >
           {data.status === "running" ? (
@@ -647,20 +837,20 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <div className="h-3 w-24 animate-pulse rounded bg-white/15" />
               <div className="h-3 w-32 animate-pulse rounded bg-white/10" />
             </div>
-          ) : data.previewUrl ? (
+          ) : isPreviewNode && effectivePreviewUrl ? (
             <div className="overflow-hidden rounded-lg border border-white/10 bg-black/40">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={data.previewUrl}
+                src={effectivePreviewUrl}
                 alt={`${spec.title} output`}
                 className="nodrag aspect-video h-full w-full cursor-zoom-in object-cover"
                 onDoubleClick={openPreviewModal}
                 title="Double-click to open full size"
               />
             </div>
-          ) : data.latestArtifactKind ? (
+          ) : effectiveArtifactKind ? (
             <div className="space-y-1">
-              <p className="font-medium text-zinc-100">Output: {data.latestArtifactKind}</p>
+              <p className="font-medium text-zinc-100">Output: {effectiveArtifactKind}</p>
               <p className="truncate text-zinc-400">Artifact {data.latestArtifactId?.slice(0, 10)}</p>
             </div>
           ) : (
@@ -669,11 +859,34 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         </div>
       )}
 
+      {outputVersionChoices.length > 0 ? (
+        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+          <p className="text-[10px] uppercase tracking-[0.08em] text-zinc-400">Output Version</p>
+          {outputVersionChoices.map((choice) => (
+            <div key={`${id}-${choice.portId}`} className="space-y-1">
+              <p className="text-[10px] text-zinc-400">{choice.portLabel}</p>
+              <select
+                className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                value={choice.selectedValue}
+                onChange={(event) => data.onUpdateParam?.(id, choice.selectionKey, event.target.value)}
+              >
+                <option value="__latest__">Latest (auto)</option>
+                {choice.history.map((artifact) => (
+                  <option key={artifact.id} value={artifact.id}>
+                    {formatArtifactVersionLabel(artifact)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {canRunNode ? (
         <button
           type="button"
           onClick={() => data.onRunNode?.(id)}
-          className="mb-2 inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 text-[11px] font-medium text-emerald-200 transition hover:bg-emerald-500/20"
+          className="mb-2 inline-flex h-7 items-center gap-1 rounded-md border border-[#5f6f53] bg-[#2d3a2a] px-2 text-[10px] font-medium text-[#cfe3c1] transition hover:bg-[#34452f]"
         >
           <Play className="h-3 w-3" />
           {isGroundingDinoNode && dinoHasOutput ? "Rerun" : "Run"}
@@ -702,11 +915,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               id={port.id}
               type="source"
               position={Position.Right}
-              style={{ top, width: 9, height: 9, background: "#8dc6a2", border: "1px solid #1f2937", right: -4.5 }}
+              style={{ top, width: 9, height: 9, background: "#66b6ff", border: "1px solid #141414", right: -4.5 }}
             />
-          <span
+            <span
               className={cn(
-                "pointer-events-none absolute -right-1 translate-x-full rounded-md border border-white/10 bg-black/75 px-1.5 py-0.5 text-[10px] text-zinc-400",
+                "pointer-events-none absolute -right-1 translate-x-full px-1 py-0.5 text-[10px] text-[#a9a9a9]",
                 port.hidden && "opacity-70"
               )}
               style={{ top: top - 8 }}
@@ -731,9 +944,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </DialogClose>
           </div>
           <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
-            {data.previewUrl ? (
+            {effectivePreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={data.previewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
             ) : null}
           </div>
         </DialogContent>

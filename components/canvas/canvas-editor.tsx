@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
+  Connection,
   Edge,
   MiniMap,
   Node,
@@ -17,30 +18,23 @@ import {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import {
-  Boxes,
-  Camera,
-  ChevronRight,
   ExternalLink,
-  Image as ImageIcon,
   LocateFixed,
   Map as MapIcon,
   Minus,
-  PanelLeft,
   Play,
-  Plus,
   Save,
-  Scan,
   Share2,
   SlidersHorizontal,
-  Sparkles,
   Square,
-  Type,
   WandSparkles,
   Zap,
   ZoomIn
 } from "lucide-react";
 
 import { WorkflowNode } from "@/components/canvas/workflow-node";
+import { FlowingEdge } from "@/components/canvas/flowing-edge";
+import { CascadingMenuEntry, RightClickMenu } from "@/components/canvas/right-click-menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -60,12 +54,15 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
+import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib/graph/connection-rules";
+import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
   mergeNodeParamsWithDefaults,
   nodeGroups,
   nodeSpecRegistry
 } from "@/lib/graph/node-specs";
 import { applySceneGenerationPreset } from "@/lib/graph/scene-generation-presets";
+import { workflowPresets } from "@/lib/graph/workflow-presets";
 import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
@@ -101,6 +98,8 @@ interface PaneContextMenuState {
   y: number;
   flowX: number;
   flowY: number;
+  clientX: number;
+  clientY: number;
 }
 
 interface PendingConnectState {
@@ -115,15 +114,50 @@ interface NodeContextMenuState {
   y: number;
 }
 
-type ContextMenuCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
+interface NodeSearchMenuState {
+  x: number;
+  y: number;
+  flowX: number;
+  flowY: number;
+  query: string;
+  highlighted: number;
+}
+
+interface ClipboardSnapshotNode {
+  id: string;
+  type: WorkflowNodeType;
+  position: { x: number; y: number };
+  data: {
+    label: string;
+    params: Record<string, unknown>;
+    uiScale?: NodeUiScale;
+  };
+}
+
+interface ClipboardSnapshot {
+  nodes: ClipboardSnapshotNode[];
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    sourceHandle?: string;
+    targetHandle?: string;
+  }>;
+  bounds: {
+    minX: number;
+    minY: number;
+  };
+}
 
 const nodeTypes = {
   "input.image": WorkflowNode,
   "input.text": WorkflowNode,
   "input.cameraPath": WorkflowNode,
+  "viewer.environment": WorkflowNode,
   "model.groundingdino": WorkflowNode,
   "model.sam2": WorkflowNode,
   "model.sam3d_objects": WorkflowNode,
+  "pipeline.scene_generation": WorkflowNode,
   "model.qwen_vl": WorkflowNode,
   "model.qwen_image_edit": WorkflowNode,
   "model.texturing": WorkflowNode,
@@ -136,13 +170,29 @@ const nodeTypes = {
   "out.open_in_viewer": WorkflowNode
 };
 
+const edgeTypes = {
+  flowing: FlowingEdge
+};
+
+const defaultEdgeOptions = {
+  type: "flowing",
+  animated: false,
+  style: { stroke: "rgba(145, 145, 145, 0.65)", strokeWidth: 1.4 }
+};
+
+const connectionLineStyle = { stroke: "rgba(169, 169, 169, 0.75)", strokeWidth: 1.35 };
+const proOptions = { hideAttribution: true };
+const miniMapStyle = { background: "rgba(26,26,26,0.96)" };
+
 const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "T",
   "input.image": "I",
   "input.cameraPath": "C",
+  "viewer.environment": "H",
   "model.groundingdino": "G",
   "model.sam2": "S",
   "model.sam3d_objects": "3",
+  "pipeline.scene_generation": "W",
   "model.qwen_vl": "Q",
   "model.qwen_image_edit": "E",
   "model.texturing": "X",
@@ -155,23 +205,169 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "out.open_in_viewer": "V"
 };
 
-const categoryLabelMap: Record<ContextMenuCategory, string> = {
-  Inputs: "Add Source",
-  Models: "Add Model",
-  Geometry: "Add Geometry",
-  Outputs: "Add Output"
-};
+const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
 
-function getContextRowIcon(type: WorkflowNodeType) {
-  if (type.startsWith("input.text")) return Type;
-  if (type.startsWith("input.image")) return ImageIcon;
-  if (type.startsWith("input.cameraPath")) return Camera;
-  if (type.startsWith("model.groundingdino")) return Scan;
-  if (type.startsWith("model.sam")) return Boxes;
-  if (type.startsWith("model.")) return WandSparkles;
-  if (type.startsWith("out.")) return ExternalLink;
-  if (type.startsWith("geo.")) return Sparkles;
-  return Sparkles;
+function formatMenuCategoryLabel(category: string) {
+  const normalized = category.trim();
+  if (!normalized) return "uncategorized";
+  return normalized.toLowerCase();
+}
+
+type OutputArtifactView = NonNullable<GraphNodeData["outputArtifacts"]>[string];
+type OutputArtifactHistoryView = NonNullable<GraphNodeData["outputArtifactHistory"]>;
+type ScenePreviewStageView = NonNullable<GraphNodeData["scenePreviewStages"]>[string];
+const LATEST_ARTIFACT_SENTINEL = "__latest__";
+
+function parseTemplateHostNodeId(artifact: NodeArtifact) {
+  const meta = artifact.meta;
+  if (meta && typeof meta.templateHostNodeId === "string" && meta.templateHostNodeId.trim().length > 0) {
+    return meta.templateHostNodeId.trim();
+  }
+  const marker = "::template.";
+  const markerIndex = artifact.nodeId.indexOf(marker);
+  if (markerIndex > 0) {
+    return artifact.nodeId.slice(0, markerIndex);
+  }
+  return null;
+}
+
+function parseTemplateNodeId(artifact: NodeArtifact) {
+  const meta = artifact.meta;
+  if (!meta || typeof meta.templateNodeId !== "string") return "";
+  return meta.templateNodeId.trim();
+}
+
+function mapArtifactView(artifact: NodeArtifact): OutputArtifactView {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    hidden: Boolean(artifact.hidden),
+    url: artifact.url ?? null,
+    previewUrl: artifact.previewUrl ?? null,
+    createdAt: artifact.createdAt
+  };
+}
+
+function buildOutputArtifactHistory(artifacts: NodeArtifact[]): OutputArtifactHistoryView {
+  const grouped = artifacts.reduce<OutputArtifactHistoryView>((acc, artifact) => {
+    const outputKey = artifact.outputKey ?? "default";
+    if (!acc[outputKey]) acc[outputKey] = [];
+    if (!acc[outputKey].some((entry) => entry.id === artifact.id)) {
+      acc[outputKey].push(mapArtifactView(artifact));
+    }
+    return acc;
+  }, {});
+
+  for (const outputKey of Object.keys(grouped)) {
+    grouped[outputKey] = grouped[outputKey]
+      .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())
+      .slice(0, 40);
+  }
+
+  return grouped;
+}
+
+function resolveSelectedOutputArtifacts(
+  history: OutputArtifactHistoryView,
+  params: Record<string, unknown>
+) {
+  const selected: Record<string, OutputArtifactView> = {};
+  for (const [outputKey, entries] of Object.entries(history)) {
+    if (entries.length === 0) continue;
+    const selectionKey = `__selectedArtifact__${outputKey}`;
+    const selectionRaw = params?.[selectionKey];
+    const selectedArtifactId =
+      typeof selectionRaw === "string" && selectionRaw.trim().length > 0 && selectionRaw !== LATEST_ARTIFACT_SENTINEL
+        ? selectionRaw.trim()
+        : null;
+    selected[outputKey] = selectedArtifactId
+      ? entries.find((entry) => entry.id === selectedArtifactId) ?? entries[0]
+      : entries[0];
+  }
+  return selected;
+}
+
+function mergeOutputArtifactHistory(
+  current: GraphNodeData["outputArtifactHistory"] | undefined,
+  incoming: OutputArtifactHistoryView
+) {
+  const merged: OutputArtifactHistoryView = {};
+  const keys = new Set<string>([...Object.keys(current ?? {}), ...Object.keys(incoming)]);
+  for (const key of keys) {
+    const combined = [...(incoming[key] ?? []), ...(current?.[key] ?? [])];
+    const deduped: OutputArtifactView[] = [];
+    const seen = new Set<string>();
+    for (const entry of combined) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      deduped.push(entry);
+    }
+    merged[key] = deduped
+      .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())
+      .slice(0, 40);
+  }
+  return merged;
+}
+
+function toScenePreviewStage(label: string, artifact: NodeArtifact): ScenePreviewStageView {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    label,
+    hidden: Boolean(artifact.hidden),
+    outputKey: artifact.outputKey ?? "default",
+    url: artifact.url ?? null,
+    previewUrl: artifact.previewUrl ?? null,
+    createdAt: artifact.createdAt
+  };
+}
+
+function buildSceneGenerationPreviewStages(nodeId: string, artifacts: NodeArtifact[]) {
+  const relevant = artifacts
+    .filter((artifact) => artifact.nodeId === nodeId || parseTemplateHostNodeId(artifact) === nodeId)
+    .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
+  if (relevant.length === 0) return null;
+
+  const directArtifacts = relevant.filter((artifact) => artifact.nodeId === nodeId);
+  const internalArtifacts = relevant.filter((artifact) => artifact.nodeId !== nodeId);
+
+  const finalCandidate =
+    directArtifacts.find((artifact) => (artifact.outputKey ?? "default") === "generatedScene") ??
+    directArtifacts.find((artifact) => (artifact.outputKey ?? "default") === "scene") ??
+    internalArtifacts.find(
+      (artifact) =>
+        parseTemplateNodeId(artifact) === "custom" &&
+        ((artifact.outputKey ?? "default") === "scene" || (artifact.outputKey ?? "default") === "generatedScene")
+    ) ??
+    directArtifacts.find((artifact) => !artifact.hidden) ??
+    directArtifacts[0] ??
+    null;
+
+  const detectionCandidate =
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "detect" && (artifact.outputKey ?? "default") === "descriptor"
+    ) ?? null;
+
+  const segmentationCandidate =
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "segment" && (artifact.outputKey ?? "default") === "overlay"
+    ) ??
+    internalArtifacts.find(
+      (artifact) => parseTemplateNodeId(artifact) === "segment" && (artifact.outputKey ?? "default") === "config"
+    ) ??
+    null;
+
+  const stages: Record<string, ScenePreviewStageView> = {};
+  if (finalCandidate) {
+    stages.final = toScenePreviewStage("Final scene", finalCandidate);
+  }
+  if (detectionCandidate) {
+    stages.detection = toScenePreviewStage("Detection", detectionCandidate);
+  }
+  if (segmentationCandidate) {
+    stages.segmentation = toScenePreviewStage("Segmentation", segmentationCandidate);
+  }
+  return Object.keys(stages).length > 0 ? stages : null;
 }
 
 function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
@@ -182,20 +378,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
     .filter((a) => a.nodeId === base.id)
     .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
 
-  const outputArtifacts = matched.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>((acc, artifact) => {
-    const outputKey = artifact.outputKey ?? "default";
-    if (!acc[outputKey]) {
-      acc[outputKey] = {
-        id: artifact.id,
-        kind: artifact.kind,
-        hidden: Boolean(artifact.hidden),
-        url: artifact.url ?? null,
-        previewUrl: artifact.previewUrl ?? null,
-        createdAt: artifact.createdAt
-      };
-    }
-    return acc;
-  }, {});
+  const outputArtifactHistory = buildOutputArtifactHistory(matched);
+  const outputArtifacts = resolveSelectedOutputArtifacts(outputArtifactHistory, mergedParams);
 
   const previewOutputIds = spec.ui?.previewOutputIds ?? [];
   const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
@@ -207,6 +391,19 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       .filter(([key, artifact]) => !artifact.hidden && !hiddenOutputIds.has(key))
       .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
     Object.values(outputArtifacts)[0];
+  const scenePreviewStages =
+    nodeType === "pipeline.scene_generation"
+      ? buildSceneGenerationPreviewStages(base.id, artifacts)
+      : null;
+  const selectedScenePreviewStage =
+    nodeType === "pipeline.scene_generation" && typeof mergedParams.ScenePreviewStage === "string"
+      ? mergedParams.ScenePreviewStage
+      : "final";
+  const selectedScenePreview =
+    scenePreviewStages?.[selectedScenePreviewStage] ??
+    scenePreviewStages?.final ??
+    null;
+  const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
 
   const runtimeMetaCandidate = matched.find((artifact) => artifact.outputKey === "meta")?.meta ?? matched[0]?.meta ?? null;
   const runtimeMode = runtimeMetaCandidate && typeof runtimeMetaCandidate.mode === "string" ? runtimeMetaCandidate.mode : undefined;
@@ -234,14 +431,16 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       label: typeof base.data.label === "string" && base.data.label.trim().length > 0 ? base.data.label : spec.title,
       params: mergedParams,
       status: base.data.status ?? "idle",
-      latestArtifactId: previewArtifact?.id,
-      latestArtifactKind: previewArtifact?.kind,
+      latestArtifactId: resolvedPreviewArtifact?.id,
+      latestArtifactKind: resolvedPreviewArtifact?.kind,
       previewUrl:
-        previewArtifact?.previewUrl ??
-        previewArtifact?.url ??
+        resolvedPreviewArtifact?.previewUrl ??
+        resolvedPreviewArtifact?.url ??
         inputNodePreviewUrl ??
         (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
       outputArtifacts,
+      outputArtifactHistory: Object.keys(outputArtifactHistory).length > 0 ? outputArtifactHistory : undefined,
+      scenePreviewStages: scenePreviewStages ?? undefined,
       runtimeMode: typeof base.data.runtimeMode === "string" ? base.data.runtimeMode : runtimeMode,
       runtimeWarning: base.data.runtimeWarning ?? runtimeWarning,
       uiScale: base.data.uiScale ?? "balanced",
@@ -253,8 +452,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
 function withStyledEdge(edge: Edge): Edge {
   return {
     ...edge,
-    type: edge.type ?? "smoothstep",
-    animated: edge.animated ?? true,
+    type: edge.type ?? "flowing",
+    animated: edge.animated ?? false,
     style: {
       stroke: "rgba(176, 191, 221, 0.42)",
       strokeWidth: 1.45,
@@ -265,8 +464,9 @@ function withStyledEdge(edge: Edge): Edge {
 
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
-  const wrappedNodes = initialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
-  const wrappedEdges = initialGraph.edges.map((edge) => withStyledEdge(edge as Edge));
+  const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
+  const wrappedNodes = migratedInitialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
+  const wrappedEdges = migratedInitialGraph.edges.map((edge) => withStyledEdge(edge as Edge));
 
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNodeData>(wrappedNodes as Node<GraphNodeData>[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState(wrappedEdges);
@@ -288,8 +488,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const [inspectedJsonLoading, setInspectedJsonLoading] = useState(false);
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
   const [nodeMenu, setNodeMenu] = useState<NodeContextMenuState | null>(null);
+  const [nodeSearchMenu, setNodeSearchMenu] = useState<NodeSearchMenuState | null>(null);
   const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
-  const [activeMenuCategory, setActiveMenuCategory] = useState<ContextMenuCategory | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
   const [showMiniMap, setShowMiniMap] = useState(true);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -300,6 +500,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const canvasPanelRef = useRef<HTMLDivElement>(null);
   const paneMenuRef = useRef<HTMLDivElement>(null);
   const nodeMenuRef = useRef<HTMLDivElement>(null);
+  const nodeSearchMenuRef = useRef<HTMLDivElement>(null);
+  const nodeSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const clipboardRef = useRef<ClipboardSnapshot | null>(null);
+  const pasteSerialRef = useRef(0);
+  const lastPointerRef = useRef<{ clientX: number; clientY: number; flowX: number; flowY: number } | null>(null);
   const suppressNextPaneClickRef = useRef(false);
   const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didHydrateDraftRef = useRef(false);
@@ -308,7 +513,11 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
   const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
-  const orderedCategories = useMemo<ContextMenuCategory[]>(() => ["Inputs", "Models", "Geometry", "Outputs"], []);
+  const orderedCategories = useMemo(() => {
+    const known = new Set<string>(preferredCategoryOrder);
+    const dynamicCategories = Object.keys(nodeGroups).filter((category) => !known.has(category));
+    return [...preferredCategoryOrder, ...dynamicCategories.sort((a, b) => a.localeCompare(b))];
+  }, []);
   const contextMenuGroups = useMemo(
     () =>
       orderedCategories
@@ -319,6 +528,23 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         .filter((group) => group.specs.length > 0),
     [orderedCategories]
   );
+  const flatNodeSpecs = useMemo(
+    () =>
+      contextMenuGroups
+        .flatMap((group) => group.specs)
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [contextMenuGroups]
+  );
+  const filteredNodeSpecs = useMemo(() => {
+    const query = menuSearch.trim().toLowerCase();
+    if (!query) return flatNodeSpecs;
+    return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
+  }, [flatNodeSpecs, menuSearch]);
+  const filteredNodeSearchSpecs = useMemo(() => {
+    const query = nodeSearchMenu?.query.trim().toLowerCase() ?? "";
+    if (!query) return flatNodeSpecs;
+    return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
+  }, [flatNodeSpecs, nodeSearchMenu?.query]);
   const canNodeRun = useCallback((node: Node<GraphNodeData> | undefined) => {
     if (!node) return false;
     const nodeType = node.type as WorkflowNodeType;
@@ -329,24 +555,22 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     const model = typeof node.data.params?.generatorModel === "string" ? node.data.params.generatorModel : "";
     return sourceMode === "generate" && model.trim().length > 0;
   }, []);
-  const activeMenuGroup = useMemo(
-    () => contextMenuGroups.find((group) => group.category === activeMenuCategory) ?? null,
-    [activeMenuCategory, contextMenuGroups]
-  );
-  const filteredActiveMenuSpecs = useMemo(() => {
-    if (!activeMenuGroup) return [];
-    const query = menuSearch.trim().toLowerCase();
-    if (!query) return activeMenuGroup.specs;
-    return activeMenuGroup.specs.filter((spec) => {
-      return spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query);
-    });
-  }, [activeMenuGroup, menuSearch]);
-
   useEffect(() => {
     setNodes((prev) => {
       const byId = new Map(prev.map((node) => [node.id, node]));
-      const hasBoxesConfigByNode = new Set<string>();
+      const hasDescriptorByNode = new Set<string>();
       const hasImageByNode = new Set<string>();
+      const previewArtifactByNode = new Map<
+        string,
+        {
+          id: string;
+          kind: string;
+          previewUrl: string | null;
+          url: string | null;
+          hidden?: boolean;
+          createdAt?: string;
+        }
+      >();
 
       for (const edge of edges) {
         const targetNode = byId.get(edge.target);
@@ -355,40 +579,121 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         const targetSpec = nodeSpecRegistry[targetType];
         const inferredTargetHandle = edge.targetHandle ?? targetSpec.inputPorts[0]?.id;
 
-        if (inferredTargetHandle === "boxes" || inferredTargetHandle === "boxesConfig") {
-          hasBoxesConfigByNode.add(edge.target);
+        if (inferredTargetHandle === "descriptor" || inferredTargetHandle === "boxes" || inferredTargetHandle === "boxesConfig") {
+          hasDescriptorByNode.add(edge.target);
         }
         if (inferredTargetHandle === "image") {
           hasImageByNode.add(edge.target);
+        }
+
+        if (targetType === "out.open_in_viewer") {
+          const sourceNode = byId.get(edge.source);
+          if (!sourceNode) continue;
+          const sourceType = sourceNode.type as WorkflowNodeType;
+          const sourceSpec = nodeSpecRegistry[sourceType];
+          const sourceOutputHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+          const sourcePortArtifact = sourceOutputHandle
+            ? sourceNode.data.outputArtifacts?.[sourceOutputHandle]
+            : undefined;
+          const fallbackArtifact =
+            !sourcePortArtifact && sourceNode.data.latestArtifactId && sourceNode.data.latestArtifactKind
+              ? {
+                  id: sourceNode.data.latestArtifactId,
+                  kind: sourceNode.data.latestArtifactKind,
+                  previewUrl: sourceNode.data.previewUrl ?? null,
+                  url: sourceNode.data.previewUrl ?? null,
+                  hidden: false,
+                  createdAt: sourceNode.data.lastRunAt
+                }
+              : undefined;
+          const resolved = sourcePortArtifact ?? fallbackArtifact;
+          if (!resolved?.id) continue;
+          previewArtifactByNode.set(edge.target, {
+            id: resolved.id,
+            kind: resolved.kind,
+            previewUrl: resolved.previewUrl ?? null,
+            url: resolved.url ?? null,
+            hidden: resolved.hidden,
+            createdAt: resolved.createdAt
+          });
         }
       }
 
       let changed = false;
       const next = prev.map((node) => {
-        if (node.type !== "model.sam2") {
-          return node;
-        }
-        const nextHasBoxes = hasBoxesConfigByNode.has(node.id);
-        const nextHasImage = hasImageByNode.has(node.id);
-        if (
-          node.data.hasBoxesConfigConnection === nextHasBoxes &&
-          node.data.hasImageConnection === nextHasImage
-        ) {
-          return node;
-        }
-        changed = true;
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            hasBoxesConfigConnection: nextHasBoxes,
-            hasImageConnection: nextHasImage
+        if (node.type === "model.sam2") {
+          const nextHasBoxes = hasDescriptorByNode.has(node.id);
+          const nextHasImage = hasImageByNode.has(node.id);
+          if (
+            node.data.hasBoxesConfigConnection === nextHasBoxes &&
+            node.data.hasImageConnection === nextHasImage
+          ) {
+            return node;
           }
-        };
+          changed = true;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              hasBoxesConfigConnection: nextHasBoxes,
+              hasImageConnection: nextHasImage
+            }
+          };
+        }
+
+        if (node.type === "out.open_in_viewer") {
+          const previewArtifact = previewArtifactByNode.get(node.id);
+          const nextLatestArtifactId = previewArtifact?.id;
+          const nextLatestArtifactKind = previewArtifact?.kind;
+          const nextPreviewUrl = previewArtifact?.previewUrl ?? previewArtifact?.url ?? null;
+          const nextOutputArtifacts = previewArtifact
+            ? ({
+                artifact: {
+                  id: previewArtifact.id,
+                  kind: previewArtifact.kind,
+                  hidden: Boolean(previewArtifact.hidden),
+                  url: previewArtifact.url,
+                  previewUrl: previewArtifact.previewUrl,
+                  createdAt: previewArtifact.createdAt
+                }
+              } as NonNullable<GraphNodeData["outputArtifacts"]>)
+            : undefined;
+
+          const currentArtifactEntry = node.data.outputArtifacts?.artifact;
+          const outputArtifactsUnchanged = previewArtifact
+            ? currentArtifactEntry?.id === previewArtifact.id &&
+              currentArtifactEntry?.kind === previewArtifact.kind &&
+              (currentArtifactEntry?.previewUrl ?? null) === (previewArtifact.previewUrl ?? null) &&
+              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null)
+            : !node.data.outputArtifacts || Object.keys(node.data.outputArtifacts).length === 0;
+
+          if (
+            (node.data.latestArtifactId ?? undefined) === nextLatestArtifactId &&
+            (node.data.latestArtifactKind ?? undefined) === nextLatestArtifactKind &&
+            (node.data.previewUrl ?? null) === nextPreviewUrl &&
+            outputArtifactsUnchanged
+          ) {
+            return node;
+          }
+
+          changed = true;
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              latestArtifactId: nextLatestArtifactId,
+              latestArtifactKind: nextLatestArtifactKind,
+              previewUrl: nextPreviewUrl,
+              outputArtifacts: nextOutputArtifacts
+            }
+          };
+        }
+
+        return node;
       });
       return changed ? next : prev;
     });
-  }, [edges, setNodes]);
+  }, [edges, nodes, setNodes]);
 
   useEffect(() => {
     return () => {
@@ -399,7 +704,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   }, []);
 
   useEffect(() => {
-    if (!paneMenu && !nodeMenu) return;
+    if (!paneMenu && !nodeMenu && !nodeSearchMenu) return;
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
@@ -409,14 +714,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (target && nodeMenuRef.current?.contains(target)) {
         return;
       }
+      if (target && nodeSearchMenuRef.current?.contains(target)) {
+        return;
+      }
       setPaneMenu(null);
       setNodeMenu(null);
+      setNodeSearchMenu(null);
     };
 
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPaneMenu(null);
         setNodeMenu(null);
+        setNodeSearchMenu(null);
       }
     };
 
@@ -426,22 +736,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onEscape);
     };
-  }, [nodeMenu, paneMenu]);
+  }, [nodeMenu, nodeSearchMenu, paneMenu]);
 
   useEffect(() => {
     if (!paneMenu) {
-      setActiveMenuCategory(null);
       setMenuSearch("");
       setPendingConnect(null);
       return;
     }
-    if (!activeMenuCategory) {
-      const firstCategory = contextMenuGroups[0]?.category;
-      if (firstCategory) {
-        setActiveMenuCategory(firstCategory);
-      }
-    }
-  }, [activeMenuCategory, contextMenuGroups, paneMenu]);
+  }, [paneMenu]);
+
+  useEffect(() => {
+    if (!nodeSearchMenu) return;
+    const handle = window.setTimeout(() => {
+      nodeSearchInputRef.current?.focus();
+      nodeSearchInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [nodeSearchMenu?.x, nodeSearchMenu?.y]);
+
+  useEffect(() => {
+    if (!nodeSearchMenu) return;
+    const maxIndex = Math.max(0, filteredNodeSearchSpecs.length - 1);
+    if (nodeSearchMenu.highlighted <= maxIndex) return;
+    setNodeSearchMenu((current) =>
+      current
+        ? {
+            ...current,
+            highlighted: maxIndex
+          }
+        : current
+    );
+  }, [filteredNodeSearchSpecs.length, nodeSearchMenu]);
 
   useEffect(() => {
     if (didHydrateDraftRef.current) return;
@@ -457,24 +783,16 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       };
       const graph = parsed?.graph;
       if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+      const migratedGraph = migrateGraphDocument(graph);
 
-      const restoredNodes = graph.nodes.map((node) => {
+      const restoredNodes = migratedGraph.nodes.map((node) => {
+        // Always use fresh artifact-backed URLs. Signed preview URLs from local draft can be stale after restart.
         const hydrated = buildNodeData(node as Node<GraphNodeData>, nodeArtifacts) as Node<GraphNodeData>;
-        const previewUrl =
-          node.data && typeof node.data.previewUrl === "string" && node.data.previewUrl.length > 0
-            ? node.data.previewUrl
-            : hydrated.data.previewUrl ?? null;
-        return {
-          ...hydrated,
-          data: {
-            ...hydrated.data,
-            previewUrl
-          }
-        };
+        return hydrated;
       }) as Node<GraphNodeData>[];
 
       setNodes(restoredNodes);
-      setEdges(graph.edges.map((edge) => withStyledEdge(edge as Edge)));
+      setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
       const restoredPreset = restoredNodes[0]?.data.uiScale;
       if (restoredPreset === "compact" || restoredPreset === "balanced" || restoredPreset === "cinematic") {
         setNodeScalePreset(restoredPreset);
@@ -484,71 +802,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       window.localStorage.removeItem(draftStorageKey);
     }
   }, [draftStorageKey, nodeArtifacts, setEdges, setNodes]);
-
-  useEffect(() => {
-    const onDeleteShortcut = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isTyping =
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable;
-      if (isTyping) return;
-
-      const wantsDisconnectShortcut =
-        (event.ctrlKey || event.metaKey) &&
-        event.shiftKey &&
-        event.key.toLowerCase() === "x";
-      if (wantsDisconnectShortcut) {
-        event.preventDefault();
-        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-        if (selectedEdgeIds.length > 0) {
-          const edgeSet = new Set(selectedEdgeIds);
-          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-          toast({
-            title: "Connections removed",
-            description: selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections removed` : "1 connection removed"
-          });
-          return;
-        }
-        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-        if (selectedNodeIds.length === 0) return;
-        const nodeSet = new Set(selectedNodeIds);
-        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-        const removedCount = edges.filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target)).length;
-        toast({
-          title: "Node disconnected",
-          description: removedCount > 0 ? `${removedCount} connections removed` : "No connected edges to remove"
-        });
-        return;
-      }
-
-      if (event.key !== "Delete" && event.key !== "Backspace") return;
-      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
-      event.preventDefault();
-      if (selectedNodeIds.length > 0) {
-        const nodeSet = new Set(selectedNodeIds);
-        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
-        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-      }
-      if (selectedEdgeIds.length > 0) {
-        const edgeSet = new Set(selectedEdgeIds);
-        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-      }
-      const parts: string[] = [];
-      if (selectedNodeIds.length > 0) {
-        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
-      }
-      if (selectedEdgeIds.length > 0) {
-        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
-      }
-      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
-    };
-
-    window.addEventListener("keydown", onDeleteShortcut);
-    return () => window.removeEventListener("keydown", onDeleteShortcut);
-  }, [edges, nodes, setEdges, setNodes]);
 
   useEffect(() => {
     setShowAdvancedInspector(false);
@@ -607,8 +860,30 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     };
   }, [selectedNode?.data.latestArtifactId, selectedNode?.data.previewUrl, selectedNode?.data.latestArtifactKind]);
 
+  const isConnectionValid = useCallback(
+    (connection: Connection | Edge) => {
+      if (!connection.source || !connection.target) return false;
+      const sourceNode = nodes.find((node) => node.id === connection.source);
+      const targetNode = nodes.find((node) => node.id === connection.target);
+      if (!sourceNode || !targetNode) return false;
+
+      const result = validateConnectionByNodeTypes({
+        sourceNodeType: sourceNode.type as WorkflowNodeType,
+        targetNodeType: targetNode.type as WorkflowNodeType,
+        sourceHandleId: connection.sourceHandle,
+        targetHandleId: connection.targetHandle
+      });
+      return result.valid;
+    },
+    [nodes]
+  );
+
   const onConnect = useCallback<OnConnect>(
     (params) => {
+      if (!isConnectionValid(params as Connection)) {
+        toast({ title: "Invalid connection", description: "Port artifact types are not compatible." });
+        return;
+      }
       setPendingConnect(null);
       setEdges((eds) =>
         addEdge(
@@ -620,7 +895,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         )
       );
     },
-    [setEdges]
+    [isConnectionValid, setEdges]
   );
 
   const onConnectStart = useCallback((_event: unknown, params: { nodeId?: string | null; handleId?: string | null; handleType?: "source" | "target" | null }) => {
@@ -680,7 +955,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         setTimeout(() => {
           suppressNextPaneClickRef.current = false;
         }, 0);
-        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, clientX, clientY });
         return;
       }
 
@@ -694,24 +969,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       setTimeout(() => {
         suppressNextPaneClickRef.current = false;
       }, 0);
-      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
+      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y, clientX, clientY });
     },
     [pendingConnect, reactFlow]
   );
 
-  const addNode = useCallback(
-    (nodeType: WorkflowNodeType, x = 80, y = 80) => {
+  const makeCanvasNode = useCallback(
+    (
+      nodeType: WorkflowNodeType,
+      id: string,
+      position: { x: number; y: number },
+      options?: { label?: string; params?: Record<string, unknown>; uiScale?: NodeUiScale }
+    ): Node<GraphNodeData> => {
       const spec = nodeSpecRegistry[nodeType];
-      const id = `${nodeType}-${Date.now().toString(36)}`;
-      const newNode: Node<GraphNodeData> = {
+      return {
         id,
         type: nodeType,
-        position: { x, y },
+        position,
         data: {
-          label: spec.title,
-          params: { ...spec.defaultParams },
+          label: options?.label?.trim() || spec.title,
+          params: options?.params ? mergeNodeParamsWithDefaults(nodeType, options.params) : { ...spec.defaultParams },
           status: "idle",
-          uiScale: nodeScalePreset,
+          uiScale: options?.uiScale ?? nodeScalePreset,
           onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
           onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
           onUpdateParam: (currentNodeId: string, key: string, value: string | number | boolean) =>
@@ -719,10 +998,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           onOpenViewer: (payload?: { artifactId?: string; nodeId?: string }) => openViewerRef.current(payload)
         }
       };
+    },
+    [nodeScalePreset]
+  );
+
+  const addNode = useCallback(
+    (nodeType: WorkflowNodeType, x = 80, y = 80) => {
+      const id = `${nodeType}-${Date.now().toString(36)}`;
+      const newNode = makeCanvasNode(nodeType, id, { x, y });
       setNodes((prev) => [...prev, newNode]);
       return id;
     },
-    [nodeScalePreset, setNodes]
+    [makeCanvasNode, setNodes]
   );
 
   const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -786,51 +1073,192 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     deleteEdgesByIds(selectedIds);
   }, [deleteEdgesByIds, edges]);
 
+  const copySelectionToClipboard = useCallback(() => {
+    const selectedNodes = nodes.filter((node) => node.selected);
+    if (selectedNodes.length === 0) {
+      return false;
+    }
+    const selectedNodeIdSet = new Set(selectedNodes.map((node) => node.id));
+    const selectedEdges = edges.filter((edge) => selectedNodeIdSet.has(edge.source) && selectedNodeIdSet.has(edge.target));
+    const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+    const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+
+    const snapshot: ClipboardSnapshot = {
+      nodes: selectedNodes.map((node) => ({
+        id: node.id,
+        type: node.type as WorkflowNodeType,
+        position: { x: node.position.x, y: node.position.y },
+        data: {
+          label: node.data.label,
+          params: JSON.parse(JSON.stringify(node.data.params ?? {})) as Record<string, unknown>,
+          uiScale: node.data.uiScale
+        }
+      })),
+      edges: selectedEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle ?? undefined,
+        targetHandle: edge.targetHandle ?? undefined
+      })),
+      bounds: { minX, minY }
+    };
+
+    clipboardRef.current = snapshot;
+    return true;
+  }, [edges, nodes]);
+
+  const resolveFlowAnchor = useCallback(
+    (flowOverride?: { x: number; y: number }) => {
+      if (flowOverride) return flowOverride;
+      if (lastPointerRef.current) {
+        return { x: lastPointerRef.current.flowX, y: lastPointerRef.current.flowY };
+      }
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      if (!rect) return { x: 120, y: 120 };
+      return reactFlow.screenToFlowPosition({
+        x: rect.left + rect.width * 0.5,
+        y: rect.top + rect.height * 0.5
+      });
+    },
+    [reactFlow]
+  );
+
+  const pasteClipboardAt = useCallback(
+    (flowOverride?: { x: number; y: number }) => {
+      const snapshot = clipboardRef.current;
+      if (!snapshot || snapshot.nodes.length === 0) return false;
+
+      const anchor = resolveFlowAnchor(flowOverride);
+      pasteSerialRef.current += 1;
+      const offset = 28 * Math.min(12, pasteSerialRef.current);
+      const idStamp = Date.now().toString(36);
+      const idMap = new Map<string, string>();
+
+      const pastedNodes = snapshot.nodes.map((node, index) => {
+        const newId = `${node.type}-${idStamp}-${index}`;
+        idMap.set(node.id, newId);
+        const relativeX = node.position.x - snapshot.bounds.minX;
+        const relativeY = node.position.y - snapshot.bounds.minY;
+        const built = makeCanvasNode(
+          node.type,
+          newId,
+          { x: anchor.x + relativeX + offset, y: anchor.y + relativeY + offset },
+          {
+            label: node.data.label,
+            params: node.data.params,
+            uiScale: node.data.uiScale
+          }
+        );
+        return {
+          ...built,
+          selected: true
+        };
+      });
+
+      const pastedEdges = snapshot.edges
+        .map((edge, index) => {
+          const source = idMap.get(edge.source);
+          const target = idMap.get(edge.target);
+          if (!source || !target) return null;
+          return withStyledEdge({
+            id: `${source}-${target}-${idStamp}-${index}`,
+            source,
+            target,
+            sourceHandle: edge.sourceHandle,
+            targetHandle: edge.targetHandle
+          } as Edge);
+        })
+        .filter((edge): edge is Edge => Boolean(edge));
+
+      setNodes((prev) => [
+        ...prev.map((node) => ({ ...node, selected: false })),
+        ...pastedNodes
+      ]);
+      setEdges((prev) => [
+        ...prev.map((edge) => ({ ...edge, selected: false })),
+        ...pastedEdges
+      ]);
+      return true;
+    },
+    [makeCanvasNode, resolveFlowAnchor, setEdges, setNodes]
+  );
+
   const openPaneMenuAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
       const rect = canvasPanelRef.current?.getBoundingClientRect();
       const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
 
       if (!rect) {
-        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y });
+        setPaneMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, clientX, clientY });
         return;
       }
 
-      const menuWidth = 318;
-      const menuHeight = 540;
       const rawX = clientX - rect.left;
       const rawY = clientY - rect.top;
-      const x = Math.max(10, Math.min(rawX, rect.width - menuWidth - 10));
-      const y = Math.max(10, Math.min(rawY, rect.height - menuHeight - 10));
+      const x = Math.max(8, Math.min(rawX, rect.width - 8));
+      const y = Math.max(8, Math.min(rawY, rect.height - 8));
 
-      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y });
+      setPaneMenu({ x, y, flowX: flow.x, flowY: flow.y, clientX, clientY });
+    },
+    [reactFlow]
+  );
+
+  const openNodeSearchAtScreenPoint = useCallback(
+    (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+      if (!rect) {
+        setNodeSearchMenu({ x: clientX, y: clientY, flowX: flow.x, flowY: flow.y, query: "", highlighted: 0 });
+        return;
+      }
+      const panelWidth = 320;
+      const panelHeight = 360;
+      const rawX = clientX - rect.left;
+      const rawY = clientY - rect.top;
+      const x = Math.max(12, Math.min(rawX, rect.width - panelWidth - 12));
+      const y = Math.max(12, Math.min(rawY, rect.height - panelHeight - 12));
+      setNodeSearchMenu({ x, y, flowX: flow.x, flowY: flow.y, query: "", highlighted: 0 });
     },
     [reactFlow]
   );
 
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) {
+        return;
+      }
       event.preventDefault();
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
+      const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY, flowX: flow.x, flowY: flow.y };
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
-    [openPaneMenuAtScreenPoint]
+    [openPaneMenuAtScreenPoint, reactFlow]
   );
 
   const onPaneClick = useCallback(
     (event: React.MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) {
+        return;
+      }
       if (suppressNextPaneClickRef.current) {
         return;
       }
       if (event.detail >= 2) {
         setNodeMenu(null);
+        setNodeSearchMenu(null);
         setPendingConnect(null);
         openPaneMenuAtScreenPoint(event.clientX, event.clientY);
         return;
       }
       setPaneMenu(null);
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
     },
     [openPaneMenuAtScreenPoint]
@@ -839,17 +1267,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const onCanvasDoubleClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement;
+      if (target.closest('[data-no-connect-menu="true"]')) return;
       if (target.closest(".react-flow__node")) return;
       setNodeMenu(null);
+      setNodeSearchMenu(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
+  );
+
+  const onPaneMouseMove = useCallback(
+    (event: React.MouseEvent) => {
+      const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY, flowX: flow.x, flowY: flow.y };
+    },
+    [reactFlow]
   );
 
   const onNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node<GraphNodeData>) => {
       event.preventDefault();
       setPaneMenu(null);
+      setNodeSearchMenu(null);
       setPendingConnect(null);
       setNodes((prev) =>
         prev.map((entry) => ({
@@ -879,33 +1318,69 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       if (!paneMenu) return;
       const newNodeId = addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
       if (pendingConnect) {
+        const pendingNode = nodes.find((node) => node.id === pendingConnect.nodeId);
+        if (!pendingNode) {
+          setPendingConnect(null);
+          setPaneMenu(null);
+          return;
+        }
         if (pendingConnect.handleType === "source") {
-          const targetHandle = nodeSpecRegistry[nodeType].inputPorts[0]?.id;
-          if (targetHandle) {
+          const pendingSourceType = pendingNode.type as WorkflowNodeType;
+          const sourceHandle = pendingConnect.handleId ?? undefined;
+          const compatible =
+            sourceHandle
+              ? nodeSpecRegistry[nodeType].inputPorts
+                  .map((port) =>
+                    validateConnectionByNodeTypes({
+                      sourceNodeType: pendingSourceType,
+                      targetNodeType: nodeType,
+                      sourceHandleId: sourceHandle,
+                      targetHandleId: port.id
+                    })
+                  )
+                  .find((result) => result.valid)
+              : findFirstCompatibleHandles(pendingSourceType, nodeType);
+
+          if (compatible) {
             setEdges((prev) =>
               addEdge(
                 withStyledEdge({
                   id: `${pendingConnect.nodeId}-${newNodeId}-${Date.now()}`,
                   source: pendingConnect.nodeId,
-                  sourceHandle: pendingConnect.handleId ?? undefined,
+                  sourceHandle: compatible.sourceHandleId ?? sourceHandle,
                   target: newNodeId,
-                  targetHandle
+                  targetHandle: compatible.targetHandleId
                 } as Edge),
                 prev
               )
             );
           }
         } else {
-          const sourceHandle = nodeSpecRegistry[nodeType].outputPorts[0]?.id;
-          if (sourceHandle) {
+          const pendingTargetType = pendingNode.type as WorkflowNodeType;
+          const targetHandle = pendingConnect.handleId ?? undefined;
+          const compatible =
+            targetHandle
+              ? nodeSpecRegistry[nodeType].outputPorts
+                  .map((port) =>
+                    validateConnectionByNodeTypes({
+                      sourceNodeType: nodeType,
+                      targetNodeType: pendingTargetType,
+                      sourceHandleId: port.id,
+                      targetHandleId: targetHandle
+                    })
+                  )
+                  .find((result) => result.valid)
+              : findFirstCompatibleHandles(nodeType, pendingTargetType);
+
+          if (compatible) {
             setEdges((prev) =>
               addEdge(
                 withStyledEdge({
                   id: `${newNodeId}-${pendingConnect.nodeId}-${Date.now()}`,
                   source: newNodeId,
-                  sourceHandle,
+                  sourceHandle: compatible.sourceHandleId,
                   target: pendingConnect.nodeId,
-                  targetHandle: pendingConnect.handleId ?? undefined
+                  targetHandle: compatible.targetHandleId ?? targetHandle
                 } as Edge),
                 prev
               )
@@ -916,47 +1391,167 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       setPendingConnect(null);
       setPaneMenu(null);
     },
-    [addNode, paneMenu, pendingConnect, setEdges]
+    [addNode, nodes, paneMenu, pendingConnect, setEdges]
+  );
+
+  const addNodeFromSearchMenu = useCallback(
+    (nodeType: WorkflowNodeType) => {
+      if (!nodeSearchMenu) return;
+      addNode(nodeType, nodeSearchMenu.flowX, nodeSearchMenu.flowY);
+      setNodeSearchMenu(null);
+    },
+    [addNode, nodeSearchMenu]
   );
 
   useEffect(() => {
-    if (!paneMenu) return;
-
-    const onShortcut = (event: KeyboardEvent) => {
+    const onCanvasShortcuts = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === "INPUT" ||
         target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable;
+      const keyLower = event.key.toLowerCase();
+
+      if (!isTyping && (event.ctrlKey || event.metaKey) && !event.shiftKey && keyLower === "c") {
+        if (copySelectionToClipboard()) {
+          event.preventDefault();
+          const selectedNodeCount = nodes.filter((node) => node.selected).length;
+          toast({
+            title: "Copied",
+            description: selectedNodeCount > 1 ? `${selectedNodeCount} nodes` : "1 node"
+          });
+        }
+        return;
+      }
+
+      if (!isTyping && (event.ctrlKey || event.metaKey) && !event.shiftKey && keyLower === "v") {
+        const flowOverride = paneMenu ? { x: paneMenu.flowX, y: paneMenu.flowY } : undefined;
+        if (pasteClipboardAt(flowOverride)) {
+          event.preventDefault();
+          setPaneMenu(null);
+          setNodeMenu(null);
+          setNodeSearchMenu(null);
+          toast({ title: "Pasted", description: "Nodes inserted on canvas." });
+        }
+        return;
+      }
+
+      if (!isTyping && event.key === "Tab") {
+        event.preventDefault();
+        setPaneMenu(null);
+        setNodeMenu(null);
+        const pointer = lastPointerRef.current;
+        if (pointer) {
+          openNodeSearchAtScreenPoint(pointer.clientX, pointer.clientY, { x: pointer.flowX, y: pointer.flowY });
+        } else {
+          const rect = canvasPanelRef.current?.getBoundingClientRect();
+          if (!rect) {
+            openNodeSearchAtScreenPoint(100, 100, { x: 120, y: 120 });
+          } else {
+            const clientX = rect.left + rect.width * 0.5;
+            const clientY = rect.top + rect.height * 0.42;
+            const flow = reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+            openNodeSearchAtScreenPoint(clientX, clientY, flow);
+          }
+        }
+        return;
+      }
+
+      if (isTyping) return;
+
+      const wantsDisconnectShortcut =
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        keyLower === "x";
+      if (wantsDisconnectShortcut) {
+        event.preventDefault();
+        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+        if (selectedEdgeIds.length > 0) {
+          const edgeSet = new Set(selectedEdgeIds);
+          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+          toast({
+            title: "Connections removed",
+            description: selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections removed` : "1 connection removed"
+          });
+          return;
+        }
+        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+        if (selectedNodeIds.length === 0) return;
+        const nodeSet = new Set(selectedNodeIds);
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+        const removedCount = edges.filter((edge) => nodeSet.has(edge.source) || nodeSet.has(edge.target)).length;
+        toast({
+          title: "Node disconnected",
+          description: removedCount > 0 ? `${removedCount} connections removed` : "No connected edges to remove"
+        });
+        return;
+      }
+
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
+      event.preventDefault();
+      if (selectedNodeIds.length > 0) {
+        const nodeSet = new Set(selectedNodeIds);
+        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+      }
+      if (selectedEdgeIds.length > 0) {
+        const edgeSet = new Set(selectedEdgeIds);
+        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+      }
+      const parts: string[] = [];
+      if (selectedNodeIds.length > 0) {
+        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+      }
+      if (selectedEdgeIds.length > 0) {
+        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+      }
+      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
+    };
+
+    window.addEventListener("keydown", onCanvasShortcuts);
+    return () => window.removeEventListener("keydown", onCanvasShortcuts);
+  }, [
+    copySelectionToClipboard,
+    edges,
+    nodes,
+    openNodeSearchAtScreenPoint,
+    paneMenu,
+    pasteClipboardAt,
+    reactFlow,
+    setEdges,
+    setNodes
+  ]);
+
+  useEffect(() => {
+    if (!paneMenu) return;
+
+    const onMenuSearchType = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
         target?.isContentEditable;
       if (isTyping) return;
 
-      const pressed = event.key.toUpperCase();
-      const match = (Object.entries(shortcutByNodeType) as Array<[WorkflowNodeType, string]>).find(
-        ([, shortcut]) => shortcut.toUpperCase() === pressed
-      );
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        setMenuSearch((current) => current.slice(0, -1));
+        return;
+      }
 
-      if (!match) return;
+      if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) return;
       event.preventDefault();
-      addNodeFromContextMenu(match[0]);
+      setMenuSearch((current) => `${current}${event.key.toLowerCase()}`);
     };
 
-    window.addEventListener("keydown", onShortcut);
-    return () => window.removeEventListener("keydown", onShortcut);
-  }, [paneMenu, addNodeFromContextMenu]);
-
-  const addNodeAtViewportCenter = (nodeType: WorkflowNodeType) => {
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    if (!rect) {
-      addNode(nodeType);
-      return;
-    }
-
-    const flow = reactFlow.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2
-    });
-    addNode(nodeType, flow.x, flow.y);
-  };
+    window.addEventListener("keydown", onMenuSearchType);
+    return () => window.removeEventListener("keydown", onMenuSearchType);
+  }, [paneMenu]);
 
   const applyNodeScalePreset = (preset: NodeUiScale) => {
     setNodeScalePreset(preset);
@@ -971,106 +1566,164 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     );
   };
 
-  const openNodeMenuAtViewportCenter = useCallback(() => {
-    setNodeMenu(null);
-    if (paneMenu) {
-      setPaneMenu(null);
-      return;
-    }
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    if (!rect) {
-      openPaneMenuAtScreenPoint(92, 72, { x: 80, y: 80 });
-      return;
-    }
+  const resolvePresetAnchor = useCallback(
+    (baseAnchor: { x: number; y: number }) => {
+      let candidate = { ...baseAnchor };
+      const collides = (anchor: { x: number; y: number }) =>
+        nodes.some((node) => Math.abs(node.position.x - anchor.x) < 340 && Math.abs(node.position.y - anchor.y) < 220);
 
-    const flow = reactFlow.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2
+      let attempts = 0;
+      while (attempts < 16 && collides(candidate)) {
+        candidate = {
+          x: candidate.x + (attempts % 2 === 0 ? 34 : -22),
+          y: candidate.y + 210
+        };
+        attempts += 1;
+      }
+      return candidate;
+    },
+    [nodes]
+  );
+
+  const insertWorkflowPreset = useCallback(
+    (presetId: string) => {
+      const preset = workflowPresets.find((entry) => entry.id === presetId);
+      if (!preset) return;
+
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const viewportCenter = rect
+        ? reactFlow.screenToFlowPosition({
+            x: rect.left + rect.width * 0.5,
+            y: rect.top + rect.height * 0.5
+          })
+        : { x: 120, y: 120 };
+      const anchor = resolvePresetAnchor(viewportCenter);
+
+      const stamp = Date.now();
+      let serial = 0;
+      const createNodeId = (nodeType: WorkflowNodeType) => {
+        serial += 1;
+        return `${nodeType}-${(stamp + serial).toString(36)}`;
+      };
+
+      const built = preset.buildNodesAndEdges({
+        anchor,
+        createNodeId,
+        uiScale: nodeScalePreset
+      });
+
+      const builtNodes = built.nodes.map((node) => node as unknown as Node<GraphNodeData>);
+      const builtEdges = built.edges.map((edge) => withStyledEdge(edge as Edge));
+      setNodes((prev) => [...prev, ...builtNodes]);
+      setEdges((prev) => [...prev, ...builtEdges]);
+      toast({ title: "Workflow inserted", description: `${preset.label} starter added to canvas.` });
+    },
+    [nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes]
+  );
+
+  const addNodeMenuItems = useMemo<CascadingMenuEntry[]>(() => {
+    const noop = () => {};
+    const grouped = orderedCategories
+      .map((category) => ({
+        category,
+        specs: filteredNodeSpecs.filter((spec) => spec.category === category)
+      }))
+      .filter((entry) => entry.specs.length > 0);
+
+    const items: CascadingMenuEntry[] = [
+      {
+        id: "add-node-filter",
+        kind: "action",
+        label: menuSearch.trim().length > 0 ? `Filter: ${menuSearch}` : "Type to filter nodes",
+        disabled: true,
+        onSelect: noop
+      },
+      { id: "add-node-sep-filter", kind: "separator" }
+    ];
+
+    grouped.forEach((group) => {
+      items.push({
+        id: `add-node-category-${group.category}`,
+        kind: "submenu",
+        label: formatMenuCategoryLabel(group.category),
+        items: group.specs.map((spec) => ({
+          id: `add-node-spec-${spec.type}`,
+          kind: "action",
+          label: spec.title,
+          shortcut: shortcutByNodeType[spec.type],
+          onSelect: () => addNodeFromContextMenu(spec.type)
+        }))
+      });
     });
-    openPaneMenuAtScreenPoint(rect.left + 92, rect.top + 72, { x: flow.x, y: flow.y });
-  }, [openPaneMenuAtScreenPoint, paneMenu, reactFlow]);
 
-  const insertImagePromptTemplate = useCallback(() => {
-    const rect = canvasPanelRef.current?.getBoundingClientRect();
-    const anchor = rect
-      ? reactFlow.screenToFlowPosition({
-          x: rect.left + rect.width * 0.42,
-          y: rect.top + rect.height * 0.5
-        })
-      : { x: 120, y: 120 };
+    if (grouped.length === 0) {
+      items.push({
+        id: "add-node-empty",
+        kind: "action",
+        label: "No nodes match current filter",
+        disabled: true,
+        onSelect: noop
+      });
+    }
 
-    const imageId = `input.image-${Date.now().toString(36)}`;
-    const textId = `input.text-${(Date.now() + 1).toString(36)}`;
-    const modelId = `model.qwen_image_edit-${(Date.now() + 2).toString(36)}`;
+    return items;
+  }, [addNodeFromContextMenu, filteredNodeSpecs, menuSearch, orderedCategories]);
 
-    const imageSpec = nodeSpecRegistry["input.image"];
-    const textSpec = nodeSpecRegistry["input.text"];
-    const modelSpec = nodeSpecRegistry["model.qwen_image_edit"];
+  const rightClickMenuItems = useMemo<CascadingMenuEntry[]>(() => {
+    const pasteDisabled = !clipboardRef.current || clipboardRef.current.nodes.length === 0;
+    const templateItems: CascadingMenuEntry[] =
+      workflowPresets.length > 0
+        ? workflowPresets.map((preset) => ({
+            id: `preset-${preset.id}`,
+            kind: "action" as const,
+            label: preset.label,
+            onSelect: () => insertWorkflowPreset(preset.id)
+          }))
+        : [
+            {
+              id: "preset-none",
+              kind: "action",
+              label: "No templates available",
+              disabled: true,
+              onSelect: () => {}
+            }
+          ];
 
-    const templateNodes: Node<GraphNodeData>[] = [
+    return [
       {
-        id: imageId,
-        type: "input.image",
-        position: { x: anchor.x - 360, y: anchor.y - 130 },
-        data: {
-          label: imageSpec.title,
-          params: { ...imageSpec.defaultParams },
-          status: "idle",
-          uiScale: nodeScalePreset
+        id: "menu-add-node",
+        kind: "submenu",
+        label: "Add Node",
+        items: addNodeMenuItems
+      },
+      {
+        id: "menu-add-group",
+        kind: "action",
+        label: "Add Group",
+        onSelect: () => {
+          toast({ title: "Group", description: "Group nodes are not enabled in this editor yet." });
         }
       },
       {
-        id: textId,
-        type: "input.text",
-        position: { x: anchor.x - 360, y: anchor.y + 80 },
-        data: {
-          label: textSpec.title,
-          params: {
-            ...textSpec.defaultParams,
-            value:
-              "Create a cinematic environment image from this prompt.\nStyle: high detail, soft global illumination, dramatic sky."
-          },
-          status: "idle",
-          uiScale: nodeScalePreset
+        id: "menu-paste",
+        kind: "action",
+        label: "Paste",
+        shortcut: "Ctrl+V",
+        disabled: pasteDisabled,
+        onSelect: () => {
+          const flowOverride = paneMenu ? { x: paneMenu.flowX, y: paneMenu.flowY } : undefined;
+          pasteClipboardAt(flowOverride);
         }
       },
+      { id: "menu-sep-main", kind: "separator" },
       {
-        id: modelId,
-        type: "model.qwen_image_edit",
-        position: { x: anchor.x, y: anchor.y - 20 },
-        data: {
-          label: modelSpec.title,
-          params: {
-            ...modelSpec.defaultParams,
-            prompt: "Transform to a stylized scene with richer color contrast and cleaner composition."
-          },
-          status: "idle",
-          uiScale: nodeScalePreset
-        }
+        id: "menu-node-templates",
+        kind: "submenu",
+        label: "Node Templates",
+        items: templateItems
       }
     ];
-
-    const templateEdges: Edge[] = [
-      withStyledEdge({
-        id: `e-${imageId}-${modelId}`,
-        source: imageId,
-        target: modelId,
-        sourceHandle: "image",
-        targetHandle: "image"
-      } as Edge),
-      withStyledEdge({
-        id: `e-${textId}-${modelId}`,
-        source: textId,
-        target: modelId,
-        sourceHandle: "text",
-        targetHandle: "text"
-      } as Edge)
-    ];
-
-    setNodes((prev) => [...prev, ...templateNodes]);
-    setEdges((prev) => [...prev, ...templateEdges]);
-    toast({ title: "Template inserted", description: "Added text + image + Qwen Image Edit starter nodes." });
-  }, [nodeScalePreset, reactFlow, setEdges, setNodes]);
+  }, [addNodeMenuItems, insertWorkflowPreset, paneMenu, pasteClipboardAt]);
 
   const updateNodeParamById = useCallback(
     (nodeId: string, key: string, value: string | number | boolean) => {
@@ -1079,6 +1732,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         prev.map((node) => {
           if (node.id !== nodeId) return node;
           const nodeType = node.type as WorkflowNodeType;
+          const spec = nodeSpecRegistry[nodeType];
           const nextParams = {
             ...node.data.params,
             [key]: value
@@ -1087,11 +1741,28 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           if (nodeType === "model.sam3d_objects") {
             if (key === "configPreset" && typeof value === "string") {
               const applied = applySceneGenerationPreset(nextParams, value as "Default" | "HighQuality" | "FastPreview" | "Custom");
+              const outputArtifacts = node.data.outputArtifactHistory
+                ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, applied)
+                : node.data.outputArtifacts;
+              const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+              const previewArtifact =
+                (spec.ui?.previewOutputIds ?? [])
+                  .map((outputId) => outputArtifacts?.[outputId])
+                  .find((artifact) => Boolean(artifact?.id)) ??
+                Object.entries(outputArtifacts ?? {})
+                  .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
+                  .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
+                Object.values(outputArtifacts ?? {})[0] ??
+                null;
               return {
                 ...node,
                 data: {
                   ...node.data,
-                  params: applied
+                  params: applied,
+                  outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
+                  latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
+                  latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
+                  previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null
                 }
               };
             }
@@ -1101,11 +1772,38 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             }
           }
 
+          const outputArtifacts = node.data.outputArtifactHistory
+            ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, nextParams)
+            : node.data.outputArtifacts;
+          const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+          const previewArtifact =
+            (spec.ui?.previewOutputIds ?? [])
+              .map((outputId) => outputArtifacts?.[outputId])
+              .find((artifact) => Boolean(artifact?.id)) ??
+            Object.entries(outputArtifacts ?? {})
+              .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
+              .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
+            Object.values(outputArtifacts ?? {})[0] ??
+            null;
+          const selectedScenePreviewStage =
+            nodeType === "pipeline.scene_generation" && typeof nextParams.ScenePreviewStage === "string"
+              ? nextParams.ScenePreviewStage
+              : "final";
+          const selectedScenePreview =
+            nodeType === "pipeline.scene_generation"
+              ? node.data.scenePreviewStages?.[selectedScenePreviewStage] ?? node.data.scenePreviewStages?.final ?? null
+              : null;
+          const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
+
           return {
             ...node,
             data: {
               ...node.data,
-              params: nextParams
+              params: nextParams,
+              outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
+              latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
+              latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+              previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null
             }
           };
         })
@@ -1396,23 +2094,9 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
           (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
         );
-        const artifactByOutput = nodeArtifacts.reduce<Record<string, NonNullable<GraphNodeData["outputArtifacts"]>[string]>>(
-          (acc, artifact) => {
-            const outputKey = artifact.outputKey ?? "default";
-            if (!acc[outputKey]) {
-              acc[outputKey] = {
-                id: artifact.id,
-                kind: artifact.kind,
-                hidden: Boolean(artifact.hidden),
-                url: artifact.url ?? null,
-                previewUrl: artifact.previewUrl ?? null,
-                createdAt: artifact.createdAt
-              };
-            }
-            return acc;
-          },
-          {}
-        );
+        const runHistory = buildOutputArtifactHistory(nodeArtifacts);
+        const mergedHistory = mergeOutputArtifactHistory(node.data.outputArtifactHistory, runHistory);
+        const artifactByOutput = resolveSelectedOutputArtifacts(mergedHistory, node.data.params ?? {});
 
         const previewArtifact =
           (spec.ui?.previewOutputIds ?? [])
@@ -1420,6 +2104,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             .find((artifact) => Boolean(artifact?.id)) ??
           Object.values(artifactByOutput).find((artifact) => !artifact.hidden) ??
           Object.values(artifactByOutput)[0];
+        const scenePreviewStages =
+          nodeType === "pipeline.scene_generation"
+            ? buildSceneGenerationPreviewStages(node.id, artifactPairs)
+            : null;
+        const selectedScenePreviewStage =
+          nodeType === "pipeline.scene_generation" && typeof node.data.params?.ScenePreviewStage === "string"
+            ? node.data.params.ScenePreviewStage
+            : "final";
+        const selectedScenePreview =
+          scenePreviewStages?.[selectedScenePreviewStage] ??
+          scenePreviewStages?.final ??
+          null;
+        const resolvedPreviewArtifact = selectedScenePreview ?? previewArtifact;
 
         const metaArtifact = nodeArtifacts.find((artifact) => artifact.outputKey === "meta");
         const runtimeMode =
@@ -1447,10 +2144,16 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             ...node.data,
             status: runtimeStatus,
             runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
-            latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
-            latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
-            previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null,
+            latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
+            latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+            previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null,
             outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
+            outputArtifactHistory:
+              Object.keys(mergedHistory).length > 0 ? mergedHistory : node.data.outputArtifactHistory,
+            scenePreviewStages:
+              scenePreviewStages && Object.keys(scenePreviewStages).length > 0
+                ? scenePreviewStages
+                : node.data.scenePreviewStages,
             isCacheHit: runtimeStatus === "cache-hit",
             lastRunAt:
               runtimeStatus === "success" || runtimeStatus === "cache-hit" || runtimeStatus === "error"
@@ -1532,10 +2235,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           }
         } else if (data.run.status === "error") {
           const errorLine = [...logLines].reverse().find((line) => line.includes("ERROR:"));
+          const errorLineIndex = errorLine ? logLines.lastIndexOf(errorLine) : -1;
+          const detailsAfterError = errorLineIndex >= 0 ? logLines.slice(errorLineIndex + 1) : [];
+          const detailLine = [...detailsAfterError].reverse().find((line) =>
+            /(ReadTimeout|Timeout|No such file|not found|failed|Exception|ERROR conda)/i.test(line)
+          );
           if (errorLine) {
             const shortError = errorLine.replace(/^.*ERROR:\s*/, "").trim();
             if (shortError.length > 0) {
-              description = `${descriptionBase} | ${shortError}`;
+              description = detailLine
+                ? `${descriptionBase} | ${shortError} (${detailLine.slice(0, 140)})`
+                : `${descriptionBase} | ${shortError}`;
             }
           }
         }
@@ -1620,7 +2330,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     }
     const query = params.toString();
     const href = query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
-    window.open(href, "_blank");
+    window.location.assign(href);
   };
 
   const stableNodeRunHandler = useCallback((nodeId: string) => {
@@ -1856,57 +2566,25 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
           </Button>
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={insertImagePromptTemplate}>
-            <WandSparkles className="mr-1 h-4 w-4" /> Image Prompt Flow
-          </Button>
-
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button size="sm" variant="outline" className="rounded-xl">
-                <PanelLeft className="mr-1 h-4 w-4" /> Nodes
+                <WandSparkles className="mr-1 h-4 w-4" /> Workflow
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-[360px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
-              <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">Node Palette</p>
-              <p className="mb-2 text-xs text-zinc-500">Right-click on canvas to add at cursor, or add at viewport center below.</p>
-              <div className="mb-2 grid grid-cols-4 gap-1">
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("input.image")}>
-                  Input Image
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.groundingdino")}>
-                  ObjectDetection
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam2")}>
-                  SegmentScene
-                </Button>
-                <Button size="sm" variant="outline" className="h-8 rounded-lg text-xs" onClick={() => addNodeAtViewportCenter("model.sam3d_objects")}>
-                  SceneGen
-                </Button>
-              </div>
-              <ScrollArea className="h-[62vh] pr-2">
-                <div className="space-y-3">
-                  {contextMenuGroups.map((group) => (
-                    <div key={`dropdown-${group.category}`} className="rounded-xl border border-border/70 bg-background/35 p-2">
-                      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300">
-                        {group.category}
-                      </p>
-                      <div className="space-y-1.5">
-                        {group.specs.map((item) => (
-                          <button
-                            key={`dropdown-node-${item.type}`}
-                            type="button"
-                            onClick={() => addNodeAtViewportCenter(item.type)}
-                            className="w-full rounded-lg border border-border/70 bg-background/45 px-2.5 py-1.5 text-left text-xs transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent"
-                          >
-                            <p className="font-medium text-zinc-100">{item.title}</p>
-                            <p className="text-[10px] text-zinc-400">{item.type}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
+            <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow</DropdownMenuLabel>
+              {workflowPresets.map((preset) => (
+                <DropdownMenuItem
+                  key={`workflow-preset-${preset.id}`}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    insertWorkflowPreset(preset.id);
+                  }}
+                >
+                  {preset.label}
+                </DropdownMenuItem>
+              ))}
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -2044,7 +2722,8 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           )}
                           {(selectedNode.type === "model.groundingdino" ||
                             selectedNode.type === "model.sam2" ||
-                            selectedNode.type === "model.sam3d_objects") &&
+                            selectedNode.type === "model.sam3d_objects" ||
+                            selectedNode.type === "pipeline.scene_generation") &&
                           selectedNodeArtifacts.length > 0 ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
@@ -2065,7 +2744,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                           {groundingDinoJsonArtifact ? (
                             <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                               <div className="mb-2 flex items-center justify-between gap-2">
-                                <p className="text-xs font-medium text-zinc-300">ObjectDetection JSON</p>
+                                <p className="text-xs font-medium text-zinc-300">ObjectDetection descriptor</p>
                                 <div className="flex items-center gap-2">
                                   <Button
                                     size="sm"
@@ -2088,7 +2767,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                   </Button>
                                 </div>
                               </div>
-                              <p className="mb-2 text-[11px] text-zinc-500">Detection boxes/config generated by ObjectDetection.</p>
+                              <p className="mb-2 text-[11px] text-zinc-500">Detection descriptor JSON generated by ObjectDetection.</p>
                               {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
                                 <p className="text-xs text-rose-300">{inspectedJsonError}</p>
                               ) : null}
@@ -2124,7 +2803,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                     <Button
                                       size="sm"
                                       className="rounded-lg"
-                                      onClick={() => window.open(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`, "_blank")}
+                                      onClick={() => window.location.assign(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`)}
                                     >
                                       Open viewer
                                     </Button>
@@ -2244,9 +2923,10 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 setSelectedVersionId(value);
                 const version = versions.find((v) => v.id === value);
                 if (!version) return;
-                const loadedNodes = version.graphJson.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
+                const migratedGraph = migrateGraphDocument(version.graphJson);
+                const loadedNodes = migratedGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
                 setNodes(loadedNodes);
-                setEdges(version.graphJson.edges.map((edge) => withStyledEdge(edge as Edge)));
+                setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
                 const loadedPreset = loadedNodes[0]?.data.uiScale;
                 if (loadedPreset === "compact" || loadedPreset === "balanced" || loadedPreset === "cinematic") {
                   setNodeScalePreset(loadedPreset);
@@ -2268,19 +2948,16 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           </div>
         </div>
 
-        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#06080f]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
-          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-xl border border-white/10 bg-black/45 px-3 py-2 backdrop-blur-sm">
+        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
+          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 px-3 py-2">
             <p className="text-[11px] font-medium text-zinc-200">{projectName}</p>
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
           </div>
 
           <div
             data-no-connect-menu="true"
-            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-[18px] border border-white/10 bg-black/50 p-2 backdrop-blur-sm"
+            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2"
           >
-            <Button size="icon" variant="outline" className="h-10 w-10 rounded-full" onClick={openNodeMenuAtViewportCenter}>
-              <Plus className="h-4 w-4" />
-            </Button>
             <Button size="icon" variant="ghost" className="h-8 w-8 rounded-lg" onClick={() => reactFlow.zoomIn({ duration: 180 })}>
               <ZoomIn className="h-4 w-4" />
             </Button>
@@ -2304,157 +2981,146 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            isValidConnection={isConnectionValid}
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
             onEdgeDoubleClick={(_, edge) => deleteEdgesByIds([edge.id])}
             onNodeContextMenu={onNodeContextMenu}
             onPaneContextMenu={onPaneContextMenu}
             onPaneClick={onPaneClick}
+            onPaneMouseMove={onPaneMouseMove}
             fitView
-            panOnScroll
+            panOnScroll={false}
             panOnDrag
             selectionOnDrag
+            selectionKeyCode={["Shift"]}
+            multiSelectionKeyCode={["Shift"]}
+            panActivationKeyCode={["Space"]}
+            zoomOnScroll
             zoomOnDoubleClick={false}
             minZoom={0.2}
             maxZoom={1.8}
             snapToGrid={snapToGrid}
             snapGrid={[20, 20]}
             className="h-full"
-            defaultEdgeOptions={{
-              type: "smoothstep",
-              animated: true,
-              style: { stroke: "rgba(176, 191, 221, 0.42)", strokeWidth: 1.45 }
-            }}
-            connectionLineStyle={{ stroke: "rgba(188, 203, 228, 0.45)", strokeWidth: 1.35 }}
-            proOptions={{ hideAttribution: true }}
+            defaultEdgeOptions={defaultEdgeOptions}
+            connectionLineStyle={connectionLineStyle}
+            proOptions={proOptions}
           >
-            <Background color="rgba(255,255,255,0.12)" gap={18} />
-            {showMiniMap ? <MiniMap pannable zoomable style={{ background: "rgba(8,10,18,0.95)" }} /> : null}
+            <Background color="rgba(255,255,255,0.06)" gap={16} />
+            {showMiniMap ? <MiniMap pannable zoomable style={miniMapStyle} /> : null}
           </ReactFlow>
 
           {paneMenu ? (
-            <div
-              ref={paneMenuRef}
-              data-no-connect-menu="true"
-              className="absolute z-30 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md"
-              style={{ left: paneMenu.x, top: paneMenu.y }}
-            >
-              <div className="mb-2">
-                <p className="text-xs text-zinc-500">Add Node</p>
-              </div>
-              <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.015] p-2">
-                <p className="mb-1 text-xs text-zinc-500">Quick Add</p>
-                <div className="grid grid-cols-4 gap-1">
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("input.image")}
-                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
-                  >
-                    Input
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("model.groundingdino")}
-                    className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-zinc-200 transition hover:bg-white/10"
-                  >
-                    Detect
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("model.sam2")}
-                    className="rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-400/20"
-                  >
-                    Segment
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addNodeFromContextMenu("model.sam3d_objects")}
-                    className="rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200 transition hover:bg-cyan-400/20"
-                  >
-                    SceneGen
-                  </button>
-                </div>
-              </div>
+            <div ref={paneMenuRef} data-no-connect-menu="true">
+              <RightClickMenu
+                x={paneMenu.x}
+                y={paneMenu.y}
+                items={rightClickMenuItems}
+                onClose={() => setPaneMenu(null)}
+              />
+            </div>
+          ) : null}
 
-              <ScrollArea className="max-h-[24rem] pr-2">
-                <div className="space-y-2">
-                  {contextMenuGroups.map((group) => (
-                    <button
-                      key={`ctx-${group.category}`}
-                      type="button"
-                      onClick={() => {
-                        setActiveMenuCategory(group.category);
-                        setMenuSearch("");
-                      }}
-                      className={`flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition ${
-                        activeMenuCategory === group.category
-                          ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
-                          : "border-white/10 bg-white/[0.015] text-zinc-300 hover:bg-white/[0.05]"
-                      }`}
-                    >
-                      <span className="text-sm">{categoryLabelMap[group.category]}</span>
-                      <span className="inline-flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-500">{group.specs.length}</span>
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      </span>
-                    </button>
-                  ))}
+          {nodeSearchMenu ? (
+            <div
+              ref={nodeSearchMenuRef}
+              data-no-connect-menu="true"
+              className="absolute z-40 w-[320px] rounded-md border border-[#34363d] bg-[#1b1d23] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.52)]"
+              style={{ left: nodeSearchMenu.x, top: nodeSearchMenu.y }}
+            >
+              <Input
+                ref={nodeSearchInputRef}
+                value={nodeSearchMenu.query}
+                onChange={(event) =>
+                  setNodeSearchMenu((current) =>
+                    current
+                      ? {
+                          ...current,
+                          query: event.target.value,
+                          highlighted: 0
+                        }
+                      : current
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setNodeSearchMenu(null);
+                    return;
+                  }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setNodeSearchMenu((current) => {
+                      if (!current) return current;
+                      const max = Math.max(0, filteredNodeSearchSpecs.length - 1);
+                      return {
+                        ...current,
+                        highlighted: Math.min(max, current.highlighted + 1)
+                      };
+                    });
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setNodeSearchMenu((current) => {
+                      if (!current) return current;
+                      return {
+                        ...current,
+                        highlighted: Math.max(0, current.highlighted - 1)
+                      };
+                    });
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const target = filteredNodeSearchSpecs[nodeSearchMenu.highlighted] ?? filteredNodeSearchSpecs[0];
+                    if (!target) return;
+                    addNodeFromSearchMenu(target.type);
+                  }
+                }}
+                className="h-8 rounded-md border-[#32343b] bg-[#0a0c12] text-xs text-zinc-100"
+                placeholder="Search nodes (Tab)"
+              />
+              <ScrollArea className="mt-2 h-[292px] pr-1">
+                <div className="space-y-0.5">
+                  {filteredNodeSearchSpecs.map((spec, index) => {
+                    const isHighlighted = index === nodeSearchMenu.highlighted;
+                    return (
+                      <button
+                        key={`search-node-${spec.type}`}
+                        type="button"
+                        className={`flex h-7 w-full items-center justify-between rounded px-2 text-left text-[13px] transition ${
+                          isHighlighted
+                            ? "border border-cyan-400/50 bg-cyan-400/10 text-zinc-100"
+                            : "border border-transparent text-zinc-200 hover:border-[#2f2f2f] hover:bg-[#181a20]"
+                        }`}
+                        onMouseEnter={() =>
+                          setNodeSearchMenu((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  highlighted: index
+                                }
+                              : current
+                          )
+                        }
+                        onClick={() => addNodeFromSearchMenu(spec.type)}
+                      >
+                        <span className="truncate">{spec.title}</span>
+                        <span className="ml-2 text-[11px] text-zinc-500">{spec.type}</span>
+                      </button>
+                    );
+                  })}
+                  {filteredNodeSearchSpecs.length === 0 ? (
+                    <p className="px-2 py-5 text-center text-xs text-zinc-500">No matching nodes</p>
+                  ) : null}
                 </div>
               </ScrollArea>
-
-              <div className="mt-3 flex items-center justify-between border-t border-white/10 px-1 pt-2 text-xs text-zinc-500">
-                <span>↕ Navigate</span>
-                <span>↵ Select</span>
-              </div>
-
-              {activeMenuGroup ? (
-                <div className="absolute left-full top-0 ml-2 w-80 rounded-2xl border border-white/10 bg-[#151515]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.65)] backdrop-blur-md">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs text-zinc-400">{categoryLabelMap[activeMenuGroup.category]}</p>
-                    <button
-                      type="button"
-                      onClick={() => setActiveMenuCategory(null)}
-                      className="rounded-md border border-white/10 px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:bg-white/[0.06]"
-                    >
-                      Close
-                    </button>
-                  </div>
-                  <Input
-                    value={menuSearch}
-                    onChange={(event) => setMenuSearch(event.target.value)}
-                    className="mb-2 h-8 rounded-lg border-white/10 bg-black/35 text-xs"
-                    placeholder={`Search ${activeMenuGroup.category.toLowerCase()}...`}
-                  />
-                  <ScrollArea className="max-h-[25rem] pr-2">
-                    <div className="space-y-1">
-                      {filteredActiveMenuSpecs.map((spec) => {
-                        const RowIcon = getContextRowIcon(spec.type);
-                        const shortcut = shortcutByNodeType[spec.type];
-                        return (
-                          <button
-                            key={`ctx-node-${spec.type}`}
-                            type="button"
-                            onClick={() => addNodeFromContextMenu(spec.type)}
-                            className="group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-2 text-left text-sm text-zinc-200 transition hover:border-white/10 hover:bg-white/5"
-                          >
-                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-200">
-                              <RowIcon className="h-4 w-4" />
-                            </span>
-                            <span className="flex-1 leading-none">{spec.title}</span>
-                            {shortcut ? <span className="text-xs text-zinc-500">{shortcut}</span> : null}
-                          </button>
-                        );
-                      })}
-                      {filteredActiveMenuSpecs.length === 0 ? (
-                        <p className="px-2 py-6 text-center text-xs text-zinc-500">No nodes found.</p>
-                      ) : null}
-                    </div>
-                  </ScrollArea>
-                </div>
-              ) : null}
             </div>
           ) : null}
 
@@ -2462,7 +3128,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <div
               ref={nodeMenuRef}
               data-no-connect-menu="true"
-              className="absolute z-30 w-56 rounded-xl border border-white/10 bg-[#151515]/95 p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md"
+              className="absolute z-30 w-56 rounded-xl border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
               style={{ left: nodeMenu.x, top: nodeMenu.y }}
             >
               <button
