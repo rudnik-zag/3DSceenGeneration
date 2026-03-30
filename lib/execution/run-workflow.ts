@@ -3,6 +3,13 @@ import { promises as fs } from "fs";
 import path from "path";
 
 import { prisma } from "@/lib/db";
+import { finalizeRunUsage } from "@/lib/billing/usage";
+import {
+  closeOpenRunSteps,
+  completeRunStep,
+  recordRunEvent,
+  startRunStep
+} from "@/lib/execution/telemetry";
 import { ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { MockModelRunner, stableHashForOutput } from "@/lib/execution/mock-runner";
 import { artifactTypeFromArtifactKind, normalizeArtifactType } from "@/lib/graph/artifact-types";
@@ -263,6 +270,22 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
   if (!run) {
     throw new Error(`Run ${input.runId} not found`);
   }
+  if (run.status === "canceled") {
+    await recordRunEvent({
+      runId: input.runId,
+      projectId: input.projectId,
+      graphId: input.graphId,
+      userId: run.createdBy ?? null,
+      eventType: "run_canceled_before_start",
+      status: "canceled",
+      message: "Run was already canceled before worker execution started"
+    });
+    await finalizeRunUsage({
+      runId: input.runId,
+      status: "canceled"
+    });
+    return;
+  }
 
   await updateRun(input.runId, {
     status: "running",
@@ -270,6 +293,16 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     logs: appendLog(run.logs, `[${new Date().toISOString()}] Run started`),
     progress: 0
   });
+  await recordRunEvent({
+    runId: input.runId,
+    projectId: input.projectId,
+    graphId: input.graphId,
+    userId: run.createdBy ?? null,
+    eventType: "run_started",
+    status: "running",
+    message: "Worker started run execution"
+  });
+  let activeNodeContext: { nodeId: string; nodeType: WorkflowNodeType } | null = null;
 
   try {
     const project = await prisma.project.findUnique({
@@ -295,6 +328,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
     for (let i = 0; i < plan.tasks.length; i += 1) {
       const task = plan.tasks[i];
+      activeNodeContext = { nodeId: task.nodeId, nodeType: task.nodeType };
       const spec = nodeSpecRegistry[task.nodeType];
       const resolvedParams = mergeNodeParamsWithDefaults(task.nodeType, task.params);
       const now = new Date().toISOString();
@@ -527,6 +561,36 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
       const inputSummary = formatInputSummary(inputsByPort);
       console.log(`[worker] node=${task.nodeId} inputs ${inputSummary}`);
+      const step = await startRunStep({
+        runId: input.runId,
+        projectId: input.projectId,
+        graphId: input.graphId,
+        userId: run.createdBy ?? null,
+        nodeId: task.nodeId,
+        nodeType: task.nodeType,
+        sequence: i + 1,
+        inputSummary,
+        metadata: {
+          mode: runtimeMode ?? null,
+          cacheBypass: shouldBypassCache
+        } as Prisma.InputJsonValue
+      });
+      await recordRunEvent({
+        runId: input.runId,
+        projectId: input.projectId,
+        graphId: input.graphId,
+        userId: run.createdBy ?? null,
+        eventType: "node_started",
+        status: "running",
+        nodeId: task.nodeId,
+        nodeType: task.nodeType,
+        message: `Node started: ${task.nodeType}`,
+        metadata: {
+          sequence: i + 1,
+          mode: runtimeMode ?? null,
+          cacheBypass: shouldBypassCache
+        } as Prisma.InputJsonValue
+      });
 
       if (task.nodeType === "input.image") {
         const storageKey = typeof resolvedParams.storageKey === "string" ? resolvedParams.storageKey : "";
@@ -585,6 +649,32 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
               `[${now}] ${task.nodeId} source-resolved storageKey=${storageKey}`
             )
           });
+          await completeRunStep({
+            step,
+            status: "success",
+            cacheHit: false,
+            outputSummary: `image:${storageKey}`,
+            metadata: {
+              mode: runtimeMode ?? null,
+              outputs: ["image"]
+            } as Prisma.InputJsonValue
+          });
+          await recordRunEvent({
+            runId: input.runId,
+            projectId: input.projectId,
+            graphId: input.graphId,
+            userId: run.createdBy ?? null,
+            eventType: "node_completed",
+            status: "success",
+            nodeId: task.nodeId,
+            nodeType: task.nodeType,
+            message: "Node completed from source input",
+            metadata: {
+              cacheHit: false,
+              outputs: ["image"]
+            } as Prisma.InputJsonValue
+          });
+          activeNodeContext = null;
           continue;
         }
       }
@@ -633,6 +723,32 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             ].join(",")} inputs=${inputSummary} stored=${cacheOutputs.join(" | ")}`
           )
         });
+        await completeRunStep({
+          step,
+          status: "success",
+          cacheHit: true,
+          outputSummary: cacheOutputs.join(" | "),
+          metadata: {
+            mode: runtimeMode ?? null,
+            outputs: [...outputCacheHits.keys()]
+          } as Prisma.InputJsonValue
+        });
+        await recordRunEvent({
+          runId: input.runId,
+          projectId: input.projectId,
+          graphId: input.graphId,
+          userId: run.createdBy ?? null,
+          eventType: "node_completed",
+          status: "success",
+          nodeId: task.nodeId,
+          nodeType: task.nodeType,
+          message: "Node completed from cache",
+          metadata: {
+            cacheHit: true,
+            outputs: [...outputCacheHits.keys()]
+          } as Prisma.InputJsonValue
+        });
+        activeNodeContext = null;
         continue;
       }
 
@@ -982,6 +1098,35 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
               .join(",")} inputs=${inputSummary}`
           )
         });
+        await completeRunStep({
+          step,
+          status: "success",
+          cacheHit: false,
+          outputSummary: wrapperOutputs
+            .map((output) => `${output.outputId}:${output.kind}:${output.storageKey}`)
+            .join(" | "),
+          metadata: {
+            mode: runtimeMode ?? null,
+            outputs: wrapperOutputs.map((output) => output.outputId)
+          } as Prisma.InputJsonValue
+        });
+        await recordRunEvent({
+          runId: input.runId,
+          projectId: input.projectId,
+          graphId: input.graphId,
+          userId: run.createdBy ?? null,
+          eventType: "node_completed",
+          status: "success",
+          nodeId: task.nodeId,
+          nodeType: task.nodeType,
+          message: "Node completed via template execution",
+          metadata: {
+            cacheHit: false,
+            outputs: wrapperOutputs.map((output) => output.outputId),
+            template: template.id
+          } as Prisma.InputJsonValue
+        });
+        activeNodeContext = null;
         continue;
       }
 
@@ -1118,6 +1263,34 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             .join(",")} inputs=${inputSummary} stored=${storedOutputs.join(" | ")}${(result.warnings ?? runtimeWarnings).length ? ` warnings=${(result.warnings ?? runtimeWarnings).join(" | ")}` : ""}`
         )
       });
+      await completeRunStep({
+        step,
+        status: "success",
+        cacheHit: false,
+        outputSummary: storedOutputs.join(" | "),
+        metadata: {
+          mode: result.mode ?? runtimeMode ?? "default",
+          outputs: outputs.map((output) => output.outputId),
+          warnings: result.warnings ?? runtimeWarnings
+        } as Prisma.InputJsonValue
+      });
+      await recordRunEvent({
+        runId: input.runId,
+        projectId: input.projectId,
+        graphId: input.graphId,
+        userId: run.createdBy ?? null,
+        eventType: "node_completed",
+        status: "success",
+        nodeId: task.nodeId,
+        nodeType: task.nodeType,
+        message: "Node completed",
+        metadata: {
+          cacheHit: false,
+          outputs: outputs.map((output) => output.outputId),
+          warnings: result.warnings ?? runtimeWarnings
+        } as Prisma.InputJsonValue
+      });
+      activeNodeContext = null;
     }
 
     const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
@@ -1127,15 +1300,68 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       finishedAt: new Date(),
       logs: appendLog(latestRun?.logs ?? "", `[${new Date().toISOString()}] Run finished`)
     });
+    await recordRunEvent({
+      runId: input.runId,
+      projectId: input.projectId,
+      graphId: input.graphId,
+      userId: run.createdBy ?? null,
+      eventType: "run_completed",
+      status: "success",
+      message: "Run completed successfully"
+    });
+    await finalizeRunUsage({
+      runId: input.runId,
+      status: "success"
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown execution error";
     const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
     const status: RunStatus = message.toLowerCase().includes("canceled") ? "canceled" : "error";
+    await closeOpenRunSteps({
+      runId: input.runId,
+      status: status === "canceled" ? "canceled" : "error",
+      errorMessage: message
+    });
+    await recordRunEvent({
+      runId: input.runId,
+      projectId: input.projectId,
+      graphId: input.graphId,
+      userId: run.createdBy ?? null,
+      eventType: status === "canceled" ? "run_canceled" : "run_failed",
+      status,
+      nodeId: activeNodeContext?.nodeId ?? null,
+      nodeType: activeNodeContext?.nodeType ?? null,
+      message
+    });
+    if (activeNodeContext) {
+      await recordRunEvent({
+        runId: input.runId,
+        projectId: input.projectId,
+        graphId: input.graphId,
+        userId: run.createdBy ?? null,
+        eventType: status === "canceled" ? "node_canceled" : "node_failed",
+        status,
+        nodeId: activeNodeContext.nodeId,
+        nodeType: activeNodeContext.nodeType,
+        message
+      });
+    }
     await updateRun(input.runId, {
       status,
       finishedAt: new Date(),
       logs: appendLog(latestRun?.logs ?? "", `[${new Date().toISOString()}] ERROR: ${message}`)
     });
+    try {
+      await finalizeRunUsage({
+        runId: input.runId,
+        status: status === "canceled" ? "canceled" : "error"
+      });
+    } catch (finalizeError) {
+      console.warn(
+        `[worker] failed to finalize token usage for run ${input.runId}:`,
+        finalizeError instanceof Error ? finalizeError.message : String(finalizeError)
+      );
+    }
     throw error;
   }
 }

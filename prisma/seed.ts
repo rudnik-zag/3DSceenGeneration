@@ -41,7 +41,7 @@ async function main() {
     (await prisma.user.create({ data: { email: "demo@local.dev" } }));
 
   const existing = await prisma.project.findFirst({
-    where: { userId: user.id, name: "Demo Project" },
+    where: { ownerId: user.id, name: "Demo Project" },
     include: { graphs: true }
   });
 
@@ -50,16 +50,31 @@ async function main() {
     return;
   }
 
+  let slug = slugifyProjectName("Demo Project");
+  let suffix = 1;
+  while (await prisma.project.findFirst({ where: { slug }, select: { id: true } })) {
+    suffix += 1;
+    slug = `${slugifyProjectName("Demo Project")}-${suffix}`;
+  }
+
   const project = await prisma.project.create({
     data: {
-      userId: user.id,
-      name: "Demo Project"
+      ownerId: user.id,
+      name: "Demo Project",
+      slug,
+      members: {
+        create: {
+          userId: user.id,
+          role: "owner"
+        }
+      }
     }
   });
 
   const graph = await prisma.graph.create({
     data: {
       projectId: project.id,
+      createdBy: user.id,
       name: "Demo Graph",
       graphJson: demoGraph,
       version: 1
@@ -70,6 +85,7 @@ async function main() {
     data: {
       projectId: project.id,
       graphId: graph.id,
+      createdBy: user.id,
       status: "success",
       logs: "Seed run created for demo project",
       progress: 100,
@@ -82,6 +98,7 @@ async function main() {
     data: {
       runId: run.id,
       projectId: project.id,
+      ownerId: user.id,
       nodeId: "n3",
       kind: "mask",
       mimeType: "image/svg+xml",

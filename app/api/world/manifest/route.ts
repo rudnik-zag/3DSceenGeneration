@@ -2,9 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { Artifact } from "@prisma/client";
 
+import { requireArtifactAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
+import { env } from "@/lib/env";
+import { logAuditEventFromRequest } from "@/lib/security/audit";
+import { toApiErrorResponse } from "@/lib/security/errors";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getObjectBuffer } from "@/lib/storage/s3";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
+import { worldManifestQuerySchema } from "@/lib/validation/schemas";
 
 type BundleMode = "same_node" | "project_fallback";
 
@@ -256,31 +262,44 @@ function toAbsoluteUrlMaybe(url: string | null, req: NextRequest): string | null
 }
 
 export async function GET(req: NextRequest) {
-  const artifactId = req.nextUrl.searchParams.get("artifactId")?.trim() ?? "";
-  const bundleModeParam = req.nextUrl.searchParams.get("bundleMode")?.trim() ?? "";
-  const bundleMode: BundleMode =
-    bundleModeParam === "same_node" || bundleModeParam === "project_fallback"
-      ? bundleModeParam
-      : "project_fallback";
-  if (!artifactId) {
-    return NextResponse.json({ error: "artifactId is required" }, { status: 400 });
-  }
+  try {
+    const parsedQuery = worldManifestQuerySchema.safeParse({
+      artifactId: req.nextUrl.searchParams.get("artifactId"),
+      bundleMode: req.nextUrl.searchParams.get("bundleMode")
+    });
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: "validation_error", message: "Invalid manifest query", details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
 
-  const selectedArtifact = await prisma.artifact.findUnique({
-    where: { id: artifactId },
-    include: {
-      project: {
-        select: {
-          id: true,
-          name: true
+    const artifactId = parsedQuery.data.artifactId;
+    const bundleMode = parsedQuery.data.bundleMode ?? "project_fallback";
+    const access = await requireArtifactAccess(artifactId, "viewer");
+    await enforceRateLimit({
+      bucket: "signed-url:manifest",
+      identifier: access.user.id,
+      limit: env.SIGNED_URL_LIMIT,
+      windowSec: env.SIGNED_URL_WINDOW_SEC,
+      message: "Manifest signed URL rate limit exceeded"
+    });
+
+    const selectedArtifact = await prisma.artifact.findUnique({
+      where: { id: artifactId },
+      include: {
+        project: {
+          select: {
+            id: true,
+            name: true
+          }
         }
       }
-    }
-  });
+    });
 
-  if (!selectedArtifact) {
-    return NextResponse.json({ error: "Artifact not found" }, { status: 404 });
-  }
+    if (!selectedArtifact) {
+      return NextResponse.json({ error: "Artifact not found" }, { status: 404 });
+    }
 
   const selectedRun = selectedArtifact.runId
     ? await prisma.run.findUnique({
@@ -590,34 +609,45 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({
-    artifactId: selectedArtifact.id,
-    projectId: selectedArtifact.projectId,
-    context: {
-      selectedRunId,
-      selectedNodeId: selectedArtifact.nodeId ?? null
-    },
-    bundle: {
-      mode: bundleMode,
-      meshRunIds,
-      splatRunIds,
-      usedCrossRunFallback
-    },
-    environment: resolvedEnvironment,
-    environmentContext: {
-      nodeId: environmentNodeId,
-      viewerNodeId: environmentViewerNodeId
-    },
-    camera: {
-      position: [4, 3, 4],
-      target: [0, 0, 0],
-      fov: 50
-    },
-    meshes,
-    splats,
-    build: {
-      canBuildTileset,
-      defaultPresetName: "Default"
-    }
-  });
+    await logAuditEventFromRequest(req, {
+      action: "viewer_manifest_access",
+      resourceType: "artifact",
+      resourceId: selectedArtifact.id,
+      projectId: selectedArtifact.projectId,
+      userId: access.user.id
+    });
+
+    return NextResponse.json({
+      artifactId: selectedArtifact.id,
+      projectId: selectedArtifact.projectId,
+      context: {
+        selectedRunId,
+        selectedNodeId: selectedArtifact.nodeId ?? null
+      },
+      bundle: {
+        mode: bundleMode,
+        meshRunIds,
+        splatRunIds,
+        usedCrossRunFallback
+      },
+      environment: resolvedEnvironment,
+      environmentContext: {
+        nodeId: environmentNodeId,
+        viewerNodeId: environmentViewerNodeId
+      },
+      camera: {
+        position: [4, 3, 4],
+        target: [0, 0, 0],
+        fov: 50
+      },
+      meshes,
+      splats,
+      build: {
+        canBuildTileset,
+        defaultPresetName: "Default"
+      }
+    });
+  } catch (error) {
+    return toApiErrorResponse(error, "Failed to load world manifest");
+  }
 }

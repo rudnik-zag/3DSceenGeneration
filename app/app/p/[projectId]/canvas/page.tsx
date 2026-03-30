@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { CanvasEditor } from "@/components/canvas/canvas-editor";
+import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
 import { GraphDocument } from "@/types/workflow";
@@ -11,11 +12,8 @@ export default async function CanvasPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
-  if (!project) {
-    notFound();
-  }
+  const access = await requirePageProjectAccess(projectId, "viewer");
+  const project = access.project;
 
   const versions = await prisma.graph.findMany({
     where: { projectId },

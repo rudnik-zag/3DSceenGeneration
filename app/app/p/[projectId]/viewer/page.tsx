@@ -5,6 +5,7 @@ import { createHash } from "crypto";
 
 import { ViewerLoader } from "@/components/viewer/viewer-loader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
@@ -254,10 +255,8 @@ export default async function ViewerPage({
   const { artifactId, nodeId, bundleMode } = await searchParams;
   const selectedBundleMode: BundleMode = bundleMode === "same_node" ? "same_node" : "project_fallback";
 
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
-  if (!project) {
-    notFound();
-  }
+  const access = await requirePageProjectAccess(projectId, "viewer");
+  const project = access.project;
 
   const projectArtifacts = await prisma.artifact.findMany({
     where: {

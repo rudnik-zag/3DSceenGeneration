@@ -462,6 +462,22 @@ function withStyledEdge(edge: Edge): Edge {
   };
 }
 
+async function readApiErrorMessage(response: Response, fallback: string) {
+  const payload = await response.json().catch(() => null);
+  if (payload && typeof payload === "object") {
+    const message =
+      typeof payload.message === "string"
+        ? payload.message
+        : typeof payload.error === "string"
+          ? payload.error
+          : null;
+    if (message) {
+      return message;
+    }
+  }
+  return fallback;
+}
+
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
@@ -474,6 +490,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const snapToGrid = true;
   const [nodeScalePreset, setNodeScalePreset] = useState<NodeUiScale>("balanced");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [isStartingRun, setIsStartingRun] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState(versions[0]?.id ?? "");
   const [runLogs, setRunLogs] = useState("");
@@ -2288,8 +2305,35 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   );
 
   const startRun = async (startNodeId?: string) => {
+    if (isStartingRun) return;
+    setIsStartingRun(true);
     try {
       const latestGraphId = await saveGraph({ silent: true });
+      const estimateRes = await fetch("/api/billing/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          graphId: latestGraphId,
+          startNodeId
+        })
+      });
+      if (!estimateRes.ok) {
+        throw new Error(await readApiErrorMessage(estimateRes, "Failed to estimate token usage"));
+      }
+      const estimatePayload = await estimateRes.json().catch(() => ({}));
+      const estimatedCost = Math.max(0, Math.round(Number(estimatePayload?.estimate?.estimatedTokenCost ?? 0)));
+      const availableTokens = Math.max(0, Math.round(Number(estimatePayload?.availableTokens ?? 0)));
+      const canAfford = estimatePayload?.canAfford !== false;
+      const enforcementEnabled = estimatePayload?.enforcementEnabled !== false;
+      if (enforcementEnabled && !canAfford) {
+        toast({
+          title: "Insufficient tokens",
+          description: `Estimated ${estimatedCost} tokens, available ${availableTokens}.`
+        });
+        return;
+      }
+
       markNodesPreparingRun(startNodeId);
       const endpoint = startNodeId
         ? `/api/projects/${projectId}/nodes/${startNodeId}/run`
@@ -2299,14 +2343,21 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(startNodeId ? { graphId: latestGraphId } : { graphId: latestGraphId, startNodeId })
       });
-      if (!res.ok) throw new Error("Failed to queue run");
+      if (!res.ok) throw new Error(await readApiErrorMessage(res, "Failed to queue run"));
 
       const data = await res.json();
       setActiveRunId(data.run.id);
-      toast({ title: "Run started", description: `Run ${data.run.id.slice(0, 8)} queued` });
+      const reservedCost = Math.max(0, Math.round(Number(data?.billing?.estimatedTokenCost ?? estimatedCost)));
+      const description =
+        reservedCost > 0
+          ? `Run ${data.run.id.slice(0, 8)} queued • ${reservedCost} tokens reserved`
+          : `Run ${data.run.id.slice(0, 8)} queued`;
+      toast({ title: "Run started", description });
       pollRun(data.run.id, startNodeId ?? null);
     } catch (error) {
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
+    } finally {
+      setIsStartingRun(false);
     }
   };
 
@@ -2475,7 +2526,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
           <Badge className="rounded-full border border-white/10 bg-black/30 text-[11px] text-zinc-300" variant="secondary">
             {projectName}
           </Badge>
-          <Button size="sm" className="rounded-xl" onClick={() => startRun()}>
+          <Button size="sm" className="rounded-xl" onClick={() => startRun()} disabled={isStartingRun}>
             <Play className="mr-1 h-4 w-4" /> Run workflow
           </Button>
           <Button
@@ -2483,7 +2534,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             variant="secondary"
             className="rounded-xl"
             onClick={() => startRun(selectedNode?.id)}
-            disabled={!selectedNode || !canNodeRun(selectedNode)}
+            disabled={isStartingRun || !selectedNode || !canNodeRun(selectedNode)}
           >
             <Zap className="mr-1 h-4 w-4" /> Run from selection
           </Button>
@@ -2624,7 +2675,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                       </div>
                       <Separator className="mb-3" />
                       {canNodeRun(selectedNode) ? (
-                        <Button className="mb-3 w-full rounded-xl" onClick={() => startRun(selectedNode.id)}>
+                        <Button className="mb-3 w-full rounded-xl" disabled={isStartingRun} onClick={() => startRun(selectedNode.id)}>
                           <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
                         </Button>
                       ) : selectedNode.type === "input.image" ? (

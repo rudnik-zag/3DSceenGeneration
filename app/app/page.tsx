@@ -1,13 +1,22 @@
 import { DashboardClient } from "@/components/layout/dashboard-client";
 import { prisma } from "@/lib/db";
-import { getOrCreateDefaultUser } from "@/lib/default-user";
+import { requirePageAuthUser } from "@/lib/auth/session";
 import { ProjectItem } from "@/components/layout/dashboard-client";
 
 export default async function DashboardPage() {
-  const user = await getOrCreateDefaultUser();
+  const user = await requirePageAuthUser();
 
   const projectsRaw = await prisma.project.findMany({
-    where: { userId: user.id },
+    where: {
+      OR: [
+        { ownerId: user.id },
+        {
+          members: {
+            some: { userId: user.id }
+          }
+        }
+      ]
+    },
     orderBy: { updatedAt: "desc" },
     include: {
       _count: {

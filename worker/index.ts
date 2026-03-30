@@ -1,4 +1,5 @@
-import { loadEnvConfig } from "@next/env";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { Worker } from "bullmq";
 
 import { executeWorkflowRun } from "@/lib/execution/run-workflow";
@@ -6,7 +7,26 @@ import { redisConnectionForBullMq } from "@/lib/queue/connection";
 import { BUILD_SPLAT_TILESET_QUEUE, RUN_WORKFLOW_QUEUE } from "@/lib/queue/queues";
 import { executeBuildSplatTilesetJob } from "@/lib/splats/build-tileset-job";
 
-loadEnvConfig(process.cwd());
+function loadWorkerEnv() {
+  const cwd = process.cwd();
+  const nodeEnv = process.env.NODE_ENV ?? "development";
+  const files = [
+    `.env.${nodeEnv}.local`,
+    ...(nodeEnv === "test" ? [] : [".env.local"]),
+    `.env.${nodeEnv}`,
+    ".env"
+  ];
+
+  for (const file of files) {
+    const absolutePath = path.join(cwd, file);
+    if (!existsSync(absolutePath)) {
+      continue;
+    }
+    process.loadEnvFile(absolutePath);
+  }
+}
+
+loadWorkerEnv();
 
 async function main() {
   const workflowWorker = new Worker(

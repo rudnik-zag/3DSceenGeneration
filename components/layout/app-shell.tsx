@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Menu, Plus, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { signOut } from "next-auth/react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,15 @@ interface ShellProject {
   name: string;
 }
 
-function SidebarContent({ projects, onNavigate }: { projects: ShellProject[]; onNavigate?: () => void }) {
+function SidebarContent({
+  projects,
+  currentUserLabel,
+  onNavigate
+}: {
+  projects: ShellProject[];
+  currentUserLabel: string;
+  onNavigate?: () => void;
+}) {
   const pathname = usePathname();
   const [query, setQuery] = useState("");
 
@@ -28,7 +37,7 @@ function SidebarContent({ projects, onNavigate }: { projects: ShellProject[]; on
     <div className="flex h-full flex-col">
       <div className="border-b border-border/70 p-4">
         <p className="text-sm font-medium text-muted-foreground">Workspace</p>
-        <p className="truncate text-base font-semibold">Dusan Njegovanovic</p>
+        <p className="truncate text-base font-semibold">{currentUserLabel}</p>
       </div>
 
       <div className="p-3">
@@ -88,9 +97,11 @@ function SidebarContent({ projects, onNavigate }: { projects: ShellProject[]; on
 
 export function AppShell({
   projects,
+  currentUserLabel,
   children
 }: {
   projects: ShellProject[];
+  currentUserLabel: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -119,8 +130,25 @@ export function AppShell({
           </div>
 
           <div className="flex items-center gap-2">
+            <span className="hidden text-xs text-zinc-400 md:inline">{currentUserLabel}</span>
+            <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
+              <Link href="/billing">Billing</Link>
+            </Button>
+            <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
+              <Link href="/settings">Settings</Link>
+            </Button>
             <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
               <Link href="/">Landing</Link>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-xl text-xs md:text-sm"
+              onClick={() => {
+                void signOut({ callbackUrl: "/login" });
+              }}
+            >
+              Logout
             </Button>
           </div>
         </div>
@@ -129,7 +157,7 @@ export function AppShell({
       <div className={cn("mx-auto grid max-w-[1900px] grid-cols-1", !isImmersiveRoute && "md:grid-cols-[260px_1fr]")}>
         {!isImmersiveRoute ? (
           <aside className="hidden border-r border-border/70 panel-blur md:block">
-            <SidebarContent projects={projects} />
+            <SidebarContent projects={projects} currentUserLabel={currentUserLabel} />
           </aside>
         ) : null}
 
@@ -139,7 +167,11 @@ export function AppShell({
               className="h-full w-[280px] border-r border-border/70 panel-blur"
               onClick={(e) => e.stopPropagation()}
             >
-              <SidebarContent projects={projects} onNavigate={() => setOpen(false)} />
+              <SidebarContent
+                projects={projects}
+                currentUserLabel={currentUserLabel}
+                onNavigate={() => setOpen(false)}
+              />
             </aside>
           </div>
         ) : null}

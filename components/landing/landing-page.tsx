@@ -41,12 +41,22 @@ const fadeUp = {
   transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1] }
 };
 
-export function LandingPage() {
+export function LandingPage({
+  isAuthenticated = false,
+  userLabel = null
+}: {
+  isAuthenticated?: boolean;
+  userLabel?: string | null;
+}) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
 
   const openDemo = async () => {
     const res = await fetch("/api/demo/open", { method: "POST" });
+    if (res.status === 401) {
+      router.push("/login?next=/app");
+      return;
+    }
     if (!res.ok) {
       toast({ title: "Could not open demo", description: "Try seeding the database first." });
       return;
@@ -71,10 +81,36 @@ export function LandingPage() {
           </nav>
 
           <div className="hidden items-center gap-2 md:flex">
-            <Button variant="ghost" size="sm" asChild>
-              <Link href="/app">Get started</Link>
-            </Button>
-            <Button size="sm" onClick={openDemo}>Open demo</Button>
+            {isAuthenticated ? (
+              <>
+                {userLabel ? (
+                  <span className="max-w-[220px] truncate px-2 text-xs text-muted-foreground">
+                    {userLabel}
+                  </span>
+                ) : null}
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/pricing">Pricing</Link>
+                </Button>
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/settings">Account</Link>
+                </Button>
+                <Button size="sm" asChild>
+                  <Link href="/app">Open app</Link>
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/pricing">Pricing</Link>
+                </Button>
+                <Button variant="ghost" size="sm" asChild>
+                  <Link href="/login">Login</Link>
+                </Button>
+                <Button size="sm" asChild>
+                  <Link href="/register">Get started</Link>
+                </Button>
+              </>
+            )}
           </div>
 
           <Button
@@ -93,7 +129,22 @@ export function LandingPage() {
               <a href="#features" className="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-accent" onClick={() => setMenuOpen(false)}>Features</a>
               <a href="#workflow" className="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-accent" onClick={() => setMenuOpen(false)}>Workflow</a>
               <a href="#gallery" className="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-accent" onClick={() => setMenuOpen(false)}>Gallery</a>
-              <Button asChild className="mt-2"><Link href="/app">Get started</Link></Button>
+              {isAuthenticated ? (
+                <>
+                  {userLabel ? (
+                    <p className="px-1 pt-1 text-xs text-muted-foreground">{userLabel}</p>
+                  ) : null}
+                  <Button asChild className="mt-2"><Link href="/app">Open app</Link></Button>
+                  <Button variant="outline" asChild><Link href="/settings">Account</Link></Button>
+                  <Button variant="outline" asChild><Link href="/pricing">Pricing</Link></Button>
+                </>
+              ) : (
+                <>
+                  <Button asChild className="mt-2"><Link href="/register">Get started</Link></Button>
+                  <Button variant="outline" asChild><Link href="/pricing">Pricing</Link></Button>
+                  <Button variant="outline" asChild><Link href="/login">Login</Link></Button>
+                </>
+              )}
               <Button variant="secondary" onClick={openDemo}>Open demo</Button>
             </div>
           </div>
@@ -113,10 +164,14 @@ export function LandingPage() {
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Button size="lg" className="rounded-xl px-7 text-sm font-medium" asChild>
-              <Link href="/app">Get started</Link>
+              <Link href={isAuthenticated ? "/app" : "/register"}>
+                {isAuthenticated ? "Open app" : "Get started"}
+              </Link>
             </Button>
-            <Button size="lg" variant="outline" className="rounded-xl px-7" onClick={openDemo}>
-              Open demo
+            <Button size="lg" variant="outline" className="rounded-xl px-7" asChild>
+              <Link href={isAuthenticated ? "/settings" : "/pricing"}>
+                {isAuthenticated ? "Account settings" : "View pricing"}
+              </Link>
             </Button>
           </div>
         </motion.div>
@@ -227,10 +282,14 @@ export function LandingPage() {
           </h3>
           <div className="mt-7 flex flex-wrap gap-3">
             <Button size="lg" asChild>
-              <Link href="/app">Get started</Link>
+              <Link href={isAuthenticated ? "/app" : "/register"}>
+                {isAuthenticated ? "Open app" : "Get started"}
+              </Link>
             </Button>
-            <Button size="lg" variant="outline" onClick={openDemo}>
-              Open demo
+            <Button size="lg" variant="outline" asChild>
+              <Link href={isAuthenticated ? "/settings" : "/pricing"}>
+                {isAuthenticated ? "Account settings" : "View pricing"}
+              </Link>
             </Button>
           </div>
         </motion.div>

@@ -1,15 +1,24 @@
 import { AppShell } from "@/components/layout/app-shell";
 import { prisma } from "@/lib/db";
-import { getOrCreateDefaultUser } from "@/lib/default-user";
+import { requirePageAuthUser } from "@/lib/auth/session";
 
 export default async function AppLayout({
   children
 }: {
   children: React.ReactNode;
 }) {
-  const user = await getOrCreateDefaultUser();
+  const user = await requirePageAuthUser();
   const projects = await prisma.project.findMany({
-    where: { userId: user.id },
+    where: {
+      OR: [
+        { ownerId: user.id },
+        {
+          members: {
+            some: { userId: user.id }
+          }
+        }
+      ]
+    },
     orderBy: { updatedAt: "desc" },
     take: 100,
     select: {
@@ -18,5 +27,5 @@ export default async function AppLayout({
     }
   });
 
-  return <AppShell projects={projects}>{children}</AppShell>;
+  return <AppShell projects={projects} currentUserLabel={user.email ?? user.name ?? user.id}>{children}</AppShell>;
 }

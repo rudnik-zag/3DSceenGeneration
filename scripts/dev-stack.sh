@@ -22,6 +22,8 @@ EXTRA_STOP_PORTS="${EXTRA_STOP_PORTS:-}"
 APP_PORT_SWEEP="${APP_PORT_SWEEP:-12}"
 REDIS_WAIT_TIMEOUT="${REDIS_WAIT_TIMEOUT:-30}"
 TRUNCATE_LOGS_ON_START="${TRUNCATE_LOGS_ON_START:-1}"
+AUTO_PNPM_INSTALL_ON_START="${AUTO_PNPM_INSTALL_ON_START:-1}"
+AUTO_PRISMA_GENERATE_ON_START="${AUTO_PRISMA_GENERATE_ON_START:-1}"
 CONDA_SH_PATH=""
 DOCKER_INFRA_ACTIVE=0
 
@@ -46,6 +48,8 @@ Environment variables:
   APP_PORT_SWEEP     Number of consecutive app ports to free starting from APP_PORT (default: 12)
   REDIS_WAIT_TIMEOUT Seconds to wait for Redis before failing startup (default: 30, 0=skip)
   TRUNCATE_LOGS_ON_START 1=clear per-service log on start, 0=append (default: 1)
+  AUTO_PNPM_INSTALL_ON_START 1=run pnpm install when critical modules are missing (default: 1)
+  AUTO_PRISMA_GENERATE_ON_START 1=run prisma generate before starting services (default: 1)
   COREPACK_HOME_DIR  Corepack home for pnpm fallback (default: /tmp/corepack)
 EOF
 }
@@ -95,6 +99,87 @@ resolve_pnpm_cmd() {
       echo "[dev-stack] ERROR: pnpm/corepack not found. Install Node.js with corepack."
       exit 1
     fi
+  fi
+}
+
+is_module_resolvable() {
+  local module_id="$1"
+  (
+    cd "${ROOT_DIR}"
+    node -e "require.resolve(process.argv[1])" "${module_id}" >/dev/null 2>&1
+  )
+}
+
+ensure_node_dependencies() {
+  if [[ "${AUTO_PNPM_INSTALL_ON_START}" != "1" ]]; then
+    return 0
+  fi
+
+  local needs_install=0
+  if [[ ! -d "${ROOT_DIR}/node_modules" ]]; then
+    needs_install=1
+  fi
+  if ! is_module_resolvable "next/package.json"; then
+    needs_install=1
+  fi
+  if ! is_module_resolvable "@prisma/client/package.json"; then
+    needs_install=1
+  fi
+  if ! is_module_resolvable "tsx/package.json"; then
+    needs_install=1
+  fi
+
+  if [[ "${needs_install}" == "1" ]]; then
+    echo "[dev-stack] Installing dependencies with pnpm"
+    (
+      cd "${ROOT_DIR}"
+      "${PNPM_CMD[@]}" install
+    )
+  fi
+}
+
+prisma_client_is_generated() {
+  (
+    cd "${ROOT_DIR}"
+    node -e '
+      try {
+        const { PrismaClient } = require("@prisma/client");
+        new PrismaClient();
+        process.exit(0);
+      } catch {
+        process.exit(1);
+      }
+    '
+  )
+}
+
+ensure_prisma_generated() {
+  if [[ "${AUTO_PRISMA_GENERATE_ON_START}" != "1" ]]; then
+    return 0
+  fi
+
+  if prisma_client_is_generated; then
+    echo "[dev-stack] Prisma client already generated"
+    return 0
+  fi
+
+  echo "[dev-stack] Generating Prisma client"
+  if ! (
+    cd "${ROOT_DIR}"
+    "${PNPM_CMD[@]}" prisma generate
+  ); then
+    echo "[dev-stack] Prisma generate failed; retrying with local XDG cache"
+    mkdir -p "${RUN_DIR}/cache"
+    (
+      cd "${ROOT_DIR}"
+      XDG_CACHE_HOME="${RUN_DIR}/cache" "${PNPM_CMD[@]}" prisma generate
+    )
+  fi
+
+  if ! prisma_client_is_generated; then
+    echo "[dev-stack] ERROR: Prisma client still not generated after 'pnpm prisma generate'."
+    echo "[dev-stack] Hint: run 'pnpm install && pnpm prisma generate' manually and check permission/network errors."
+    exit 1
   fi
 }
 
@@ -495,6 +580,8 @@ detect_app_url() {
 start_all() {
   ensure_conda
   resolve_pnpm_cmd
+  ensure_node_dependencies
+  ensure_prisma_generated
   stop_workspace_next_dev
   stop_workspace_worker
   start_infra

@@ -2,8 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 
+import { requireArtifactAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
+import { logAuditEventFromRequest } from "@/lib/security/audit";
+import { toApiErrorResponse } from "@/lib/security/errors";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
+import { worldTransformsGetQuerySchema, worldTransformsPostBodySchema } from "@/lib/validation/schemas";
 
 interface TransformRecord {
   position: [number, number, number];
@@ -113,78 +117,117 @@ async function resolveContext(artifactId: string) {
 }
 
 export async function GET(req: NextRequest) {
-  const artifactId = req.nextUrl.searchParams.get("artifactId")?.trim() ?? "";
-  if (!artifactId) {
-    return NextResponse.json({ error: "artifactId is required" }, { status: 400 });
-  }
-
-  const context = await resolveContext(artifactId);
-  if ("error" in context) return context.error;
-
   try {
-    const raw = await fs.readFile(context.transformsPath, "utf8");
-    const parsed = JSON.parse(raw) as ViewerTransformsPayload;
-    return NextResponse.json({
-      ok: true,
-      artifactId,
-      transformsPath: context.transformsPath,
-      payload: {
-        version: 1,
-        artifactId,
-        updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
-        meshes: sanitizeTransformsMap(parsed.meshes),
-        splats: sanitizeTransformsMap(parsed.splats),
-        sceneAlignment: sanitizeTransformRecord(parsed.sceneAlignment)
-      }
+    const parsedQuery = worldTransformsGetQuerySchema.safeParse({
+      artifactId: req.nextUrl.searchParams.get("artifactId")
     });
-  } catch {
-    return NextResponse.json({
-      ok: true,
-      artifactId,
-      transformsPath: context.transformsPath,
-      payload: {
-        version: 1,
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: "validation_error", message: "artifactId is required", details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const artifactId = parsedQuery.data.artifactId;
+    const access = await requireArtifactAccess(artifactId, "viewer");
+    const context = await resolveContext(artifactId);
+    if ("error" in context) return context.error;
+
+    try {
+      const raw = await fs.readFile(context.transformsPath, "utf8");
+      const parsed = JSON.parse(raw) as ViewerTransformsPayload;
+      await logAuditEventFromRequest(req, {
+        action: "viewer_transforms_read",
+        resourceType: "artifact",
+        resourceId: artifactId,
+        projectId: access.project.id,
+        userId: access.user.id
+      });
+      return NextResponse.json({
+        ok: true,
         artifactId,
-        updatedAt: new Date().toISOString(),
-        meshes: {},
-        splats: {},
-        sceneAlignment: null
-      }
-    });
+        payload: {
+          version: 1,
+          artifactId,
+          updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+          meshes: sanitizeTransformsMap(parsed.meshes),
+          splats: sanitizeTransformsMap(parsed.splats),
+          sceneAlignment: sanitizeTransformRecord(parsed.sceneAlignment)
+        }
+      });
+    } catch {
+      await logAuditEventFromRequest(req, {
+        action: "viewer_transforms_read",
+        resourceType: "artifact",
+        resourceId: artifactId,
+        projectId: access.project.id,
+        userId: access.user.id
+      });
+      return NextResponse.json({
+        ok: true,
+        artifactId,
+        payload: {
+          version: 1,
+          artifactId,
+          updatedAt: new Date().toISOString(),
+          meshes: {},
+          splats: {},
+          sceneAlignment: null
+        }
+      });
+    }
+  } catch (error) {
+    return toApiErrorResponse(error, "Failed to load viewer transforms");
   }
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
-  const artifactId = typeof body.artifactId === "string" ? body.artifactId.trim() : "";
-  if (!artifactId) {
-    return NextResponse.json({ error: "artifactId is required" }, { status: 400 });
+  try {
+    const body = await req.json().catch(() => ({}));
+    const parsedBody = worldTransformsPostBodySchema.safeParse(body);
+    if (!parsedBody.success) {
+      return NextResponse.json(
+        { error: "validation_error", message: "Invalid transforms payload", details: parsedBody.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const artifactId = parsedBody.data.artifactId;
+    const access = await requireArtifactAccess(artifactId, "editor");
+    const context = await resolveContext(artifactId);
+    if ("error" in context) return context.error;
+
+    const meshes = sanitizeTransformsMap(parsedBody.data.meshes);
+    const splats = sanitizeTransformsMap(parsedBody.data.splats);
+    const sceneAlignment = sanitizeTransformRecord(parsedBody.data.sceneAlignment);
+    const payload: ViewerTransformsPayload = {
+      version: 1,
+      artifactId,
+      updatedAt: new Date().toISOString(),
+      meshes,
+      splats,
+      sceneAlignment
+    };
+
+    await fs.mkdir(path.dirname(context.transformsPath), { recursive: true });
+    await fs.writeFile(context.transformsPath, JSON.stringify(payload, null, 2), "utf8");
+
+    await logAuditEventFromRequest(req, {
+      action: "viewer_transforms_update",
+      resourceType: "artifact",
+      resourceId: artifactId,
+      projectId: access.project.id,
+      userId: access.user.id
+    });
+
+    return NextResponse.json({
+      ok: true,
+      artifactId,
+      savedMeshCount: Object.keys(meshes).length,
+      savedSplatCount: Object.keys(splats).length,
+      savedSceneAlignment: Boolean(sceneAlignment)
+    });
+  } catch (error) {
+    return toApiErrorResponse(error, "Failed to save viewer transforms");
   }
-
-  const context = await resolveContext(artifactId);
-  if ("error" in context) return context.error;
-
-  const meshes = sanitizeTransformsMap(body.meshes);
-  const splats = sanitizeTransformsMap(body.splats);
-  const sceneAlignment = sanitizeTransformRecord(body.sceneAlignment);
-  const payload: ViewerTransformsPayload = {
-    version: 1,
-    artifactId,
-    updatedAt: new Date().toISOString(),
-    meshes,
-    splats,
-    sceneAlignment
-  };
-
-  await fs.mkdir(path.dirname(context.transformsPath), { recursive: true });
-  await fs.writeFile(context.transformsPath, JSON.stringify(payload, null, 2), "utf8");
-
-  return NextResponse.json({
-    ok: true,
-    artifactId,
-    transformsPath: context.transformsPath,
-    savedMeshCount: Object.keys(meshes).length,
-    savedSplatCount: Object.keys(splats).length,
-    savedSceneAlignment: Boolean(sceneAlignment)
-  });
 }

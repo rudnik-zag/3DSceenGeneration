@@ -23,6 +23,7 @@ interface RunItem {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  creator?: { id: string; name: string | null; email: string | null } | null;
   graph: { id: string; name: string; version: number };
   artifacts: ArtifactItem[];
 }
@@ -94,6 +95,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
                 <TableHead>Run</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Progress</TableHead>
+                <TableHead>Created by</TableHead>
                 <TableHead>Graph</TableHead>
                 <TableHead>Artifacts</TableHead>
                 <TableHead>Created</TableHead>
@@ -107,6 +109,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
                     <Badge variant={statusVariant[run.status]}>{run.status}</Badge>
                   </TableCell>
                   <TableCell>{run.progress}%</TableCell>
+                  <TableCell>{run.creator?.name ?? run.creator?.email ?? "Unknown"}</TableCell>
                   <TableCell>
                     {run.graph.name} <span className="text-xs text-muted-foreground">v{run.graph.version}</span>
                   </TableCell>
