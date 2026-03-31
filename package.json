@@ -12,6 +12,7 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "analytics:views": "bash scripts/apply-analytics-views.sh",
     "seed": "pnpm db:push && pnpm db:seed",
     "worker": "tsx worker/index.ts"
   },

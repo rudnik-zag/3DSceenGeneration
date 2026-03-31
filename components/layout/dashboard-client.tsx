@@ -63,7 +63,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
         body: JSON.stringify({ name: projectName })
       });
       if (!res.ok) {
-        throw new Error("Failed to create project");
+        const payload = (await res.json().catch(() => null)) as
+          | { message?: string; error?: string }
+          | null;
+        const message =
+          payload?.message ??
+          (payload?.error ? `Create project failed: ${payload.error}` : "Failed to create project");
+        throw new Error(message);
       }
       const data = await res.json();
       setProjects((prev) => [

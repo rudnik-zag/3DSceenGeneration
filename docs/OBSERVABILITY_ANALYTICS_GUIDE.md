@@ -47,10 +47,24 @@ Metabase is the fastest way to visualize your Postgres data.
 ### Start Metabase
 
 ```bash
-docker run -d --name metabase -p 3001:3000 metabase/metabase
+bash scripts/metabase-start.sh
 ```
 
 Open `http://localhost:3001`, connect your Postgres (`DATABASE_URL`), then create questions.
+
+Full setup + dashboard workflow:
+- `docs/METABASE_ANALYTICS_PLAYBOOK.md`
+- `docs/sql/METABASE_QUERIES.sql`
+
+Install prebuilt analytics views:
+
+```bash
+pnpm analytics:views
+```
+
+Then use:
+- `scripts/sql/analytics_views.sql`
+- `docs/sql/METABASE_VIEW_QUERIES.sql`
 
 ### Useful SQL questions
 
