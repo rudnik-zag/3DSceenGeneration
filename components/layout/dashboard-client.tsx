@@ -21,6 +21,10 @@ import { toast } from "@/hooks/use-toast";
 export interface ProjectItem {
   id: string;
   name: string;
+  previewArtifactId?: string | null;
+  previewStorageKey?: string | null;
+  previewMimeType?: string | null;
+  previewUpdatedAt?: string | Date | null;
   createdAt: string | Date;
   updatedAt: string | Date;
   _count: {
@@ -31,6 +35,7 @@ export interface ProjectItem {
 
 export function DashboardClient({ initialProjects }: { initialProjects: ProjectItem[] }) {
   const [projects, setProjects] = useState(initialProjects);
+  const [brokenPreviewIds, setBrokenPreviewIds] = useState<Record<string, true>>({});
   const [name, setName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -75,6 +80,10 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
       setProjects((prev) => [
         {
           ...data.project,
+          previewArtifactId: null,
+          previewStorageKey: null,
+          previewMimeType: null,
+          previewUpdatedAt: null,
           _count: { graphs: 1, runs: 0 }
         },
         ...prev
@@ -193,7 +202,28 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
             className="group rounded-2xl border-border/70 panel-blur transition duration-200 hover:-translate-y-0.5 hover:border-primary/40"
           >
             <CardHeader>
-              <div className="mb-2 h-40 rounded-xl border border-dashed border-border/90 bg-black/30" />
+              {project.previewStorageKey && !brokenPreviewIds[project.id] ? (
+                <div className="mb-2 h-40 overflow-hidden rounded-xl border border-border/70 bg-black/30">
+                  <img
+                    src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
+                    alt={`${project.name} preview`}
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                    onError={() =>
+                      setBrokenPreviewIds((prev) =>
+                        prev[project.id]
+                          ? prev
+                          : {
+                              ...prev,
+                              [project.id]: true
+                            }
+                      )
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="mb-2 h-40 rounded-xl border border-dashed border-border/90 bg-black/30" />
+              )}
               <CardTitle className="line-clamp-1 text-white">{project.name}</CardTitle>
               <CardDescription>
                 {project._count.graphs} graph versions • {project._count.runs} runs
