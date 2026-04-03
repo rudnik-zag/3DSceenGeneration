@@ -1050,6 +1050,7 @@ export function UnifiedWorldViewer({
   const selectedRef = useRef<THREE.Object3D | null>(null);
   const selectedBoxRef = useRef<THREE.Object3D | null>(null);
   const requestRef = useRef<number | null>(null);
+  const cameraTweenRef = useRef<number | null>(null);
   const rootRef = useRef<THREE.Group | null>(null);
   const alignmentRootRef = useRef<THREE.Group | null>(null);
   const transformControlsRef = useRef<InstanceType<typeof TransformControls> | null>(null);
@@ -1107,6 +1108,8 @@ export function UnifiedWorldViewer({
   const undoStackRef = useRef<TransformHistorySnapshot[]>([]);
   const redoStackRef = useRef<TransformHistorySnapshot[]>([]);
   const applyingHistoryRef = useRef(false);
+  const uiIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shortcutHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [navMode, setNavMode] = useState<NavigationMode>("orbit");
   const [viewMode, setViewMode] = useState<ViewMode>("default");
@@ -1162,6 +1165,8 @@ export function UnifiedWorldViewer({
     normalizeEnvironmentConfig(manifest.environment)
   );
   const [hdriUrlDraft, setHdriUrlDraft] = useState<string>(() => normalizeEnvironmentConfig(manifest.environment).hdriUrl ?? "");
+  const [uiActive, setUiActive] = useState(true);
+  const [shortcutHint, setShortcutHint] = useState<string | null>(null);
 
   const preferredRuntimeOrder = useMemo(
     () => getRuntimeOrderForPreference(getSplatRuntimePreference()),
@@ -1255,6 +1260,62 @@ export function UnifiedWorldViewer({
   const canSelectExistingGroup = Boolean(activeGroupMeta && activeGroupMeta.memberCount >= 2);
   const canAutoAlignSelected = selectedKind === "mesh" || selectedKind === "splat";
 
+  const pushShortcutHint = useCallback((label: string) => {
+    setShortcutHint(label);
+    if (shortcutHintTimerRef.current) {
+      clearTimeout(shortcutHintTimerRef.current);
+    }
+    shortcutHintTimerRef.current = setTimeout(() => {
+      setShortcutHint(null);
+    }, 1300);
+  }, []);
+
+  const markUiInteraction = useCallback(() => {
+    setUiActive(true);
+    if (uiIdleTimerRef.current) {
+      clearTimeout(uiIdleTimerRef.current);
+    }
+    uiIdleTimerRef.current = setTimeout(() => {
+      setUiActive(false);
+    }, 2000);
+  }, []);
+
+  const animateCameraTo = useCallback(
+    (nextPosition: THREE.Vector3, nextTarget: THREE.Vector3, duration = 280) => {
+      const camera = cameraRef.current;
+      const orbit = orbitRef.current;
+      if (!camera || !orbit) return;
+
+      if (cameraTweenRef.current !== null) {
+        cancelAnimationFrame(cameraTweenRef.current);
+        cameraTweenRef.current = null;
+      }
+
+      const startPosition = camera.position.clone();
+      const startTarget = orbit.target.clone();
+      const startTime = performance.now();
+      const easeOut = (value: number) => 1 - Math.pow(1 - value, 3);
+
+      const tick = (now: number) => {
+        const elapsed = now - startTime;
+        const t = Math.min(1, duration <= 0 ? 1 : elapsed / duration);
+        const eased = easeOut(t);
+        camera.position.lerpVectors(startPosition, nextPosition, eased);
+        orbit.target.lerpVectors(startTarget, nextTarget, eased);
+        orbit.update();
+
+        if (t < 1) {
+          cameraTweenRef.current = requestAnimationFrame(tick);
+        } else {
+          cameraTweenRef.current = null;
+        }
+      };
+
+      cameraTweenRef.current = requestAnimationFrame(tick);
+    },
+    []
+  );
+
   const selectObjectRangeFromAnchor = useCallback(
     (targetKey: string) => {
       const targetIndex = orderedObjectKeys.indexOf(targetKey);
@@ -1279,6 +1340,19 @@ export function UnifiedWorldViewer({
     if (activeSplatRuntimes.length === 0) return "none";
     return activeSplatRuntimes.join(", ");
   }, [activeSplatRuntimes]);
+
+  const quickMeshOption = useMemo(
+    () => fileMenu?.options.find((option) => option.kind.toLowerCase().includes("mesh")) ?? null,
+    [fileMenu?.options]
+  );
+  const quickSplatOption = useMemo(
+    () =>
+      fileMenu?.options.find((option) => {
+        const kind = option.kind.toLowerCase();
+        return kind.includes("splat") || kind.includes("point");
+      }) ?? null,
+    [fileMenu?.options]
+  );
 
   const isPersistableArtifact = Boolean(
     typeof manifest.artifactId === "string" &&
@@ -1473,6 +1547,15 @@ export function UnifiedWorldViewer({
   }, [revokeLocalHdriUrl]);
 
   useEffect(() => {
+    return () => {
+      if (cameraTweenRef.current !== null) {
+        cancelAnimationFrame(cameraTweenRef.current);
+        cameraTweenRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     navModeRef.current = navMode;
   }, [navMode]);
 
@@ -1536,6 +1619,32 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     removedSplatSourceKeysRef.current = new Set(removedSplatSourceKeys);
   }, [removedSplatSourceKeys]);
+
+  useEffect(() => {
+    markUiInteraction();
+    const onAnyInteraction = () => markUiInteraction();
+    window.addEventListener("pointerdown", onAnyInteraction);
+    window.addEventListener("pointermove", onAnyInteraction);
+    window.addEventListener("wheel", onAnyInteraction, { passive: true });
+    window.addEventListener("touchstart", onAnyInteraction, { passive: true });
+    window.addEventListener("keydown", onAnyInteraction);
+
+    return () => {
+      window.removeEventListener("pointerdown", onAnyInteraction);
+      window.removeEventListener("pointermove", onAnyInteraction);
+      window.removeEventListener("wheel", onAnyInteraction);
+      window.removeEventListener("touchstart", onAnyInteraction);
+      window.removeEventListener("keydown", onAnyInteraction);
+      if (uiIdleTimerRef.current) {
+        clearTimeout(uiIdleTimerRef.current);
+        uiIdleTimerRef.current = null;
+      }
+      if (shortcutHintTimerRef.current) {
+        clearTimeout(shortcutHintTimerRef.current);
+        shortcutHintTimerRef.current = null;
+      }
+    };
+  }, [markUiInteraction]);
 
   useEffect(() => {
     if (openPanel === "objects") return;
@@ -2997,14 +3106,12 @@ export function UnifiedWorldViewer({
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 1);
     const distance = maxDim * 1.8;
-
-    camera.position.copy(center.clone().add(new THREE.Vector3(distance, distance * 0.75, distance)));
+    const nextPosition = center.clone().add(new THREE.Vector3(distance, distance * 0.75, distance));
     camera.near = Math.max(0.0001, distance / 3000);
     camera.far = Math.max(1000, distance * 5000);
     camera.updateProjectionMatrix();
-    orbit.target.copy(center);
-    orbit.update();
-  }, []);
+    animateCameraTo(nextPosition, center, 290);
+  }, [animateCameraTo]);
 
   const applyViewModeProfile = useCallback(
     (mode: ViewMode) => {
@@ -3049,9 +3156,7 @@ export function UnifiedWorldViewer({
   );
 
   const resetCamera = useCallback(() => {
-    const camera = cameraRef.current;
-    const orbit = orbitRef.current;
-    if (!camera || !orbit) return;
+    if (!cameraRef.current || !orbitRef.current) return;
 
     if (viewModeRef.current === "modelviewer") {
       applyViewModeProfile("modelviewer");
@@ -3062,15 +3167,15 @@ export function UnifiedWorldViewer({
     const position = preset?.position ?? [4, 3, 4];
     const target = preset?.target ?? [0, 0, 0];
 
-    camera.position.set(position[0], position[1], position[2]);
-    orbit.target.set(target[0], target[1], target[2]);
-    orbit.update();
-  }, [applyViewModeProfile, manifest.camera]);
+    animateCameraTo(
+      new THREE.Vector3(position[0], position[1], position[2]),
+      new THREE.Vector3(target[0], target[1], target[2]),
+      280
+    );
+  }, [animateCameraTo, applyViewModeProfile, manifest.camera]);
 
   const fitSelection = useCallback(() => {
-    const camera = cameraRef.current;
-    const orbit = orbitRef.current;
-    if (!camera || !orbit) return;
+    if (!cameraRef.current || !orbitRef.current) return;
 
     let box: THREE.Box3 | null = null;
     if (selectedKind === "group") {
@@ -3087,10 +3192,9 @@ export function UnifiedWorldViewer({
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 0.5);
     const distance = maxDim * 2.2;
-    camera.position.copy(center.clone().add(new THREE.Vector3(distance, distance * 0.6, distance)));
-    orbit.target.copy(center);
-    orbit.update();
-  }, [selectedKind]);
+    const nextPosition = center.clone().add(new THREE.Vector3(distance, distance * 0.6, distance));
+    animateCameraTo(nextPosition, center, 250);
+  }, [animateCameraTo, selectedKind]);
 
   useEffect(() => {
     fitSelectionRef.current = fitSelection;
@@ -3348,12 +3452,15 @@ export function UnifiedWorldViewer({
           }
         } else if (event.code === "Digit1") {
           applyTransformMode("translate");
+          pushShortcutHint("Gizmo: Translate");
           event.preventDefault();
         } else if (event.code === "Digit2") {
           applyTransformMode("rotate");
+          pushShortcutHint("Gizmo: Rotate");
           event.preventDefault();
         } else if (event.code === "Digit3") {
           applyTransformMode("scale");
+          pushShortcutHint("Gizmo: Scale");
           event.preventDefault();
         } else if (event.code === "Escape") {
           if (activeGroupRef.current && selectedKindRef.current === "group") {
@@ -3361,21 +3468,27 @@ export function UnifiedWorldViewer({
           } else {
             setSelectedObject(null);
           }
+          pushShortcutHint("Selection cleared");
           event.preventDefault();
         } else if (event.code === "KeyF" && Boolean(selectedKindRef.current)) {
           fitSelectionRef.current();
+          pushShortcutHint("Focused selection");
           event.preventDefault();
         } else if (navModeRef.current !== "fly" && event.code === "KeyW") {
           applyTransformMode("translate");
+          pushShortcutHint("Gizmo: Translate");
           event.preventDefault();
         } else if (navModeRef.current !== "fly" && event.code === "KeyE") {
           applyTransformMode("rotate");
+          pushShortcutHint("Gizmo: Rotate");
           event.preventDefault();
         } else if (navModeRef.current !== "fly" && event.code === "KeyR") {
           applyTransformMode("scale");
+          pushShortcutHint("Gizmo: Scale");
           event.preventDefault();
         } else if (navModeRef.current !== "fly" && event.code === "KeyQ") {
           toggleTransformSpace();
+          pushShortcutHint(`Space: ${transformSpaceRef.current === "world" ? "World" : "Local"}`);
           event.preventDefault();
         }
       }
@@ -3745,6 +3858,18 @@ export function UnifiedWorldViewer({
       setSelectedObject(hitItem.object, hitItem.kind);
       objectListSelectionAnchorRef.current = buildObjectItemKey(hitItem.kind, hitItem.id);
     };
+    const onDoubleClick = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      const hitItem = findObjectAtClientPoint(event.clientX, event.clientY);
+      if (!hitItem && !selectedKindRef.current) return;
+      if (hitItem) {
+        setSelectedObject(hitItem.object, hitItem.kind);
+        objectListSelectionAnchorRef.current = buildObjectItemKey(hitItem.kind, hitItem.id);
+      }
+      fitSelectionRef.current();
+      pushShortcutHint("Focused selection");
+      event.preventDefault();
+    };
     const onPointerMove = (event: PointerEvent) => {
       if (isRectSelecting) {
         if (rectSelectPointerId !== null && event.pointerId !== rectSelectPointerId) return;
@@ -3819,6 +3944,7 @@ export function UnifiedWorldViewer({
       event.preventDefault();
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown, true);
+    renderer.domElement.addEventListener("dblclick", onDoubleClick);
     renderer.domElement.addEventListener("contextmenu", onCanvasContextMenu);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -4593,6 +4719,7 @@ export function UnifiedWorldViewer({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown, true);
+      renderer.domElement.removeEventListener("dblclick", onDoubleClick);
       renderer.domElement.removeEventListener("contextmenu", onCanvasContextMenu);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
@@ -4683,6 +4810,7 @@ export function UnifiedWorldViewer({
     setSelectedGroup,
     setSelectedObject,
     preferredRuntimeOrder,
+    pushShortcutHint,
     queueAutoAlignScene,
     splatLoadProfile,
     splatDensityApplied,
@@ -4690,6 +4818,17 @@ export function UnifiedWorldViewer({
     undoLastTransform,
     updateHudFromHandles
   ]);
+
+  const overlayVisible =
+    uiActive ||
+    openPanel !== "none" ||
+    toolMenuOpen ||
+    viewMenuOpen ||
+    loading ||
+    Boolean(error) ||
+    Boolean(runtimeNotice) ||
+    Boolean(objectContextMenu) ||
+    Boolean(artifactContextMenu);
 
   useEffect(() => {
     if (loading) return;
@@ -4993,10 +5132,44 @@ export function UnifiedWorldViewer({
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#04060d]">
-      <div className="absolute left-3 top-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-black/55 p-2 backdrop-blur-md">
+      <div
+        className={cn(
+          "absolute left-3 top-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-xl studio-toolbar p-2 motion-panel",
+          overlayVisible ? "opacity-100" : "pointer-events-none opacity-0"
+        )}
+      >
+        {fileMenu ? (
+          <div className="inline-flex items-center rounded-lg studio-chip p-1">
+            <Button
+              size="sm"
+              variant={quickMeshOption?.selected ? "default" : "ghost"}
+              className="h-7 rounded-md px-2 text-xs"
+              onClick={() => {
+                if (!quickMeshOption) return;
+                window.location.assign(quickMeshOption.href);
+              }}
+              disabled={!quickMeshOption}
+            >
+              Mesh
+            </Button>
+            <Button
+              size="sm"
+              variant={quickSplatOption?.selected ? "default" : "ghost"}
+              className="h-7 rounded-md px-2 text-xs"
+              onClick={() => {
+                if (!quickSplatOption) return;
+                window.location.assign(quickSplatOption.href);
+              }}
+              disabled={!quickSplatOption}
+            >
+              Splat
+            </Button>
+          </div>
+        ) : null}
+
         <DropdownMenu open={toolMenuOpen} onOpenChange={setToolMenuOpen}>
           <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="outline" className="rounded-xl">
+            <Button size="sm" variant="outline" className="h-8 rounded-lg px-2.5 text-xs">
               Tool
             </Button>
           </DropdownMenuTrigger>
@@ -5034,7 +5207,7 @@ export function UnifiedWorldViewer({
         </DropdownMenu>
         <DropdownMenu open={viewMenuOpen} onOpenChange={setViewMenuOpen}>
           <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="outline" className="rounded-xl">
+            <Button size="sm" variant="outline" className="h-8 rounded-lg px-2.5 text-xs">
               View
             </Button>
           </DropdownMenuTrigger>
@@ -5071,18 +5244,41 @@ export function UnifiedWorldViewer({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <div className="rounded-full border border-border/70 bg-background/40 px-2 py-1 text-[11px] text-zinc-300">
-          Runtime: {activeRuntimeLabel} ({configuredRuntimeLabel})
-        </div>
-        <div className="rounded-full border border-border/70 bg-background/40 px-2 py-1 text-[11px] text-zinc-300">
-          Gizmo: {transformMode} ({transformSpace}) • 1/2/3
-        </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-1">
+          <div className="inline-flex items-center rounded-lg border border-border/70 bg-background/35 p-1">
+            <Button
+              size="sm"
+              variant={transformMode === "translate" ? "default" : "ghost"}
+              className="h-7 w-7 rounded-md px-0 text-[11px]"
+              onClick={() => applyTransformMode("translate")}
+              title="Translate (1)"
+            >
+              T
+            </Button>
+            <Button
+              size="sm"
+              variant={transformMode === "rotate" ? "default" : "ghost"}
+              className="h-7 w-7 rounded-md px-0 text-[11px]"
+              onClick={() => applyTransformMode("rotate")}
+              title="Rotate (2)"
+            >
+              R
+            </Button>
+            <Button
+              size="sm"
+              variant={transformMode === "scale" ? "default" : "ghost"}
+              className="h-7 w-7 rounded-md px-0 text-[11px]"
+              onClick={() => applyTransformMode("scale")}
+              title="Scale (3)"
+            >
+              S
+            </Button>
+          </div>
           {fileMenu ? (
             <Button
               size="sm"
               variant={openPanel === "file" ? "default" : "outline"}
-              className="rounded-xl"
+              className="h-8 rounded-lg px-2.5 text-xs"
               onClick={() => setOpenPanel((prev) => (prev === "file" ? "none" : "file"))}
             >
               File
@@ -5091,40 +5287,54 @@ export function UnifiedWorldViewer({
           <Button
             size="sm"
             variant={openPanel === "settings" ? "default" : "outline"}
-            className="rounded-xl"
+            className="h-8 rounded-lg px-2.5 text-xs"
             onClick={() => setOpenPanel((prev) => (prev === "settings" ? "none" : "settings"))}
           >
-            Settings
+            Env
           </Button>
           <Button
             size="sm"
             variant={openPanel === "hud" ? "default" : "outline"}
-            className="rounded-xl"
+            className="h-8 rounded-lg px-2.5 text-xs"
             onClick={() => setOpenPanel((prev) => (prev === "hud" ? "none" : "hud"))}
           >
-            HUD
+            Info
           </Button>
           <Button
             size="sm"
             variant={openPanel === "objects" ? "default" : "outline"}
-            className="rounded-xl"
+            className="h-8 rounded-lg px-2.5 text-xs"
             onClick={() => setOpenPanel((prev) => (prev === "objects" ? "none" : "objects"))}
           >
-            Objects
+            Scene
           </Button>
           <Button
             size="sm"
             variant={openPanel === "transform" ? "default" : "outline"}
-            className="rounded-xl"
+            className="h-8 rounded-lg px-2.5 text-xs"
             onClick={() => setOpenPanel((prev) => (prev === "transform" ? "none" : "transform"))}
           >
-            Transform
+            Xform
           </Button>
         </div>
       </div>
 
+      <div
+        className={cn(
+          "pointer-events-none absolute left-3 top-[52px] z-30 flex items-center gap-2 motion-panel",
+          overlayVisible ? "opacity-100" : "opacity-0"
+        )}
+      >
+        <div className="rounded-full studio-chip px-2 py-0.5 text-[11px] backdrop-blur">
+          Runtime: {activeRuntimeLabel}
+        </div>
+        <div className="rounded-full studio-chip px-2 py-0.5 text-[11px] backdrop-blur">
+          Gizmo: {transformMode} / {transformSpace}
+        </div>
+      </div>
+
       {openPanel === "file" && fileMenu ? (
-        <div className="absolute right-3 top-16 z-30 w-[360px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+        <div className="absolute right-3 top-[54px] z-30 w-[360px] rounded-xl studio-panel p-3 panel-fade-in">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">File</div>
           <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">
             {fileMenu.selectedKind ? (
@@ -5271,7 +5481,7 @@ export function UnifiedWorldViewer({
       ) : null}
 
       {openPanel === "settings" ? (
-        <div className="absolute left-3 bottom-3 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+        <div className="absolute left-3 bottom-3 z-30 w-[300px] rounded-xl studio-panel p-3 panel-fade-in">
           <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300">Settings</p>
           <div className="mb-3 rounded-md border border-border/50 bg-background/20 p-1.5">
             <p className="mb-1 text-xs uppercase tracking-[0.14em] text-zinc-400">View Mode</p>
@@ -5380,7 +5590,7 @@ export function UnifiedWorldViewer({
       ) : null}
 
       {openPanel === "hud" ? (
-        <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 text-xs text-zinc-200 backdrop-blur-md">
+        <div className="absolute right-3 top-[54px] z-30 w-[300px] rounded-xl studio-panel p-3 text-xs text-zinc-200 panel-fade-in">
           <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">HUD</div>
           <div className="mt-2 space-y-1">
             <div>FPS: {fps}</div>
@@ -5407,7 +5617,7 @@ export function UnifiedWorldViewer({
       ) : null}
 
       {openPanel === "objects" ? (
-        <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+        <div className="absolute right-3 top-[54px] z-30 w-[300px] rounded-xl studio-panel p-3 panel-fade-in">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
           <div className="mb-2 rounded-md border border-border/50 bg-background/20 p-1.5">
             <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Grouping</div>
@@ -5622,7 +5832,7 @@ export function UnifiedWorldViewer({
       ) : null}
 
       {openPanel === "transform" ? (
-        <div className="absolute right-3 top-16 z-30 w-[300px] rounded-xl border border-border/70 bg-black/55 p-3 backdrop-blur-md">
+        <div className="absolute right-3 top-[54px] z-30 w-[300px] rounded-xl studio-panel p-3 panel-fade-in">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Transform</div>
           <div className="mb-2 rounded-md border border-border/50 bg-background/20 p-1.5">
             <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Scene Alignment</div>
@@ -5824,10 +6034,18 @@ export function UnifiedWorldViewer({
       {runtimeNotice ? (
         <div
           className={cn(
-            "absolute left-3 top-32 z-30 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+            "absolute left-3 top-32 z-30 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200",
+            "motion-panel",
+            overlayVisible ? "opacity-100" : "opacity-0"
           )}
         >
           {runtimeNotice}
+        </div>
+      ) : null}
+
+      {shortcutHint ? (
+        <div className="absolute left-1/2 top-[86px] z-40 -translate-x-1/2 rounded-full border border-cyan-300/35 bg-cyan-500/10 px-3 py-1 text-[11px] text-cyan-100 panel-fade-in">
+          {shortcutHint}
         </div>
       ) : null}
 
@@ -5853,7 +6071,12 @@ export function UnifiedWorldViewer({
 
       <div ref={containerRef} className="h-full w-full" />
 
-      <div className="pointer-events-none absolute bottom-3 right-3 z-20 rounded-lg border border-white/10 bg-black/55 px-2 py-1 text-[11px] text-zinc-300">
+      <div
+        className={cn(
+          "pointer-events-none absolute bottom-3 right-3 z-20 rounded-lg border border-white/10 bg-black/55 px-2 py-1 text-[11px] text-zinc-300 motion-panel",
+          overlayVisible ? "opacity-100" : "opacity-0"
+        )}
+      >
         <Camera className="mr-1 inline h-3.5 w-3.5" />
         Unified viewer
       </div>

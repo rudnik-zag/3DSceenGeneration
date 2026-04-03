@@ -124,22 +124,34 @@ export function AppShell({
                 {open ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
               </Button>
             ) : null}
-            <Link href="/app" className="text-sm font-semibold tracking-wide text-foreground md:text-base">
-              3D-AI Canvas
+            <Link href="/app" className="inline-flex items-center gap-2 text-sm font-semibold tracking-wide text-foreground md:text-base">
+              TribalAI
+              <span className="rounded-full studio-chip px-2 py-0.5 text-[10px] font-medium">
+                Studio
+              </span>
             </Link>
           </div>
 
           <div className="flex items-center gap-2">
             <span className="hidden text-xs text-zinc-400 md:inline">{currentUserLabel}</span>
+            {!isImmersiveRoute ? (
+              <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
+                <Link href="/billing">Billing</Link>
+              </Button>
+            ) : null}
             <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
-              <Link href="/billing">Billing</Link>
+              <Link href="/settings">{isImmersiveRoute ? "Prefs" : "Settings"}</Link>
             </Button>
-            <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
-              <Link href="/settings">Settings</Link>
-            </Button>
-            <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
-              <Link href="/">Landing</Link>
-            </Button>
+            {!isImmersiveRoute ? (
+              <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
+                <Link href="/">Landing</Link>
+              </Button>
+            ) : null}
+            {isImmersiveRoute ? (
+              <Button variant="ghost" size="sm" className="rounded-xl text-xs md:text-sm" asChild>
+                <Link href="/app">Projects</Link>
+              </Button>
+            ) : null}
             <Button
               variant="outline"
               size="sm"

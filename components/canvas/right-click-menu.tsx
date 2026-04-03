@@ -190,7 +190,7 @@ function RightClickMenuImpl({ x, y, items, onClose }: RightClickMenuProps) {
   }, [activePath, columns, onClose]);
 
   return (
-    <div ref={rootRef} className="absolute z-40" style={{ left: resolvedPosition.x, top: resolvedPosition.y }}>
+    <div ref={rootRef} className="absolute z-40 panel-fade-in" style={{ left: resolvedPosition.x, top: resolvedPosition.y }}>
       <div className="flex items-start gap-1">
         {columns.map((columnItems, depth) => (
           <div
@@ -213,7 +213,7 @@ function RightClickMenuImpl({ x, y, items, onClose }: RightClickMenuProps) {
                   key={entry.id}
                   type="button"
                   disabled={entry.disabled}
-                  className={`flex h-7 w-full items-center justify-between rounded px-2 text-left text-[13px] leading-none transition ${baseClass} ${disabledClass}`}
+                  className={`flex h-7 w-full items-center justify-between rounded px-2 text-left text-[13px] leading-none motion-fast transition ${baseClass} ${disabledClass}`}
                   onMouseEnter={() => {
                     setActivePath((prev) => {
                       const next = prev.slice(0, depth + 1);
