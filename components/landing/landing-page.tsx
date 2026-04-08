@@ -8,7 +8,14 @@ import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { toast } from "@/hooks/use-toast";
+
+interface LandingUserProject {
+  id: string;
+  name: string;
+  updatedAt: string;
+  runs: number;
+  previewStorageKey: string | null;
+}
 
 const featureCards = [
   {
@@ -47,38 +54,24 @@ const fadeUp = {
 
 export function LandingPage({
   isAuthenticated = false,
-  userLabel = null
+  userLabel = null,
+  userProjects = []
 }: {
   isAuthenticated?: boolean;
   userLabel?: string | null;
+  userProjects?: LandingUserProject[];
 }) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [promptValue, setPromptValue] = useState("");
-  const [promptFocused, setPromptFocused] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
   const [loadedCards, setLoadedCards] = useState<Record<string, true>>({});
+  const [loadedProjectPreviews, setLoadedProjectPreviews] = useState<Record<string, true>>({});
 
   const categories = useMemo(() => ["All", ...Array.from(new Set(galleryItems.map((item) => item.category)))], []);
   const filteredGallery = useMemo(
     () => (activeCategory === "All" ? galleryItems : galleryItems.filter((item) => item.category === activeCategory)),
     [activeCategory]
   );
-
-  const openDemo = async () => {
-    const res = await fetch("/api/demo/open", { method: "POST" });
-    if (res.status === 401) {
-      router.push("/login?next=/app");
-      return;
-    }
-    if (!res.ok) {
-      toast({ title: "Could not open demo", description: "Try seeding the database first." });
-      return;
-    }
-
-    const data = await res.json();
-    router.push(`/app/p/${data.projectId}/canvas`);
-  };
 
   return (
     <main className="relative min-h-screen overflow-x-hidden bg-[#030915]">
@@ -161,7 +154,6 @@ export function LandingPage({
                   <Button variant="outline" className="border-[#3d4f80] bg-[#152347] text-[#d0dcff] hover:bg-[#1e315f]" asChild><Link href="/login">Login</Link></Button>
                 </>
               )}
-              <Button variant="secondary" className="bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={openDemo}>Open demo</Button>
             </div>
           </div>
         ) : null}
@@ -181,32 +173,6 @@ export function LandingPage({
                 Design, run, and inspect AI-native 3D workflows in one continuous cinematic workspace.
               </p>
 
-              <motion.div
-                className="mt-7 rounded-2xl border border-[#334068] bg-[#101a34]/90 p-2"
-                animate={{
-                  scale: promptFocused ? 1.015 : 1,
-                  boxShadow:
-                    promptFocused || promptValue.trim().length > 0
-                      ? "0 0 0 1px rgba(86,190,145,0.32), 0 22px 62px rgba(10,18,28,0.6)"
-                      : "0 14px 40px rgba(0,0,0,0.38)"
-                }}
-                transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
-              >
-                <div className="flex flex-col gap-2 md:flex-row">
-                  <input
-                    value={promptValue}
-                    onChange={(event) => setPromptValue(event.target.value)}
-                    onFocus={() => setPromptFocused(true)}
-                    onBlur={() => setPromptFocused(false)}
-                    placeholder="Describe your scene idea..."
-                    className="h-11 w-full rounded-xl border border-[#2f3f68] bg-[#091126] px-3 text-sm text-zinc-100 outline-none motion-fast focus:border-[#58d8ad]/60"
-                  />
-                  <Button className="h-11 rounded-xl bg-[#44d6a5] px-5 text-[#072217] hover:bg-[#5ce0b5]" onClick={openDemo}>
-                    Try Live Demo
-                  </Button>
-                </div>
-              </motion.div>
-
               <div className="mt-7 flex flex-wrap items-center gap-3">
                 <Button size="lg" className="rounded-xl bg-[#44d6a5] px-7 text-sm font-semibold text-[#072217] hover:bg-[#5ce0b5]" asChild>
                   <Link href={isAuthenticated ? "/app" : "/register"}>{isAuthenticated ? "Open app" : "Get started"}</Link>
@@ -222,6 +188,12 @@ export function LandingPage({
                   </Link>
                 </Button>
               </div>
+
+              <p className="mt-4 text-sm text-[#8fa2d2]">
+                {isAuthenticated
+                  ? "Your latest projects are shown on the right panel."
+                  : "Sign in to see your real project gallery directly on this landing page."}
+              </p>
             </motion.div>
 
             <motion.div
@@ -231,39 +203,75 @@ export function LandingPage({
               className="relative"
             >
               <div className="relative rounded-3xl border border-[#2a3c6b] bg-[#0f1936]/85 p-4 shadow-[0_28px_75px_rgba(2,8,23,0.52)] backdrop-blur-xl">
-                <div className="canvas-dot-bg relative h-[340px] overflow-hidden rounded-2xl border border-[#2f3f68] bg-[#070f24] md:h-[420px]">
-                  <motion.div
-                    className="absolute left-5 top-6 rounded-2xl border border-[#33466f] bg-[#111d3f]/95 p-3"
-                    animate={{ y: [0, -5, 0] }}
-                    transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                  >
-                    <p className="text-xs text-[#9db2e0]">input.image</p>
-                    <div className="mt-2 h-20 w-28 rounded-lg border border-[#34456f] bg-gradient-to-br from-zinc-600/40 to-zinc-900" />
-                  </motion.div>
+                {isAuthenticated ? (
+                  <div className="relative h-[340px] overflow-hidden rounded-2xl border border-[#2f3f68] bg-[#070f24] p-3 md:h-[420px]">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Your Project Gallery</p>
+                      <Button size="sm" variant="ghost" className="h-7 text-xs text-[#a8b7df] hover:bg-[#1a2950] hover:text-white" asChild>
+                        <Link href="/app">View all</Link>
+                      </Button>
+                    </div>
 
-                  <motion.div
-                    className="absolute left-[35%] top-[34%] rounded-2xl border border-[#33466f] bg-[#111d3f]/95 p-3"
-                    animate={{ y: [0, 7, 0] }}
-                    transition={{ duration: 5.2, repeat: Infinity, ease: "easeInOut" }}
-                  >
-                    <p className="text-xs text-[#9db2e0]">pipeline.scene_generation</p>
-                    <div className="mt-2 h-16 w-32 rounded-lg border border-[#33466f] bg-gradient-to-tr from-emerald-600/35 to-cyan-400/20" />
-                  </motion.div>
-
-                  <motion.div
-                    className="absolute right-6 top-10 rounded-2xl border border-[#33466f] bg-[#111d3f]/95 p-3"
-                    animate={{ y: [0, -7, 0] }}
-                    transition={{ duration: 4.7, repeat: Infinity, ease: "easeInOut" }}
-                  >
-                    <p className="text-xs text-[#9db2e0]">out.open_in_viewer</p>
-                    <div className="mt-2 h-20 w-24 rounded-lg border border-[#33466f] bg-gradient-to-tr from-primary/40 to-sky-500/25" />
-                  </motion.div>
-
-                  <svg className="absolute inset-0 h-full w-full" viewBox="0 0 800 480" preserveAspectRatio="none">
-                    <path d="M130 130 C 250 140, 270 210, 395 220" stroke="rgba(177,198,248,0.55)" strokeWidth="2" fill="none" />
-                    <path d="M470 220 C 540 220, 590 170, 700 160" stroke="rgba(177,198,248,0.55)" strokeWidth="2" fill="none" />
-                  </svg>
-                </div>
+                    {userProjects.length > 0 ? (
+                      <div className="grid h-[calc(100%-2rem)] grid-cols-2 gap-2 overflow-y-auto pr-1">
+                        {userProjects.slice(0, 6).map((project) => (
+                          <button
+                            key={`landing-project-${project.id}`}
+                            type="button"
+                            onClick={() => router.push(`/app/p/${project.id}/canvas`)}
+                            className="group overflow-hidden rounded-xl border border-[#324371] bg-[#111d3f]/90 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#162650]"
+                          >
+                            <div className="relative h-24 border-b border-[#2e406c] bg-[#0c1631]">
+                              {project.previewStorageKey ? (
+                                <>
+                                  {!loadedProjectPreviews[project.id] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
+                                  <img
+                                    src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
+                                    alt={`${project.name} preview`}
+                                    loading="lazy"
+                                    className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
+                                      loadedProjectPreviews[project.id] ? "opacity-100" : "opacity-0"
+                                    }`}
+                                    onLoad={() =>
+                                      setLoadedProjectPreviews((current) => ({
+                                        ...current,
+                                        [project.id]: true
+                                      }))
+                                    }
+                                  />
+                                </>
+                              ) : (
+                                <div className="h-full w-full bg-[linear-gradient(135deg,rgba(43,86,123,0.55),rgba(36,47,88,0.5),rgba(23,89,77,0.45))]" />
+                              )}
+                            </div>
+                            <div className="px-2.5 py-2">
+                              <p className="line-clamp-1 text-sm font-semibold text-white">{project.name}</p>
+                              <p className="mt-1 text-[11px] text-[#9db2e0]">{project.runs} runs</p>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="grid h-[calc(100%-2rem)] place-items-center rounded-xl border border-dashed border-[#3c507f] bg-[#0c1631]/70 p-6 text-center">
+                        <div>
+                          <p className="text-sm text-[#b6c4e9]">No projects yet.</p>
+                          <p className="mt-1 text-xs text-[#8ea3d6]">Create your first workflow project to populate this gallery.</p>
+                          <Button className="mt-3 h-8 rounded-lg bg-[#5b58f3] px-3 text-xs text-white hover:bg-[#6a67ff]" asChild>
+                            <Link href="/app">Create project</Link>
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="relative h-[340px] overflow-hidden rounded-2xl border border-[#2f3f68] bg-[#070f24] md:h-[420px]">
+                    <img
+                      src="/demo-assets/landing-concept-intelligent-3d.svg"
+                      alt="Concept illustration for Intelligent 3D Environment Maker"
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
@@ -306,69 +314,107 @@ export function LandingPage({
 
       <section id="gallery" className="mx-auto w-full max-w-[1280px] px-4 pb-24 md:px-6">
         <motion.h3 {...fadeUp} className="mb-4 text-2xl font-semibold text-white md:text-3xl">
-          Demo gallery
+          {isAuthenticated ? "Project gallery" : "Demo gallery"}
         </motion.h3>
 
-        <div className="mb-5 flex flex-wrap gap-2">
-          {categories.map((category) => {
-            const active = activeCategory === category;
-            return (
-              <motion.button
-                key={`category-${category}`}
-                type="button"
-                onClick={() => setActiveCategory(category)}
-                className={`rounded-full border px-3 py-1.5 text-xs font-medium motion-fast ${
-                  active
-                    ? "border-[#58d8ad]/70 bg-[#164139]/70 text-[#58d8ad]"
-                    : "border-[#34456f] bg-[#111c38]/80 text-[#a8b7df] hover:border-[#43588b] hover:bg-[#17254a]"
-                }`}
-                whileTap={{ scale: 0.97 }}
-              >
-                {category}
-              </motion.button>
-            );
-          })}
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <AnimatePresence mode="popLayout">
-            {filteredGallery.map((item, idx) => (
-              <motion.div
-                key={`${item.src}-${activeCategory}`}
-                initial={{ opacity: 0, scale: 0.98, y: 8 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98, y: 4 }}
-                transition={{ duration: 0.26, delay: idx * 0.04, ease: [0.2, 0.8, 0.2, 1] }}
-                className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#101a34]/85"
-              >
-                <div className="relative aspect-[4/3] overflow-hidden">
-                  {!loadedCards[item.src] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={item.src}
-                    alt={item.title}
-                    loading="lazy"
-                    onLoad={() =>
-                      setLoadedCards((current) => ({
-                        ...current,
-                        [item.src]: true
-                      }))
-                    }
-                    className={`h-full w-full object-cover transition duration-300 ease-out group-hover:scale-[1.035] ${
-                      loadedCards[item.src] ? "opacity-100" : "opacity-0"
+        {isAuthenticated ? (
+          userProjects.length > 0 ? (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {userProjects.map((project) => (
+                <button
+                  key={`landing-gallery-${project.id}`}
+                  type="button"
+                  onClick={() => router.push(`/app/p/${project.id}/canvas`)}
+                  className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#101a34]/85 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#152347]"
+                >
+                  <div className="relative aspect-[4/3] overflow-hidden border-b border-[#2f3f68] bg-[#0d1733]">
+                    {project.previewStorageKey ? (
+                      <img
+                        src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
+                        alt={`${project.name} preview`}
+                        loading="lazy"
+                        className="h-full w-full object-cover motion-panel group-hover:scale-[1.035]"
+                      />
+                    ) : (
+                      <div className="h-full w-full bg-[linear-gradient(135deg,rgba(43,86,123,0.55),rgba(36,47,88,0.5),rgba(23,89,77,0.45))]" />
+                    )}
+                  </div>
+                  <div className="px-3 py-2.5">
+                    <p className="line-clamp-1 text-sm font-semibold text-[#d4def8]">{project.name}</p>
+                    <p className="mt-1 text-[11px] text-[#9ab0e0]">{project.runs} runs</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[#3c507f] bg-[#0c1631]/70 p-8 text-center text-[#9ab0e0]">
+              Your project gallery is empty. Open app and create your first project.
+            </div>
+          )
+        ) : (
+          <>
+            <div className="mb-5 flex flex-wrap gap-2">
+              {categories.map((category) => {
+                const active = activeCategory === category;
+                return (
+                  <motion.button
+                    key={`category-${category}`}
+                    type="button"
+                    onClick={() => setActiveCategory(category)}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-medium motion-fast ${
+                      active
+                        ? "border-[#58d8ad]/70 bg-[#164139]/70 text-[#58d8ad]"
+                        : "border-[#34456f] bg-[#111c38]/80 text-[#a8b7df] hover:border-[#43588b] hover:bg-[#17254a]"
                     }`}
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-2 border-t border-[#2f3f68] px-3 py-2.5">
-                  <p className="truncate text-sm text-[#d4def8]">{item.title}</p>
-                  <span className="rounded-full border border-[#3f5282] bg-[#16274f]/70 px-2 py-0.5 text-[10px] text-[#9ab0e0]">
-                    {item.category}
-                  </span>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+                    whileTap={{ scale: 0.97 }}
+                  >
+                    {category}
+                  </motion.button>
+                );
+              })}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              <AnimatePresence mode="popLayout">
+                {filteredGallery.map((item, idx) => (
+                  <motion.div
+                    key={`${item.src}-${activeCategory}`}
+                    initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.98, y: 4 }}
+                    transition={{ duration: 0.26, delay: idx * 0.04, ease: [0.2, 0.8, 0.2, 1] }}
+                    className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#101a34]/85"
+                  >
+                    <div className="relative aspect-[4/3] overflow-hidden">
+                      {!loadedCards[item.src] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={item.src}
+                        alt={item.title}
+                        loading="lazy"
+                        onLoad={() =>
+                          setLoadedCards((current) => ({
+                            ...current,
+                            [item.src]: true
+                          }))
+                        }
+                        className={`h-full w-full object-cover transition duration-300 ease-out group-hover:scale-[1.035] ${
+                          loadedCards[item.src] ? "opacity-100" : "opacity-0"
+                        }`}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-2 border-t border-[#2f3f68] px-3 py-2.5">
+                      <p className="truncate text-sm text-[#d4def8]">{item.title}</p>
+                      <span className="rounded-full border border-[#3f5282] bg-[#16274f]/70 px-2 py-0.5 text-[10px] text-[#9ab0e0]">
+                        {item.category}
+                      </span>
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          </>
+        )}
       </section>
     </main>
   );
