@@ -84,6 +84,71 @@ interface SceneManifest {
   created_at?: string;
 }
 
+interface SceneExecutionConfigMetadata {
+  schemaVersion: "1.0";
+  createdAt: string;
+  run: {
+    projectId: string;
+    projectSlug: string;
+    runId: string;
+    nodeId: string;
+    nodeType: string;
+  };
+  execution: {
+    requestedMode: SceneMode;
+    executionMode: "real" | "mock";
+    configName: string;
+    runAllMasksInOneProcess: boolean;
+    maxObjects: number | null;
+  };
+  reconstruction: {
+    policy: "one_object_per_mask_file";
+    masksDir: string;
+    discoveredMaskCount: number | null;
+    expectedObjectsToReconstruct: number | null;
+    maskFiles: string[];
+  };
+  inputOrigins: {
+    selectedConfigInputPort: string | null;
+    resolvedImageSource:
+      | {
+          kind: "input_port";
+          port: string;
+          sourceNodeId: string;
+          sourceOutputId: string;
+          artifactId: string;
+          storageKey: string;
+        }
+      | {
+          kind: "config_json";
+          field: "sourceImagePath";
+          path: string;
+        }
+      | null;
+  };
+  inputPorts: Record<
+    string,
+    Array<{
+      artifactId: string;
+      sourceNodeId: string;
+      sourceOutputId: string;
+      artifactKind: string;
+      artifactType: string;
+      mimeType: string;
+      storageKey: string;
+      byteSize: number;
+      hash: string;
+    }>
+  >;
+  upstreamNodeIds: string[];
+  configPreview: {
+    hasSourceImagePath: boolean;
+    sourceImagePath: string | null;
+    overlayPath: string | null;
+    payloadKeys: string[];
+  };
+}
+
 function normalizeProcessLines(text: string) {
   return text
     .split(/\r?\n/)
@@ -451,6 +516,44 @@ async function countMaskFiles(masksDir: string) {
   } catch {
     return null;
   }
+}
+
+async function listMaskFiles(masksDir: string) {
+  try {
+    const entries = await fs.readdir(masksDir);
+    return entries
+      .filter((name) => name.toLowerCase().endsWith(".png"))
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+function summarizeInputPorts(ctx: NodeExecutionContext) {
+  const inputPorts: SceneExecutionConfigMetadata["inputPorts"] = {};
+  const upstreamNodeIds = new Set<string>();
+
+  for (const [port, values] of Object.entries(ctx.inputs)) {
+    inputPorts[port] = values.map((entry) => {
+      upstreamNodeIds.add(entry.nodeId);
+      return {
+        artifactId: entry.artifactId,
+        sourceNodeId: entry.nodeId,
+        sourceOutputId: entry.outputId,
+        artifactKind: entry.kind,
+        artifactType: entry.artifactType,
+        mimeType: entry.mimeType,
+        storageKey: entry.storageKey,
+        byteSize: entry.byteSize,
+        hash: entry.hash
+      };
+    });
+  }
+
+  return {
+    inputPorts,
+    upstreamNodeIds: [...upstreamNodeIds].sort((a, b) => a.localeCompare(b))
+  };
 }
 
 async function collectRealOutputs(params: {
@@ -891,6 +994,13 @@ function buildMockOutputs(params: { mode: SceneMode; warnings: string[]; imagePa
 
 export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
   const imageInput = ctx.inputs.image?.[0] ?? null;
+  const selectedConfigInputPort = ctx.inputs.config?.[0]
+    ? "config"
+    : ctx.inputs.masksDir?.[0]
+      ? "masksDir"
+      : ctx.inputs.maskDir?.[0]
+        ? "maskDir"
+        : null;
   const configInput = ctx.inputs.config?.[0] ?? ctx.inputs.masksDir?.[0] ?? ctx.inputs.maskDir?.[0] ?? null;
   const mode = resolveMode(ctx);
   const warnings = [...(ctx.warnings ?? [])];
@@ -922,8 +1032,75 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
     throw new Error("SceneGeneration could not resolve input image path.");
   }
 
-  const runMode = (process.env.SAM3D_EXECUTION_MODE ?? "mock").toLowerCase();
+  const runModeRaw = (process.env.SAM3D_EXECUTION_MODE ?? "mock").toLowerCase();
+  const runMode: "real" | "mock" = runModeRaw === "real" ? "real" : "mock";
   const settings = resolveSceneSettings(ctx);
+  const configName = await resolveSam3dConfigName(
+    typeof ctx.params.config === "string" ? ctx.params.config : getDefaultSam3dConfig()
+  );
+  const maskFiles = await listMaskFiles(config.masksDir);
+  const discoveredMaskCount = maskFiles.length > 0 ? maskFiles.length : await countMaskFiles(config.masksDir);
+  const expectedObjectsToReconstruct =
+    typeof discoveredMaskCount === "number"
+      ? settings.maxObjects ? Math.min(discoveredMaskCount, settings.maxObjects) : discoveredMaskCount
+      : settings.maxObjects;
+  const { inputPorts, upstreamNodeIds } = summarizeInputPorts(ctx);
+  const resolvedImageSource: SceneExecutionConfigMetadata["inputOrigins"]["resolvedImageSource"] = imageInput
+    ? {
+        kind: "input_port",
+        port: "image",
+        sourceNodeId: imageInput.nodeId,
+        sourceOutputId: imageInput.outputId,
+        artifactId: imageInput.artifactId,
+        storageKey: imageInput.storageKey
+      }
+    : config.sourceImagePath
+      ? {
+          kind: "config_json",
+          field: "sourceImagePath",
+          path: config.sourceImagePath
+        }
+      : null;
+  const executionConfigPath = path.join(nodeOutputRoot, "scene_generation_execution_config.json");
+  const executionConfig: SceneExecutionConfigMetadata = {
+    schemaVersion: "1.0",
+    createdAt: new Date().toISOString(),
+    run: {
+      projectId: ctx.projectId,
+      projectSlug: ctx.projectSlug,
+      runId: ctx.runId,
+      nodeId: ctx.nodeId,
+      nodeType: ctx.nodeType
+    },
+    execution: {
+      requestedMode: mode,
+      executionMode: runMode,
+      configName,
+      runAllMasksInOneProcess: settings.runAllMasksInOneProcess,
+      maxObjects: settings.maxObjects
+    },
+    reconstruction: {
+      policy: "one_object_per_mask_file",
+      masksDir: config.masksDir,
+      discoveredMaskCount,
+      expectedObjectsToReconstruct,
+      maskFiles
+    },
+    inputOrigins: {
+      selectedConfigInputPort,
+      resolvedImageSource
+    },
+    inputPorts,
+    upstreamNodeIds,
+    configPreview: {
+      hasSourceImagePath: typeof config.sourceImagePath === "string" && config.sourceImagePath.length > 0,
+      sourceImagePath: config.sourceImagePath,
+      overlayPath: config.overlayPath,
+      payloadKeys: Object.keys(config.payload ?? {}).sort((a, b) => a.localeCompare(b))
+    }
+  };
+  await fs.writeFile(executionConfigPath, JSON.stringify(executionConfig, null, 2), "utf8");
+
   const usePerMaskSubprocess =
     settings.runAllMasksInOneProcess === false && mode === "mesh";
   if (runMode === "real") {
