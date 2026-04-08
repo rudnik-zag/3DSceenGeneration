@@ -2,17 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  ArrowRight,
-  CalendarDays,
-  Cable,
-  Eye,
-  Play,
-  Plus,
-  Search,
-  Sparkles,
-  Trash2
-} from "lucide-react";
+import { ArrowRight, CalendarDays, FolderKanban, Play, Plus, Search, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -80,6 +70,11 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
     () => sorted.filter((project) => project.name.toLowerCase().includes(search.toLowerCase())),
     [sorted, search]
   );
+
+  const hasProjects = sorted.length > 0;
+  const latestProject = sorted[0] ?? null;
+  const totalRuns = sorted.reduce((sum, project) => sum + project._count.runs, 0);
+  const totalGraphs = sorted.reduce((sum, project) => sum + project._count.graphs, 0);
 
   const createProject = async (rawName?: string) => {
     const projectName = (rawName ?? name).trim();
@@ -202,12 +197,9 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
         <div className="flex flex-wrap items-center gap-3 border-b border-[#263254] px-4 py-3 md:px-5">
           <div className="inline-flex items-center gap-2">
             <div className="grid h-7 w-7 place-items-center rounded-lg bg-[#5d57f4] text-white shadow-[0_6px_18px_rgba(93,87,244,0.45)]">
-              <Sparkles className="h-4 w-4" />
+              <FolderKanban className="h-4 w-4" />
             </div>
-            <p className="text-lg font-semibold tracking-tight text-white">TribalAI</p>
-            <span className="rounded-full border border-[#41528a] bg-[#1a2550]/75 px-2 py-0.5 text-[10px] text-[#a8b7f2]">
-              Studio
-            </span>
+            <p className="text-lg font-semibold tracking-tight text-white">Workspace</p>
           </div>
 
           <div className="ml-auto flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
@@ -227,185 +219,209 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
           </div>
         </div>
 
-        <div className="p-4 md:p-5">
-          <div className="relative overflow-hidden rounded-2xl border border-[#2a3c6b] bg-[#121f46] px-5 py-5 md:px-7 md:py-7">
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_28%_25%,rgba(103,129,255,0.26),transparent_42%),radial-gradient(circle_at_76%_26%,rgba(71,171,218,0.24),transparent_36%),linear-gradient(120deg,rgba(7,14,32,0.8),rgba(8,22,52,0.48))]" />
-            <div className="pointer-events-none absolute inset-0 opacity-50 [background-image:radial-gradient(circle_at_10%_90%,rgba(112,156,255,0.28),transparent_34%),radial-gradient(circle_at_86%_80%,rgba(69,211,201,0.2),transparent_36%)]" />
-
-            <div className="relative z-10 grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-center">
-              <div>
-                <h2 className="text-3xl font-semibold tracking-tight text-white">Welcome to TribalAI Studio</h2>
-                <p className="mt-2 max-w-2xl text-lg leading-relaxed text-[#b3c0e4]">
-                  Build AI-powered 2D-to-3D pipelines visually. Design workflows, run pipelines, and inspect generated
-                  meshes and splats in one place.
-                </p>
-                <div className="mt-5 flex flex-wrap gap-2">
-                  <Button className="h-10 rounded-lg bg-[#5b58f3] px-4 text-white hover:bg-[#6a67ff]" onClick={() => setCreateOpen(true)}>
-                    <Plus className="mr-1.5 h-4 w-4" />
-                    Create First Project
-                  </Button>
-                  {sorted[0] ? (
+        {hasProjects ? (
+          <div className="grid gap-3 p-4 md:grid-cols-[1.1fr_0.9fr] md:p-5">
+            <div className="rounded-2xl border border-[#2f3f68] bg-[#101a34]/90 p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Continue Working</p>
+              <h2 className="mt-2 text-2xl font-semibold text-white">
+                {latestProject ? latestProject.name : "Your latest project"}
+              </h2>
+              <p className="mt-1 text-sm text-[#a8b7df]">
+                Open your latest canvas, review runs, or inspect assets in viewer.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {latestProject ? (
+                  <>
+                    <Button className="h-9 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${latestProject.id}/canvas`)}>
+                      Open latest canvas
+                    </Button>
                     <Button
                       variant="outline"
-                      className="h-10 rounded-lg border-[#405488] bg-[#1a2950]/70 text-[#d0dbfb] hover:bg-[#23356a]"
-                      onClick={() => router.push(`/app/p/${sorted[0].id}/canvas`)}
+                      className="h-9 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                      onClick={() => router.push(`/app/p/${latestProject.id}/runs`)}
                     >
-                      View Templates
-                      <ArrowRight className="ml-1.5 h-4 w-4" />
+                      Runs
                     </Button>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-xl border border-[#33456f] bg-[#131f44]/70 p-3 text-center">
-                  <div className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-xl bg-[#2a3973] text-[#95b2ff]">
-                    <Cable className="h-5 w-5" />
-                  </div>
-                  <p className="text-base font-semibold text-white">Design</p>
-                  <p className="mt-1 text-xs text-[#a9b8df]">Build node pipelines</p>
-                </div>
-                <div className="rounded-xl border border-[#33456f] bg-[#131f44]/70 p-3 text-center">
-                  <div className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-xl bg-[#2a3973] text-[#95b2ff]">
-                    <Play className="h-5 w-5" />
-                  </div>
-                  <p className="text-base font-semibold text-white">Execute</p>
-                  <p className="mt-1 text-xs text-[#a9b8df]">Run and monitor</p>
-                </div>
-                <div className="rounded-xl border border-[#33456f] bg-[#131f44]/70 p-3 text-center">
-                  <div className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-xl bg-[#2a3973] text-[#95b2ff]">
-                    <Eye className="h-5 w-5" />
-                  </div>
-                  <p className="text-base font-semibold text-white">Inspect</p>
-                  <p className="mt-1 text-xs text-[#a9b8df]">View 3D outputs</p>
-                </div>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                      onClick={() => router.push(`/app/p/${latestProject.id}/viewer`)}
+                    >
+                      Viewer
+                    </Button>
+                  </>
+                ) : null}
               </div>
             </div>
-          </div>
 
-          <div className="mt-5">
+            <div className="rounded-2xl border border-[#2f3f68] bg-[#101a34]/90 p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Workspace Summary</p>
+              <div className="mt-3 grid grid-cols-3 gap-2">
+                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                  <p className="text-2xl font-semibold text-white">{sorted.length}</p>
+                  <p className="text-xs text-[#9db2e0]">Projects</p>
+                </div>
+                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                  <p className="text-2xl font-semibold text-white">{totalRuns}</p>
+                  <p className="text-xs text-[#9db2e0]">Runs</p>
+                </div>
+                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                  <p className="text-2xl font-semibold text-white">{totalGraphs}</p>
+                  <p className="text-xs text-[#9db2e0]">Graphs</p>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                className="mt-3 h-9 w-full rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                onClick={() => setCreateOpen(true)}
+              >
+                Create another project
+                <ArrowRight className="ml-1.5 h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="p-5">
+            <div className="rounded-2xl border border-dashed border-[#3c507f] bg-[#0c1631]/70 p-8 text-center">
+              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Empty Workspace</p>
+              <h2 className="mt-2 text-3xl font-semibold text-white">Create your first project</h2>
+              <p className="mt-2 text-sm text-[#a8b7df]">
+                Start from a blank canvas and build your first Intelligent 3D Environment Maker workflow.
+              </p>
+              <Button className="mt-4 h-10 rounded-lg bg-[#5b58f3] px-5 text-white hover:bg-[#6a67ff]" onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-1.5 h-4 w-4" />
+                Create Project
+              </Button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {hasProjects ? (
+        <section>
+          <div className="mb-3">
             <h1 className="text-3xl font-semibold tracking-tight text-white">All Projects</h1>
             <p className="mt-1 text-sm text-[#8fa2d2]">{filtered.length} projects</p>
           </div>
-        </div>
-      </section>
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {filtered.map((project) => {
-          const status = deriveProjectStatus(project);
-          const statusClass =
-            status === "success"
-              ? "border-emerald-400/45 bg-emerald-500/20 text-emerald-200"
-              : status === "running"
-                ? "border-amber-400/45 bg-amber-500/18 text-amber-200"
-                : "border-sky-400/45 bg-sky-500/18 text-sky-200";
-          const statusLabel = status === "new" ? "new" : status;
+          {filtered.length > 0 ? (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {filtered.map((project) => {
+                const status = deriveProjectStatus(project);
+                const statusClass =
+                  status === "success"
+                    ? "border-emerald-400/45 bg-emerald-500/20 text-emerald-200"
+                    : status === "running"
+                      ? "border-amber-400/45 bg-amber-500/18 text-amber-200"
+                      : "border-sky-400/45 bg-sky-500/18 text-sky-200";
+                const statusLabel = status === "new" ? "new" : status;
 
-          return (
-            <Card
-              key={project.id}
-              className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#121c38]/90 shadow-[0_16px_36px_rgba(2,7,20,0.48)] motion-fast hover:-translate-y-0.5 hover:border-[#4f66a9]"
-            >
-              <CardHeader className="space-y-2 p-0">
-                {project.previewStorageKey && !brokenPreviewIds[project.id] ? (
-                  <div className="relative h-40 overflow-hidden border-b border-[#2e3d66] bg-black/30">
-                    {!loadedPreviewIds[project.id] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
-                    <img
-                      src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
-                      alt={`${project.name} preview`}
-                      className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
-                        loadedPreviewIds[project.id] ? "opacity-100" : "opacity-0"
-                      }`}
-                      loading="lazy"
-                      onLoad={() =>
-                        setLoadedPreviewIds((prev) =>
-                          prev[project.id]
-                            ? prev
-                            : {
-                                ...prev,
-                                [project.id]: true
-                              }
-                        )
-                      }
-                      onError={() =>
-                        setBrokenPreviewIds((prev) =>
-                          prev[project.id]
-                            ? prev
-                            : {
-                                ...prev,
-                                [project.id]: true
-                              }
-                        )
-                      }
-                    />
-                    <span className={`absolute right-2 top-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>
-                      {statusLabel}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="relative h-40 border-b border-dashed border-[#344577] bg-[#0e1935] skeleton-shimmer">
-                    <span className={`absolute right-2 top-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>
-                      {statusLabel}
-                    </span>
-                  </div>
-                )}
-
-                <div className="space-y-1 px-3.5 pt-3">
-                  <CardTitle className="line-clamp-1 text-[27px] font-semibold leading-none tracking-tight text-white">
-                    {project.name}
-                  </CardTitle>
-                  <CardDescription className="line-clamp-2 text-sm leading-6 text-[#a2b0d9]">
-                    {project._count.runs > 0
-                      ? `${project._count.runs} workflow runs processed in this project.`
-                      : "Start your first run by opening the canvas and executing a workflow."}
-                  </CardDescription>
-                </div>
-              </CardHeader>
-
-              <CardContent className="space-y-3 p-3.5 pt-2.5">
-                <div className="flex items-center justify-between border-t border-[#25365d] pt-2 text-[12px] text-[#8797c4]">
-                  <span className="inline-flex items-center gap-1">
-                    <CalendarDays className="h-3.5 w-3.5" />
-                    {formatCardDate(project.updatedAt)}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <Play className="h-3.5 w-3.5" />
-                    {project._count.runs} runs
-                  </span>
-                </div>
-
-                <div className="flex gap-2">
-                  <Button size="sm" className="h-8 flex-1 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${project.id}/canvas`)}>
-                    Open canvas
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
-                    onClick={() => router.push(`/app/p/${project.id}/runs`)}
+                return (
+                  <Card
+                    key={project.id}
+                    className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#121c38]/90 shadow-[0_16px_36px_rgba(2,7,20,0.48)] motion-fast hover:-translate-y-0.5 hover:border-[#4f66a9]"
                   >
-                    Runs
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    className="h-8 rounded-lg px-2.5"
-                    onClick={() => void deleteProject(project.id, project.name)}
-                    disabled={deletingId === project.id}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </section>
+                    <CardHeader className="space-y-2 p-0">
+                      {project.previewStorageKey && !brokenPreviewIds[project.id] ? (
+                        <div className="relative h-40 overflow-hidden border-b border-[#2e3d66] bg-black/30">
+                          {!loadedPreviewIds[project.id] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
+                          <img
+                            src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
+                            alt={`${project.name} preview`}
+                            className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
+                              loadedPreviewIds[project.id] ? "opacity-100" : "opacity-0"
+                            }`}
+                            loading="lazy"
+                            onLoad={() =>
+                              setLoadedPreviewIds((prev) =>
+                                prev[project.id]
+                                  ? prev
+                                  : {
+                                      ...prev,
+                                      [project.id]: true
+                                    }
+                              )
+                            }
+                            onError={() =>
+                              setBrokenPreviewIds((prev) =>
+                                prev[project.id]
+                                  ? prev
+                                  : {
+                                      ...prev,
+                                      [project.id]: true
+                                    }
+                              )
+                            }
+                          />
+                          <span className={`absolute right-2 top-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="relative h-40 border-b border-dashed border-[#344577] bg-[#0e1935] skeleton-shimmer">
+                          <span className={`absolute right-2 top-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                      )}
 
-      {filtered.length === 0 ? (
-        <div className="rounded-2xl border border-[#2c3b67] bg-[#101a34] p-8 text-center text-sm text-[#93a7d9]">
-          No projects found.
-        </div>
+                      <div className="space-y-1 px-3.5 pt-3">
+                        <CardTitle className="line-clamp-1 text-[27px] font-semibold leading-none tracking-tight text-white">
+                          {project.name}
+                        </CardTitle>
+                        <CardDescription className="line-clamp-2 text-sm leading-6 text-[#a2b0d9]">
+                          {project._count.runs > 0
+                            ? `${project._count.runs} workflow runs processed in this project.`
+                            : "Start your first run by opening the canvas and executing a workflow."}
+                        </CardDescription>
+                      </div>
+                    </CardHeader>
+
+                    <CardContent className="space-y-3 p-3.5 pt-2.5">
+                      <div className="flex items-center justify-between border-t border-[#25365d] pt-2 text-[12px] text-[#8797c4]">
+                        <span className="inline-flex items-center gap-1">
+                          <CalendarDays className="h-3.5 w-3.5" />
+                          {formatCardDate(project.updatedAt)}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <Play className="h-3.5 w-3.5" />
+                          {project._count.runs} runs
+                        </span>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button size="sm" className="h-8 flex-1 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${project.id}/canvas`)}>
+                          Open canvas
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                          onClick={() => router.push(`/app/p/${project.id}/runs`)}
+                        >
+                          Runs
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="h-8 rounded-lg px-2.5"
+                          onClick={() => void deleteProject(project.id, project.name)}
+                          disabled={deletingId === project.id}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-[#2c3b67] bg-[#101a34] p-8 text-center text-sm text-[#93a7d9]">
+              No projects found for your search.
+            </div>
+          )}
+        </section>
       ) : null}
     </div>
   );
