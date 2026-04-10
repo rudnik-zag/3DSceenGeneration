@@ -215,17 +215,6 @@ function parseTilesetMeta(artifact: Artifact) {
   };
 }
 
-function uniqueById<T extends { id: string }>(entries: T[]) {
-  const seen = new Set<string>();
-  const ordered: T[] = [];
-  for (const item of entries) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    ordered.push(item);
-  }
-  return ordered;
-}
-
 function uniqueStrings(values: Array<string | null | undefined>) {
   const seen = new Set<string>();
   const ordered: string[] = [];
@@ -275,7 +264,8 @@ export async function GET(req: NextRequest) {
     }
 
     const artifactId = parsedQuery.data.artifactId;
-    const bundleMode = parsedQuery.data.bundleMode ?? "project_fallback";
+    const requestedBundleMode = parsedQuery.data.bundleMode ?? "project_fallback";
+    const bundleMode: BundleMode = "same_node";
     const access = await requireArtifactAccess(artifactId, "viewer");
     await enforceRateLimit({
       bucket: "signed-url:manifest",
@@ -301,313 +291,241 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Artifact not found" }, { status: 404 });
     }
 
-  const selectedRun = selectedArtifact.runId
-    ? await prisma.run.findUnique({
-        where: { id: selectedArtifact.runId },
-        select: {
-          graph: {
-            select: {
-              graphJson: true
+    const warnings: string[] = [];
+    if (requestedBundleMode !== "same_node") {
+      warnings.push("Project fallback is disabled. Viewer now loads only selected run/version artifacts.");
+    }
+
+    const selectedRun = selectedArtifact.runId
+      ? await prisma.run.findUnique({
+          where: { id: selectedArtifact.runId },
+          select: {
+            graph: {
+              select: {
+                graphJson: true
+              }
             }
           }
-        }
-      })
-    : null;
-  const parsedGraph = parseGraphDocument(selectedRun?.graph?.graphJson ?? null);
+        })
+      : null;
+    const parsedGraph = parseGraphDocument(selectedRun?.graph?.graphJson ?? null);
 
-  const relatedArtifacts = await prisma.artifact.findMany({
-    where: {
-      projectId: selectedArtifact.projectId,
-      ...(selectedArtifact.runId && selectedArtifact.nodeId
-        ? {
-            runId: selectedArtifact.runId,
-            nodeId: selectedArtifact.nodeId
-          }
-        : selectedArtifact.runId
-        ? { runId: selectedArtifact.runId }
-        : { id: selectedArtifact.id })
-    },
-    orderBy: { createdAt: "desc" },
-    take: 220
-  });
-  let artifacts = uniqueById([selectedArtifact, ...relatedArtifacts]);
+    const artifacts = [selectedArtifact];
 
-  const hasMeshInPrimary = artifacts.some((artifact) => artifact.kind === "mesh_glb");
-  const hasSplatInPrimary = artifacts.some(
-    (artifact) => artifact.kind === "point_ply" || artifact.kind === "splat_ksplat"
-  );
-
-  if (selectedArtifact.nodeId && (!hasMeshInPrimary || !hasSplatInPrimary)) {
-    const sameNodeArtifacts = await prisma.artifact.findMany({
+    const tilesetCandidates = await prisma.artifact.findMany({
       where: {
         projectId: selectedArtifact.projectId,
-        nodeId: selectedArtifact.nodeId
+        kind: "json"
       },
       orderBy: { createdAt: "desc" },
-      take: 420
+      take: 400
     });
-
-    if (!hasMeshInPrimary) {
-      const latestMeshArtifact = sameNodeArtifacts.find((artifact) => artifact.kind === "mesh_glb");
-      if (latestMeshArtifact) {
-        artifacts = uniqueById([...artifacts, latestMeshArtifact]);
+    const latestTilesetBySourceArtifact = new Map<string, Artifact>();
+    for (const artifact of tilesetCandidates) {
+      const meta = parseTilesetMeta(artifact);
+      if (!meta?.sourceArtifactId) continue;
+      if (!latestTilesetBySourceArtifact.has(meta.sourceArtifactId)) {
+        latestTilesetBySourceArtifact.set(meta.sourceArtifactId, artifact);
       }
     }
 
-    if (!hasSplatInPrimary) {
-      const latestSplatArtifact = sameNodeArtifacts.find(
-        (artifact) => artifact.kind === "point_ply" || artifact.kind === "splat_ksplat"
-      );
-      if (latestSplatArtifact) {
-        artifacts = uniqueById([...artifacts, latestSplatArtifact]);
-      }
-    }
-  }
-
-  if (bundleMode === "project_fallback") {
-    const hasMeshAfterNodeFallback = artifacts.some((artifact) => artifact.kind === "mesh_glb");
-    const hasSplatAfterNodeFallback = artifacts.some(
+    const meshArtifacts = artifacts.filter((artifact) => artifact.kind === "mesh_glb");
+    const splatArtifacts = artifacts.filter(
       (artifact) => artifact.kind === "point_ply" || artifact.kind === "splat_ksplat"
     );
-    if (!hasMeshAfterNodeFallback || !hasSplatAfterNodeFallback) {
-      const projectFallbackArtifacts = await prisma.artifact.findMany({
-        where: {
-          projectId: selectedArtifact.projectId
-        },
-        orderBy: { createdAt: "desc" },
-        take: 420
+
+    const meshes: WorldManifestMeshEntry[] = [];
+    const meshSeen = new Set<string>();
+    const pushMeshUrl = (params: {
+      artifact: Artifact;
+      url: string;
+      idSuffix?: string;
+    }) => {
+      const dedupKey = normalizeUrlForDedup(params.url);
+      if (meshSeen.has(dedupKey)) return false;
+      meshSeen.add(dedupKey);
+      meshes.push({
+        id: params.idSuffix
+          ? `mesh-${params.artifact.id}-${params.idSuffix}`
+          : `mesh-${params.artifact.id}`,
+        artifactId: params.artifact.id,
+        runId: params.artifact.runId,
+        nodeId: params.artifact.nodeId,
+        kind: params.artifact.kind,
+        url: params.url
       });
-
-      if (!hasMeshAfterNodeFallback) {
-        const latestProjectMesh = projectFallbackArtifacts.find((artifact) => artifact.kind === "mesh_glb");
-        if (latestProjectMesh) {
-          artifacts = uniqueById([...artifacts, latestProjectMesh]);
-        }
-      }
-
-      if (!hasSplatAfterNodeFallback) {
-        const latestProjectSplat = projectFallbackArtifacts.find(
-          (artifact) => artifact.kind === "point_ply" || artifact.kind === "splat_ksplat"
-        );
-        if (latestProjectSplat) {
-          artifacts = uniqueById([...artifacts, latestProjectSplat]);
-        }
-      }
-    }
-  }
-
-  const tilesetCandidates = await prisma.artifact.findMany({
-    where: {
-      projectId: selectedArtifact.projectId,
-      kind: "json"
-    },
-    orderBy: { createdAt: "desc" },
-    take: 400
-  });
-  const latestTilesetBySourceArtifact = new Map<string, Artifact>();
-  for (const artifact of tilesetCandidates) {
-    const meta = parseTilesetMeta(artifact);
-    if (!meta?.sourceArtifactId) continue;
-    if (!latestTilesetBySourceArtifact.has(meta.sourceArtifactId)) {
-      latestTilesetBySourceArtifact.set(meta.sourceArtifactId, artifact);
-    }
-  }
-
-  const meshArtifacts = artifacts.filter((artifact) => artifact.kind === "mesh_glb");
-  const splatArtifacts = artifacts.filter(
-    (artifact) => artifact.kind === "point_ply" || artifact.kind === "splat_ksplat"
-  );
-
-  const meshes: WorldManifestMeshEntry[] = [];
-  const meshSeen = new Set<string>();
-  const pushMeshUrl = (params: {
-    artifact: Artifact;
-    url: string;
-    idSuffix?: string;
-  }) => {
-    const dedupKey = normalizeUrlForDedup(params.url);
-    if (meshSeen.has(dedupKey)) return false;
-    meshSeen.add(dedupKey);
-    meshes.push({
-      id: params.idSuffix
-        ? `mesh-${params.artifact.id}-${params.idSuffix}`
-        : `mesh-${params.artifact.id}`,
-      artifactId: params.artifact.id,
-      runId: params.artifact.runId,
-      nodeId: params.artifact.nodeId,
-      kind: params.artifact.kind,
-      url: params.url
-    });
-    return true;
-  };
-  for (const meshArtifact of meshArtifacts) {
-    const rawMeta = meshArtifact.meta;
-    const meta =
-      rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)
-        ? (rawMeta as ArtifactMetaLike)
-        : null;
-    const extraStorageKeys = Array.isArray(meta?.meshObjectStorageKeys)
-      ? meta.meshObjectStorageKeys.filter(
-          (value): value is string => typeof value === "string" && value.trim().length > 0
-        )
-      : [];
-
-    let extraCount = 0;
-    for (const storageKey of extraStorageKeys) {
-      const extraRawUrl = await safeGetSignedDownloadUrl(storageKey);
-      const extraUrl = toAbsoluteUrlMaybe(extraRawUrl, req);
-      if (!extraUrl) continue;
-      if (pushMeshUrl({ artifact: meshArtifact, url: extraUrl, idSuffix: `extra-${extraCount}` })) {
-        extraCount += 1;
-      }
-    }
-
-    // If object-level mesh keys are present, they are the authoritative object list.
-    // Only fallback to base mesh URL when extras are unavailable.
-    if (extraStorageKeys.length === 0 || extraCount === 0) {
-      const rawUrl = await safeGetSignedDownloadUrl(meshArtifact.storageKey);
-      const url = toAbsoluteUrlMaybe(rawUrl, req);
-      if (url) {
-        pushMeshUrl({ artifact: meshArtifact, url });
-      }
-    }
-  }
-
-  const splats: WorldManifestSplatEntry[] = [];
-  const splatSeen = new Set<string>();
-  for (const splatArtifact of splatArtifacts) {
-    const sourceUrl = toAbsoluteUrlMaybe(await safeGetSignedDownloadUrl(splatArtifact.storageKey), req);
-    const sourceDedupKey = sourceUrl ? normalizeUrlForDedup(sourceUrl) : null;
-    if (!sourceDedupKey || splatSeen.has(sourceDedupKey)) continue;
-    splatSeen.add(sourceDedupKey);
-    const tilesetArtifact = latestTilesetBySourceArtifact.get(splatArtifact.id) ?? null;
-    const tilesetUrl = tilesetArtifact
-      ? `${req.nextUrl.origin}/api/storage/object?key=${encodeURIComponent(tilesetArtifact.storageKey)}`
-      : null;
-    const tilesetMeta = tilesetArtifact ? parseTilesetMeta(tilesetArtifact) : null;
-    splats.push({
-      id: `splat-${splatArtifact.id}`,
-      artifactId: splatArtifact.id,
-      runId: splatArtifact.runId,
-      nodeId: splatArtifact.nodeId,
-      kind: splatArtifact.kind,
-      sourceUrl,
-      tilesetUrl,
-      presetName: tilesetMeta?.presetName ?? null,
-      transform: {
-        position: [0, 0, 0],
-        rotation: [0, 0, 0, 1],
-        scale: [1, 1, 1]
-      }
-    });
-  }
-
-  const selectedSplat = splats.find((entry) => entry.artifactId === selectedArtifact.id) ?? null;
-  const canBuildTileset =
-    (selectedArtifact.kind === "point_ply" || selectedArtifact.kind === "splat_ksplat") &&
-    !selectedSplat?.tilesetUrl;
-  const meshRunIds = uniqueStrings(meshes.map((entry) => entry.runId));
-  const splatRunIds = uniqueStrings(splats.map((entry) => entry.runId));
-  const selectedRunId = selectedArtifact.runId ?? null;
-  const usedCrossRunFallback = Boolean(
-    selectedRunId &&
-      (meshRunIds.some((runId) => runId !== selectedRunId) ||
-        splatRunIds.some((runId) => runId !== selectedRunId))
-  );
-
-  let resolvedEnvironment: WorldManifestEnvironment | null = null;
-  let environmentNodeId: string | null = null;
-  let environmentViewerNodeId: string | null = null;
-  if (parsedGraph) {
-    const nodesById = new Map(parsedGraph.nodes.map((node) => [node.id, node]));
-    const selectedNodeId = selectedArtifact.nodeId ?? null;
-
-    if (selectedNodeId) {
-      const connectedViewerNodeIds = parsedGraph.edges
-        .filter((edge) => edge.source === selectedNodeId)
-        .filter((edge) => nodesById.get(edge.target)?.type === "out.open_in_viewer")
-        .filter((edge) => normalizeViewerTargetHandle(edge.targetHandle) === "artifact")
-        .map((edge) => edge.target);
-
-      const environmentEdge = parsedGraph.edges.find((edge) => {
-        if (!connectedViewerNodeIds.includes(edge.target)) return false;
-        if (normalizeViewerTargetHandle(edge.targetHandle) !== "environment") return false;
-        return nodesById.get(edge.source)?.type === "viewer.environment";
-      });
-      if (environmentEdge) {
-        environmentNodeId = environmentEdge.source;
-        environmentViewerNodeId = environmentEdge.target;
-      }
-    }
-
-    if (!environmentNodeId) {
-      const environmentNodes = parsedGraph.nodes.filter((node) => node.type === "viewer.environment");
-      if (environmentNodes.length === 1) {
-        environmentNodeId = environmentNodes[0].id;
-      }
-    }
-
-    if (environmentNodeId) {
-      const environmentNode = nodesById.get(environmentNodeId);
-      const graphParams =
-        environmentNode?.data?.params && typeof environmentNode.data.params === "object"
-          ? (environmentNode.data.params as Record<string, unknown>)
+      return true;
+    };
+    for (const meshArtifact of meshArtifacts) {
+      const rawMeta = meshArtifact.meta;
+      const meta =
+        rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)
+          ? (rawMeta as ArtifactMetaLike)
           : null;
-      const graphEnvironment = normalizeEnvironmentConfig(graphParams ?? undefined);
-      let artifactEnvironment: WorldManifestEnvironment | null = null;
+      const extraStorageKeys = Array.isArray(meta?.meshObjectStorageKeys)
+        ? meta.meshObjectStorageKeys.filter(
+            (value): value is string => typeof value === "string" && value.trim().length > 0
+          )
+        : [];
 
-      const localCandidate = artifacts
-        .filter((artifact) => artifact.nodeId === environmentNodeId && artifact.kind === "json")
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-      const dbCandidates = localCandidate
-        ? [localCandidate]
-        : await prisma.artifact.findMany({
-            where: {
-              projectId: selectedArtifact.projectId,
-              nodeId: environmentNodeId,
-              kind: "json"
-            },
-            orderBy: { createdAt: "desc" },
-            take: 8
-          });
-
-      for (const candidate of dbCandidates) {
-        const fromMeta = readEnvironmentFromMeta(candidate.meta);
-        if (fromMeta) {
-          artifactEnvironment = fromMeta;
-          break;
+      let extraCount = 0;
+      for (const storageKey of extraStorageKeys) {
+        const extraRawUrl = await safeGetSignedDownloadUrl(storageKey);
+        const extraUrl = toAbsoluteUrlMaybe(extraRawUrl, req);
+        if (!extraUrl) continue;
+        if (pushMeshUrl({ artifact: meshArtifact, url: extraUrl, idSuffix: `extra-${extraCount}` })) {
+          extraCount += 1;
         }
-        try {
-          const raw = await getObjectBuffer(candidate.storageKey);
-          const parsed = JSON.parse(raw.toString("utf8")) as unknown;
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            const fromBody = normalizeEnvironmentConfig(parsed as Record<string, unknown>);
-            artifactEnvironment = fromBody;
+      }
+
+      // If object-level mesh keys are present, they are the authoritative object list.
+      // Only fallback to base mesh URL when extras are unavailable.
+      if (extraStorageKeys.length === 0 || extraCount === 0) {
+        const rawUrl = await safeGetSignedDownloadUrl(meshArtifact.storageKey);
+        const url = toAbsoluteUrlMaybe(rawUrl, req);
+        if (url) {
+          pushMeshUrl({ artifact: meshArtifact, url });
+        }
+      }
+    }
+
+    const splats: WorldManifestSplatEntry[] = [];
+    const splatSeen = new Set<string>();
+    for (const splatArtifact of splatArtifacts) {
+      const sourceUrl = toAbsoluteUrlMaybe(await safeGetSignedDownloadUrl(splatArtifact.storageKey), req);
+      const sourceDedupKey = sourceUrl ? normalizeUrlForDedup(sourceUrl) : null;
+      if (!sourceDedupKey || splatSeen.has(sourceDedupKey)) continue;
+      splatSeen.add(sourceDedupKey);
+      const tilesetArtifact = latestTilesetBySourceArtifact.get(splatArtifact.id) ?? null;
+      const tilesetUrl = tilesetArtifact
+        ? `${req.nextUrl.origin}/api/storage/object?key=${encodeURIComponent(tilesetArtifact.storageKey)}`
+        : null;
+      const tilesetMeta = tilesetArtifact ? parseTilesetMeta(tilesetArtifact) : null;
+      splats.push({
+        id: `splat-${splatArtifact.id}`,
+        artifactId: splatArtifact.id,
+        runId: splatArtifact.runId,
+        nodeId: splatArtifact.nodeId,
+        kind: splatArtifact.kind,
+        sourceUrl,
+        tilesetUrl,
+        presetName: tilesetMeta?.presetName ?? null,
+        transform: {
+          position: [0, 0, 0],
+          rotation: [0, 0, 0, 1],
+          scale: [1, 1, 1]
+        }
+      });
+    }
+
+    const selectedSplat = splats.find((entry) => entry.artifactId === selectedArtifact.id) ?? null;
+    const canBuildTileset =
+      (selectedArtifact.kind === "point_ply" || selectedArtifact.kind === "splat_ksplat") &&
+      !selectedSplat?.tilesetUrl;
+    const meshRunIds = uniqueStrings(meshes.map((entry) => entry.runId));
+    const splatRunIds = uniqueStrings(splats.map((entry) => entry.runId));
+    const selectedRunId = selectedArtifact.runId ?? null;
+    const usedCrossRunFallback = false;
+
+    if (meshes.length === 0 && splats.length === 0) {
+      warnings.push(
+        "Selected run/version has no loadable scene artifacts for this viewer node. Rendering empty scene."
+      );
+    }
+
+    let resolvedEnvironment: WorldManifestEnvironment | null = null;
+    let environmentNodeId: string | null = null;
+    let environmentViewerNodeId: string | null = null;
+    if (parsedGraph) {
+      const nodesById = new Map(parsedGraph.nodes.map((node) => [node.id, node]));
+      const selectedNodeId = selectedArtifact.nodeId ?? null;
+
+      if (selectedNodeId) {
+        const connectedViewerNodeIds = parsedGraph.edges
+          .filter((edge) => edge.source === selectedNodeId)
+          .filter((edge) => nodesById.get(edge.target)?.type === "out.open_in_viewer")
+          .filter((edge) => normalizeViewerTargetHandle(edge.targetHandle) === "artifact")
+          .map((edge) => edge.target);
+
+        const environmentEdge = parsedGraph.edges.find((edge) => {
+          if (!connectedViewerNodeIds.includes(edge.target)) return false;
+          if (normalizeViewerTargetHandle(edge.targetHandle) !== "environment") return false;
+          return nodesById.get(edge.source)?.type === "viewer.environment";
+        });
+        if (environmentEdge) {
+          environmentNodeId = environmentEdge.source;
+          environmentViewerNodeId = environmentEdge.target;
+        }
+      }
+
+      if (!environmentNodeId) {
+        const environmentNodes = parsedGraph.nodes.filter((node) => node.type === "viewer.environment");
+        if (environmentNodes.length === 1) {
+          environmentNodeId = environmentNodes[0].id;
+        }
+      }
+
+      if (environmentNodeId) {
+        const environmentNode = nodesById.get(environmentNodeId);
+        const graphParams =
+          environmentNode?.data?.params && typeof environmentNode.data.params === "object"
+            ? (environmentNode.data.params as Record<string, unknown>)
+            : null;
+        const graphEnvironment = normalizeEnvironmentConfig(graphParams ?? undefined);
+        let artifactEnvironment: WorldManifestEnvironment | null = null;
+
+        const localCandidate = artifacts
+          .filter((artifact) => artifact.nodeId === environmentNodeId && artifact.kind === "json")
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+        const dbCandidates = localCandidate
+          ? [localCandidate]
+          : await prisma.artifact.findMany({
+              where: {
+                projectId: selectedArtifact.projectId,
+                nodeId: environmentNodeId,
+                kind: "json"
+              },
+              orderBy: { createdAt: "desc" },
+              take: 8
+            });
+
+        for (const candidate of dbCandidates) {
+          const fromMeta = readEnvironmentFromMeta(candidate.meta);
+          if (fromMeta) {
+            artifactEnvironment = fromMeta;
             break;
           }
-        } catch {
-          // Continue with next candidate.
+          try {
+            const raw = await getObjectBuffer(candidate.storageKey);
+            const parsed = JSON.parse(raw.toString("utf8")) as unknown;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              const fromBody = normalizeEnvironmentConfig(parsed as Record<string, unknown>);
+              artifactEnvironment = fromBody;
+              break;
+            }
+          } catch {
+            // Continue with next candidate.
+          }
         }
-      }
 
-      const hdriStorageKey =
-        graphParams && typeof graphParams.hdriStorageKey === "string" && graphParams.hdriStorageKey.trim().length > 0
-          ? graphParams.hdriStorageKey.trim()
-          : null;
-      let hdriUrlFromStorage: string | null = null;
-      if (hdriStorageKey) {
-        const rawUrl = await safeGetSignedDownloadUrl(hdriStorageKey);
-        hdriUrlFromStorage = toAbsoluteUrlMaybe(rawUrl, req);
-      }
+        const hdriStorageKey =
+          graphParams && typeof graphParams.hdriStorageKey === "string" && graphParams.hdriStorageKey.trim().length > 0
+            ? graphParams.hdriStorageKey.trim()
+            : null;
+        let hdriUrlFromStorage: string | null = null;
+        if (hdriStorageKey) {
+          const rawUrl = await safeGetSignedDownloadUrl(hdriStorageKey);
+          hdriUrlFromStorage = toAbsoluteUrlMaybe(rawUrl, req);
+        }
 
-      resolvedEnvironment = {
-        ...DEFAULT_ENVIRONMENT,
-        ...(artifactEnvironment ?? {}),
-        ...graphEnvironment,
-        hdriUrl: hdriUrlFromStorage ?? graphEnvironment.hdriUrl ?? artifactEnvironment?.hdriUrl ?? null
-      };
+        resolvedEnvironment = {
+          ...DEFAULT_ENVIRONMENT,
+          ...(artifactEnvironment ?? {}),
+          ...graphEnvironment,
+          hdriUrl: hdriUrlFromStorage ?? graphEnvironment.hdriUrl ?? artifactEnvironment?.hdriUrl ?? null
+        };
+      }
     }
-  }
 
     await logAuditEventFromRequest(req, {
       action: "viewer_manifest_access",
@@ -630,6 +548,7 @@ export async function GET(req: NextRequest) {
         splatRunIds,
         usedCrossRunFallback
       },
+      warnings,
       environment: resolvedEnvironment,
       environmentContext: {
         nodeId: environmentNodeId,

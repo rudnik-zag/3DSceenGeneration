@@ -1090,6 +1090,7 @@ export function UnifiedWorldViewer({
   const removedSplatSourceKeysRef = useRef<Set<string>>(new Set());
   const objectContextMenuRef = useRef<HTMLDivElement | null>(null);
   const artifactContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const deleteSelectedObjectsFromSceneRef = useRef<() => number>(() => 0);
   const autoAlignOnLoadRef = useRef(false);
   const groundAlignDebugGroupRef = useRef<THREE.Group | null>(null);
   const splatSupportSampleCacheRef = useRef<Map<string, THREE.Vector3[]>>(new Map());
@@ -2673,6 +2674,67 @@ export function UnifiedWorldViewer({
     [removeMeshFromScene, removeSplatFromScene]
   );
 
+  const deleteSelectedObjectsFromScene = useCallback(() => {
+    const targets: Array<{ kind: SelectableSceneObjectKind; id: string }> = [];
+    const targetKeys = new Set<string>();
+
+    const addTarget = (kind: SelectableSceneObjectKind, id: string | null | undefined) => {
+      const normalizedId = typeof id === "string" ? id.trim() : "";
+      if (normalizedId.length === 0) return;
+      const key = buildObjectItemKey(kind, normalizedId);
+      if (targetKeys.has(key)) return;
+      targetKeys.add(key);
+      targets.push({ kind, id: normalizedId });
+    };
+
+    if (activeGroupRef.current && selectedKindRef.current === "group") {
+      activeGroupRef.current.members.forEach((member) => {
+        addTarget(member.kind, member.id);
+      });
+    } else if (selectedRef.current) {
+      const selectedObject = selectedRef.current;
+      const selectedObjectId = selectedObject.name || selectedObject.uuid;
+      const selectedMesh =
+        meshRootsRef.current.find((entry) => entry === selectedObject || (entry.name || entry.uuid) === selectedObjectId) ?? null;
+      if (selectedMesh) {
+        addTarget("mesh", selectedMesh.name || selectedMesh.uuid);
+      } else {
+        const selectedSplat = [...splatHandlesRef.current].find((entry) => entry.object === selectedObject) ?? null;
+        if (selectedSplat) {
+          addTarget("splat", selectedSplat.id);
+        }
+      }
+    }
+
+    if (targets.length === 0 && selectedNameRef.current && (selectedKindRef.current === "mesh" || selectedKindRef.current === "splat")) {
+      addTarget(selectedKindRef.current, selectedNameRef.current);
+    }
+
+    if (targets.length === 0) return 0;
+
+    for (const target of targets) {
+      if (target.kind === "mesh") {
+        const object = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === target.id) ?? null;
+        const sourceMeshId = (object?.userData?.sourceMeshId as string | undefined) ?? target.id;
+        removeMeshFromScene(sourceMeshId);
+      } else {
+        const handle = [...splatHandlesRef.current].find((entry) => entry.id === target.id) ?? null;
+        if (handle?.sourceKey) {
+          removeSplatFromScene(handle.sourceKey);
+        }
+      }
+    }
+
+    setObjectContextMenu(null);
+    setSelectedGroup(null);
+    setSelectedObject(null);
+    return targets.length;
+  }, [removeMeshFromScene, removeSplatFromScene, setSelectedGroup, setSelectedObject]);
+
+  useEffect(() => {
+    deleteSelectedObjectsFromSceneRef.current = deleteSelectedObjectsFromScene;
+  }, [deleteSelectedObjectsFromScene]);
+
   const toggleObjectMarkedForGroup = useCallback((kind: SelectableSceneObjectKind, itemId: string) => {
     if (kind !== "mesh") return;
     const key = buildObjectItemKey(kind, itemId);
@@ -3490,6 +3552,13 @@ export function UnifiedWorldViewer({
           toggleTransformSpace();
           pushShortcutHint(`Space: ${transformSpaceRef.current === "world" ? "World" : "Local"}`);
           event.preventDefault();
+        } else if (event.code === "Delete" || event.code === "Backspace") {
+          const removedCount = deleteSelectedObjectsFromSceneRef.current();
+          if (removedCount > 0) {
+            pushShortcutHint(removedCount === 1 ? "Deleted selection" : `Deleted ${removedCount} objects`);
+            event.preventDefault();
+            return;
+          }
         }
       }
 
@@ -3498,13 +3567,6 @@ export function UnifiedWorldViewer({
         transformControls.setTranslationSnap(0.1);
         transformControls.setRotationSnap(THREE.MathUtils.degToRad(5));
         transformControls.setScaleSnap(0.1);
-      }
-      if (event.code === "Delete" || event.code === "Backspace") {
-        if (activeGroupRef.current && selectedKindRef.current === "group") {
-          setSelectedGroup(null);
-        } else if (selectedRef.current) {
-          setSelectedObject(null);
-        }
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -5319,20 +5381,6 @@ export function UnifiedWorldViewer({
         </div>
       </div>
 
-      <div
-        className={cn(
-          "pointer-events-none absolute left-3 top-[52px] z-30 flex items-center gap-2 motion-panel",
-          overlayVisible ? "opacity-100" : "opacity-0"
-        )}
-      >
-        <div className="rounded-full studio-chip px-2 py-0.5 text-[11px] backdrop-blur">
-          Runtime: {activeRuntimeLabel}
-        </div>
-        <div className="rounded-full studio-chip px-2 py-0.5 text-[11px] backdrop-blur">
-          Gizmo: {transformMode} / {transformSpace}
-        </div>
-      </div>
-
       {openPanel === "file" && fileMenu ? (
         <div className="absolute right-3 top-[54px] z-30 w-[360px] rounded-xl studio-panel p-3 panel-fade-in">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">File</div>
@@ -5356,24 +5404,17 @@ export function UnifiedWorldViewer({
           <div className="mb-2 truncate text-xs text-zinc-400">{fileMenu.selectedArtifactText}</div>
           <div className="mb-2">
             <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Bundle Mode</div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 gap-2">
               <Button
                 size="sm"
-                variant={fileMenu.bundleMode === "same_node" ? "default" : "outline"}
+                variant="default"
                 className="h-8 rounded-md text-xs"
                 onClick={() => fileMenu.onBundleModeChange?.("same_node")}
               >
-                Same Node
-              </Button>
-              <Button
-                size="sm"
-                variant={fileMenu.bundleMode === "project_fallback" ? "default" : "outline"}
-                className="h-8 rounded-md text-xs"
-                onClick={() => fileMenu.onBundleModeChange?.("project_fallback")}
-              >
-                Project Fallback
+                Selected Run Only
               </Button>
             </div>
+            <div className="mt-1 text-[11px] text-zinc-400">Cross-run fallback is disabled.</div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Button size="sm" className="h-8 rounded-md text-xs" onClick={fileMenu.onPickLocalFile}>

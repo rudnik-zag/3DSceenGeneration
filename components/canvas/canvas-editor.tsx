@@ -2474,10 +2474,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     if (!selectedNode || selectedNode.type !== "model.groundingdino") return null;
     return selectedNodeArtifacts.find((artifact) => artifact.kind === "json") ?? null;
   }, [selectedNode, selectedNodeArtifacts]);
-  const viewerArtifactId =
-    selectedNode?.data.latestArtifactId ?? nodes.find((node) => Boolean(node.data.latestArtifactId))?.data.latestArtifactId ?? null;
-  const viewerHref = viewerArtifactId
-    ? `/app/p/${projectId}/viewer?artifactId=${viewerArtifactId}`
+  const selectedNodeSceneArtifactId = selectedNode
+    ? selectedNode.type === "pipeline.scene_generation"
+      ? selectedNode.data.outputArtifacts?.generatedScene?.id ??
+        selectedNode.data.outputArtifacts?.scene?.id ??
+        selectedNode.data.latestArtifactId ??
+        null
+      : selectedNode.type === "model.sam3d_objects"
+        ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
+        : selectedNode.data.latestArtifactId ?? null
+    : null;
+  const viewerHref = selectedNodeSceneArtifactId
+    ? `/app/p/${projectId}/viewer?artifactId=${selectedNodeSceneArtifactId}${selectedNode ? `&nodeId=${selectedNode.id}` : ""}`
     : `/app/p/${projectId}/viewer`;
 
   const inspectArtifactJson = useCallback(
