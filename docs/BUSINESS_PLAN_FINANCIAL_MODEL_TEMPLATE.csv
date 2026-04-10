@@ -1,0 +1,31 @@
+section,line_item,year_1,year_2,year_3,year_4,year_5,notes
+INPUTS,active_paying_teams,300,1100,2800,5200,8600,Replace with your funnel assumptions
+INPUTS,blended_arpa_usd_per_month,95,110,125,140,155,Subscription plus token-pack attach blended ARPA
+INPUTS,token_pack_attach_rate_percent,18,24,30,35,38,Percent of paying teams buying token packs each month
+INPUTS,avg_token_pack_revenue_per_buying_team_per_month,35,45,55,65,75,Adjust with actual observed purchase behavior
+INPUTS,gross_margin_percent_target,69,70,73,75,76,Use this as sanity check against modeled COGS
+,,,,,,,
+REVENUE,subscription_revenue_usd,=B2*B3*12,=C2*C3*12,=D2*D3*12,=E2*E3*12,=F2*F3*12,Teams x ARPA x 12
+REVENUE,token_pack_revenue_usd,=B2*(B4/100)*B5*12,=C2*(C4/100)*C5*12,=D2*(D4/100)*D5*12,=E2*(E4/100)*E5*12,=F2*(F4/100)*F5*12,Buying teams x avg token-pack spend x 12
+REVENUE,total_revenue_usd,=B8+B9,=C8+C9,=D8+D9,=E8+E9,=F8+F9,Top-line revenue
+,,,,,,,
+COGS,compute_inference_usd,120000,410000,980000,1900000,3200000,Worker and model execution costs
+COGS,storage_cdn_egress_usd,18000,72000,180000,360000,620000,Artifacts and delivery
+COGS,third_party_ai_apis_usd,9000,22000,85000,180000,300000,External model/API spend
+COGS,total_cogs_usd,=B12+B13+B14,=C12+C13+C14,=D12+D13+D14,=E12+E13+E14,=F12+F13+F14,Total cost of goods sold
+COGS,gross_profit_usd,=B10-B15,=C10-C15,=D10-D15,=E10-E15,=F10-F15,Revenue minus COGS
+COGS,gross_margin_percent,=B16/B10,=C16/C10,=D16/D10,=E16/E10,=F16/F10,Compare vs target in row 6
+,,,,,,,
+OPEX,engineering_and_product_usd,700000,1050000,1650000,2500000,3700000,Salaries and tooling
+OPEX,sales_and_marketing_usd,220000,520000,980000,1650000,2600000,CAC-driving spend
+OPEX,g_and_a_usd,140000,220000,300000,420000,600000,Legal finance admin ops
+OPEX,total_opex_usd,=B19+B20+B21,=C19+C20+C21,=D19+D20+D21,=E19+E20+E21,=F19+F20+F21,Total operating expenses
+,,,,,,,
+PROFITABILITY,ebitda_usd,=B16-B22,=C16-C22,=D16-D22,=E16-E22,=F16-F22,Earnings before interest taxes depreciation amortization
+PROFITABILITY,ebitda_margin_percent,=B24/B10,=C24/C10,=D24/D10,=E24/E10,=F24/F10,Operating efficiency
+PROFITABILITY,burn_multiple_if_negative,=IF(B24<0,ABS(B24)/(B10-B16),0),=IF(C24<0,ABS(C24)/(C10-C16),0),=IF(D24<0,ABS(D24)/(D10-D16),0),=IF(E24<0,ABS(E24)/(E10-E16),0),=IF(F24<0,ABS(F24)/(F10-F16),0),Net burn divided by net new ARR proxy
+,,,,,,,
+CASH_FLOW,starting_cash_usd,2500000,=B29,=C29,=D29,=E29,Seed raise assumption in Y1
+CASH_FLOW,net_cash_flow_usd,=B24,=C24,=D24,=E24,=F24,Simplified approximation; replace with full cash model
+CASH_FLOW,ending_cash_usd,=B28+B29,=C28+C29,=D28+D29,=E28+E29,=F28+F29,Track runway and financing needs
+CASH_FLOW,months_of_runway_end_of_year,=IF(B29<0,0,(B29/ABS(B22-B16))*12),=IF(C29<0,0,(C29/ABS(C22-C16))*12),=IF(D29<0,0,(D29/ABS(D22-D16))*12),=IF(E29<0,0,(E29/ABS(E22-E16))*12),=IF(F29<0,0,(F29/ABS(F22-F16))*12),Approximate runway based on operating burn

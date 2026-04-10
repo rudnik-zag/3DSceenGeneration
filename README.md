@@ -42,7 +42,13 @@ Full-stack workflow platform for AI/geometry pipelines:
 - `lib/storage/s3.ts` storage, signed URLs, fallback, prefix delete
 - `worker/index.ts` BullMQ worker
 - `prisma/` schema, migrations, seed
+- `docs/PROJECT_DOCUMENTATION.md` full architecture and extension guide
 - `docs/IMPLEMENTATION_RUNBOOK.md` deeper implementation notes
+- `docs/OBSERVABILITY_ANALYTICS_GUIDE.md` telemetry + analytics APIs
+- `docs/METABASE_ANALYTICS_PLAYBOOK.md` Metabase setup and dashboard flow
+- `docs/sql/METABASE_QUERIES.sql` ready SQL query pack
+- `docs/sql/METABASE_VIEW_QUERIES.sql` view-based query pack
+- `scripts/sql/analytics_views.sql` prebuilt DB analytics views
 
 ## Prerequisites (Ubuntu)
 - Node.js 20+
@@ -124,6 +130,24 @@ STOP_DOCKER_INFRA=0 bash scripts/dev-stack.sh stop
 Open:
 - App: `http://localhost:3000`
 - MinIO console: `http://localhost:9001` (`minioadmin` / `minioadmin`)
+
+## Metabase Analytics (Users, Projects, Runs)
+Start Metabase:
+
+```bash
+bash scripts/metabase-start.sh
+```
+
+Install prebuilt analytics views:
+
+```bash
+pnpm analytics:views
+```
+
+Then follow:
+- `docs/METABASE_ANALYTICS_PLAYBOOK.md`
+- `docs/sql/METABASE_QUERIES.sql`
+- `docs/sql/METABASE_VIEW_QUERIES.sql`
 
 ## Concrete Run Instructions (Manual)
 This is the manual setup: infra in Docker, app+worker on host.

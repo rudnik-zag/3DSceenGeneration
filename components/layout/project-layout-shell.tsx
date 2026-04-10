@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 
 import { ProjectNav } from "@/components/layout/project-nav";
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +23,41 @@ export function ProjectLayoutShell({ projectName, counts, nav, children }: Proje
   const isImmersiveRoute = pathname.includes("/viewer") || pathname.includes("/canvas");
 
   if (isImmersiveRoute) {
-    return <div className="h-[calc(100vh-3.5rem)] overflow-hidden">{children}</div>;
+    return (
+      <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden">
+        <div className="border-b border-border/70 panel-blur px-3 py-2 md:px-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <Link
+                href="/app"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md studio-chip text-zinc-300 motion-fast hover:border-primary/35 hover:text-white"
+                aria-label="Back to projects"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+              <div className="min-w-0">
+                <h1 className="truncate text-sm font-semibold text-white md:text-base">{projectName}</h1>
+              </div>
+            </div>
+
+            <div className="hidden items-center gap-2 sm:flex">
+              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
+                {counts.graphs} graphs
+              </Badge>
+              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
+                {counts.runs} runs
+              </Badge>
+              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
+                {counts.artifacts} artifacts
+              </Badge>
+            </div>
+          </div>
+          <ProjectNav items={nav} variant="underline" className="mt-1.5" />
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      </div>
+    );
   }
 
   return (

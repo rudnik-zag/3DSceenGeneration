@@ -23,6 +23,7 @@ type BundleMode = "same_node" | "project_fallback";
 
 interface WorldManifestResponse {
   artifactId: string;
+  warnings?: string[];
   context?: {
     selectedRunId?: string | null;
     selectedNodeId?: string | null;
@@ -306,11 +307,13 @@ function revokeLocalArtifactUrl(artifact: ViewerArtifact | null | undefined) {
 export function ViewerLoader({
   initialArtifact,
   artifactPicker,
-  initialBundleMode
+  initialBundleMode,
+  startEmpty
 }: {
   initialArtifact: ViewerArtifact | null;
   artifactPicker?: ViewerArtifactPicker | null;
   initialBundleMode?: BundleMode;
+  startEmpty?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const appendInputRef = useRef<HTMLInputElement>(null);
@@ -323,8 +326,8 @@ export function ViewerLoader({
   const [buildJobId, setBuildJobId] = useState<string | null>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [viewerResetVersion, setViewerResetVersion] = useState(0);
-  const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "project_fallback");
-  const [sceneCleared, setSceneCleared] = useState(false);
+  const [bundleMode, setBundleMode] = useState<BundleMode>(initialBundleMode ?? "same_node");
+  const [sceneCleared, setSceneCleared] = useState(Boolean(startEmpty));
   const localArtifactRef = useRef<ViewerArtifact | null>(null);
   const localSceneAdditionsRef = useRef<ViewerArtifact[]>([]);
 
@@ -345,8 +348,9 @@ export function ViewerLoader({
       baseManifest = buildSingleArtifactManifest(localArtifact);
     }
     if (!baseManifest && worldManifest) {
+      const forceEmptyFromManifest = worldManifest.meshes.length === 0 && worldManifest.splats.length === 0;
       const extraMeshUrls =
-        activeArtifact && Array.isArray(activeArtifact.additionalSceneUrls)
+        !forceEmptyFromManifest && activeArtifact && Array.isArray(activeArtifact.additionalSceneUrls)
           ? activeArtifact.additionalSceneUrls.filter(
               (value): value is string => typeof value === "string" && value.length > 0
             )
@@ -551,12 +555,18 @@ export function ViewerLoader({
     };
 
     const parts = [renderPart("Meshes", meshRunIds), renderPart("Splats", splatRunIds)];
-    parts.unshift(worldManifest.bundle?.mode === "same_node" ? "mode: same node" : "mode: project fallback");
-    if (worldManifest.bundle?.usedCrossRunFallback) {
-      parts.push("cross-run fallback");
-    }
+    parts.unshift("mode: selected run");
     return parts.join(" • ");
   }, [localArtifact, worldManifest]);
+  const manifestWarnings = useMemo(
+    () =>
+      localArtifact
+        ? []
+        : (worldManifest?.warnings ?? []).filter(
+            (value): value is string => typeof value === "string" && value.trim().length > 0
+          ),
+    [localArtifact, worldManifest]
+  );
 
   const onPickLocalFile = () => {
     inputRef.current?.click();
@@ -675,10 +685,12 @@ export function ViewerLoader({
     setViewerResetVersion((value) => value + 1);
   };
   const onBundleModeChange = (nextMode: BundleMode) => {
-    setBundleMode(nextMode);
+    void nextMode;
+    const lockedMode: BundleMode = "same_node";
+    setBundleMode(lockedMode);
     if (typeof window !== "undefined") {
       const nextUrl = new URL(window.location.href);
-      nextUrl.searchParams.set("bundleMode", nextMode);
+      nextUrl.searchParams.set("bundleMode", lockedMode);
       window.history.replaceState(null, "", nextUrl.toString());
     }
   };
@@ -728,6 +740,18 @@ export function ViewerLoader({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
+        {manifestWarnings.length > 0 ? (
+          <Card className="mb-2 rounded-2xl border-amber-300/40 bg-amber-500/10">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-amber-100">Viewer Warning</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1 text-sm text-amber-100/90">
+              {manifestWarnings.map((warning, index) => (
+                <p key={`${warning}-${index}`}>{warning}</p>
+              ))}
+            </CardContent>
+          </Card>
+        ) : null}
         {worldManifestLoading && !localArtifact ? (
           <Card className="rounded-2xl border-border/70 panel-blur">
             <CardHeader>

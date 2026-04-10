@@ -1,16 +1,23 @@
-import { notFound } from "next/navigation";
 import { promises as fs } from "fs";
 import path from "path";
 import { createHash } from "crypto";
+import Link from "next/link";
 
 import { ViewerLoader } from "@/components/viewer/viewer-loader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
 import { isRenderableInViewer, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
 
 type BundleMode = "same_node" | "project_fallback";
+
+interface NodeMetaInfo {
+  id: string;
+  type: string;
+  label: string | null;
+}
 
 interface SceneResultManifest {
   scene_path?: string;
@@ -243,21 +250,55 @@ function buildViewerHref(projectId: string, payload: { artifactId?: string; node
   return query ? `/app/p/${projectId}/viewer?${query}` : `/app/p/${projectId}/viewer`;
 }
 
+function isTruthyQuery(value: string | undefined) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function shortId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
+}
+
+function parseNodeMetaMap(rawGraph: unknown) {
+  const map = new Map<string, NodeMetaInfo>();
+  if (!rawGraph || typeof rawGraph !== "object" || Array.isArray(rawGraph)) return map;
+  const record = rawGraph as Record<string, unknown>;
+  const nodes = Array.isArray(record.nodes) ? record.nodes : [];
+  for (const entry of nodes) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const node = entry as Record<string, unknown>;
+    const id = typeof node.id === "string" ? node.id : "";
+    const type = typeof node.type === "string" ? node.type : "";
+    if (!id || !type) continue;
+    const data =
+      node.data && typeof node.data === "object" && !Array.isArray(node.data)
+        ? (node.data as Record<string, unknown>)
+        : null;
+    const label = data && typeof data.label === "string" && data.label.trim().length > 0 ? data.label.trim() : null;
+    map.set(id, {
+      id,
+      type,
+      label
+    });
+  }
+  return map;
+}
+
 export default async function ViewerPage({
   params,
   searchParams
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ artifactId?: string; nodeId?: string; bundleMode?: string }>;
+  searchParams: Promise<{ artifactId?: string; nodeId?: string; bundleMode?: string; empty?: string }>;
 }) {
   const { projectId } = await params;
-  const { artifactId, nodeId, bundleMode } = await searchParams;
-  const selectedBundleMode: BundleMode = bundleMode === "same_node" ? "same_node" : "project_fallback";
+  const { artifactId, nodeId, empty } = await searchParams;
+  const openEmptyViewer = isTruthyQuery(empty);
+  const selectedBundleMode: BundleMode = "same_node";
 
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
-  if (!project) {
-    notFound();
-  }
+  const access = await requirePageProjectAccess(projectId, "viewer");
+  const project = access.project;
 
   const projectArtifacts = await prisma.artifact.findMany({
     where: {
@@ -275,13 +316,118 @@ export default async function ViewerPage({
     })
   );
 
+  const hasViewerContext = Boolean(artifactId || nodeId || openEmptyViewer);
+  if (!hasViewerContext) {
+    const latestGraph = await prisma.graph.findFirst({
+      where: {
+        projectId
+      },
+      orderBy: [{ version: "desc" }, { updatedAt: "desc" }],
+      select: {
+        graphJson: true
+      }
+    });
+    const nodeMetaMap = parseNodeMetaMap(latestGraph?.graphJson ?? null);
+
+    const groupedByNode = artifacts.reduce<
+      Array<{
+        nodeId: string;
+        nodeType: string;
+        nodeLabel: string | null;
+        items: typeof artifacts;
+        latestAt: number;
+      }>
+    >((acc, artifact) => {
+      const existing = acc.find((entry) => entry.nodeId === artifact.nodeId);
+      const nodeMeta = nodeMetaMap.get(artifact.nodeId);
+      if (existing) {
+        existing.items.push(artifact);
+        existing.latestAt = Math.max(existing.latestAt, artifact.createdAt.getTime());
+        return acc;
+      }
+      acc.push({
+        nodeId: artifact.nodeId,
+        nodeType: nodeMeta?.type ?? artifact.nodeId.split("-")[0] ?? "unknown",
+        nodeLabel: nodeMeta?.label ?? null,
+        items: [artifact],
+        latestAt: artifact.createdAt.getTime()
+      });
+      return acc;
+    }, []);
+
+    for (const group of groupedByNode) {
+      group.items.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    }
+    groupedByNode.sort((a, b) => b.latestAt - a.latestAt);
+
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-3">
+        <Card className="rounded-2xl border-border/70 panel-blur">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-white">Choose Viewer Source</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-zinc-300">
+            <p>Select node/version to open in viewer, or start with an empty scene.</p>
+            <div className="flex flex-wrap gap-2">
+              <Link
+                href={`/app/p/${projectId}/viewer?empty=1`}
+                className="inline-flex h-9 items-center justify-center rounded-md border border-border/70 bg-background/60 px-3 text-xs text-zinc-100 transition hover:bg-white/10"
+              >
+                Open Empty Viewer
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+
+        {groupedByNode.length === 0 ? (
+          <Card className="rounded-2xl border-border/70 panel-blur">
+            <CardContent className="py-6 text-sm text-muted-foreground">
+              No scene artifacts found yet. Run `CustomSceneGeneration` node first.
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2">
+            {groupedByNode.map((group) => (
+              <Card key={group.nodeId} className="rounded-2xl border-border/70 panel-blur">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm text-white">
+                    {group.nodeLabel ?? group.nodeType}
+                  </CardTitle>
+                  <p className="text-xs text-zinc-400">{group.nodeId}</p>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {group.items.slice(0, 8).map((artifact) => (
+                    <Link
+                      key={artifact.id}
+                      href={buildViewerHref(projectId, {
+                        artifactId: artifact.id,
+                        nodeId: group.nodeId,
+                        bundleMode: selectedBundleMode
+                      })}
+                      className="flex items-center justify-between rounded-md border border-border/60 bg-background/50 px-2 py-1.5 text-xs text-zinc-200 transition hover:bg-white/10"
+                    >
+                      <span>{artifact.kind}</span>
+                      <span className="text-zinc-400">
+                        {new Date(artifact.createdAt).toLocaleString()} · {shortId(artifact.id)}
+                      </span>
+                    </Link>
+                  ))}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const scopedArtifacts = nodeId ? artifacts.filter((artifact) => artifact.nodeId === nodeId) : [];
   const artifactList = artifacts;
-  let selectedArtifact =
-    artifacts.find((artifact) => artifact.id === artifactId) ??
-    scopedArtifacts[0] ??
-    artifacts[0] ??
-    null;
+  let selectedArtifact = artifactId
+    ? artifacts.find((artifact) => artifact.id === artifactId) ?? null
+    : nodeId
+      ? scopedArtifacts[0] ?? null
+      : null;
   let initialArtifact:
     | {
         id: string;
@@ -357,9 +503,7 @@ export default async function ViewerPage({
     };
   };
 
-  const candidateArtifacts = selectedArtifact
-    ? [selectedArtifact, ...artifactList.filter((artifact) => artifact.id !== selectedArtifact?.id)]
-    : artifactList;
+  const candidateArtifacts = selectedArtifact ? [selectedArtifact] : [];
   for (const candidate of candidateArtifacts) {
     const hydrated = await hydrateInitialArtifact(candidate);
     if (!hydrated) continue;
@@ -384,6 +528,9 @@ export default async function ViewerPage({
   }
 
   const activeNodeScope = nodeId ?? selectedArtifact?.nodeId ?? null;
+  const pickerArtifacts = activeNodeScope
+    ? artifactList.filter((artifact) => artifact.nodeId === activeNodeScope)
+    : artifactList;
   const selectedRenderer = selectedArtifact
     ? selectViewerRenderer({
         kind: selectedArtifact.kind,
@@ -392,7 +539,7 @@ export default async function ViewerPage({
       })
     : null;
   const artifactPicker =
-    selectedArtifact && artifactList.length > 0
+    selectedArtifact && pickerArtifacts.length > 0
       ? {
           selectedKind: selectedArtifact.kind,
           selectedArtifactText: `Artifact ${selectedArtifact.id}`,
@@ -405,11 +552,12 @@ export default async function ViewerPage({
                 : selectedRenderer === "three"
                   ? "Three.js"
                   : null,
-          options: artifactList.map((artifact) => ({
+          options: pickerArtifacts.map((artifact) => ({
             id: artifact.id,
             kind: artifact.kind,
             href: buildViewerHref(projectId, {
               artifactId: artifact.id,
+              nodeId: activeNodeScope ?? undefined,
               bundleMode: selectedBundleMode
             }),
             label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.id}`,
@@ -420,6 +568,16 @@ export default async function ViewerPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {openEmptyViewer ? (
+        <Card className="mb-2 rounded-2xl border-sky-300/30 bg-sky-500/10">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sky-100">Empty Viewer Mode</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-sky-100/90">
+            Scene started empty. Load a local file, add external object, or open a node version from chooser.
+          </CardContent>
+        </Card>
+      ) : null}
       {storageIssue ? (
         <Card className="rounded-2xl border-amber-300/40 bg-amber-500/10">
           <CardHeader className="pb-2">
@@ -435,6 +593,7 @@ export default async function ViewerPage({
         initialArtifact={initialArtifact}
         artifactPicker={artifactPicker}
         initialBundleMode={selectedBundleMode}
+        startEmpty={openEmptyViewer && !initialArtifact}
       />
     </div>
   );

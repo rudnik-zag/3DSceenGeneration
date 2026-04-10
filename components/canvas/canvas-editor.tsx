@@ -462,6 +462,22 @@ function withStyledEdge(edge: Edge): Edge {
   };
 }
 
+async function readApiErrorMessage(response: Response, fallback: string) {
+  const payload = await response.json().catch(() => null);
+  if (payload && typeof payload === "object") {
+    const message =
+      typeof payload.message === "string"
+        ? payload.message
+        : typeof payload.error === "string"
+          ? payload.error
+          : null;
+    if (message) {
+      return message;
+    }
+  }
+  return fallback;
+}
+
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
@@ -474,10 +490,12 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   const snapToGrid = true;
   const [nodeScalePreset, setNodeScalePreset] = useState<NodeUiScale>("balanced");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [isStartingRun, setIsStartingRun] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState(versions[0]?.id ?? "");
   const [runLogs, setRunLogs] = useState("");
   const [showAdvancedInspector, setShowAdvancedInspector] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedArtifactPreview, setSelectedArtifactPreview] = useState<{ previewUrl: string | null; jsonSnippet: string | null }>({
     previewUrl: null,
     jsonSnippet: null
@@ -1413,6 +1431,22 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         target?.isContentEditable;
       const keyLower = event.key.toLowerCase();
 
+      if (!isTyping && event.key === "Escape") {
+        setPaneMenu(null);
+        setNodeMenu(null);
+        setNodeSearchMenu(null);
+        setPendingConnect(null);
+        setNodes((prev) => {
+          if (!prev.some((node) => node.selected)) return prev;
+          return prev.map((node) => (node.selected ? { ...node, selected: false } : node));
+        });
+        setEdges((prev) => {
+          if (!prev.some((edge) => edge.selected)) return prev;
+          return prev.map((edge) => (edge.selected ? { ...edge, selected: false } : edge));
+        });
+        return;
+      }
+
       if (!isTyping && (event.ctrlKey || event.metaKey) && !event.shiftKey && keyLower === "c") {
         if (copySelectionToClipboard()) {
           event.preventDefault();
@@ -2288,8 +2322,35 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
   );
 
   const startRun = async (startNodeId?: string) => {
+    if (isStartingRun) return;
+    setIsStartingRun(true);
     try {
       const latestGraphId = await saveGraph({ silent: true });
+      const estimateRes = await fetch("/api/billing/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          graphId: latestGraphId,
+          startNodeId
+        })
+      });
+      if (!estimateRes.ok) {
+        throw new Error(await readApiErrorMessage(estimateRes, "Failed to estimate token usage"));
+      }
+      const estimatePayload = await estimateRes.json().catch(() => ({}));
+      const estimatedCost = Math.max(0, Math.round(Number(estimatePayload?.estimate?.estimatedTokenCost ?? 0)));
+      const availableTokens = Math.max(0, Math.round(Number(estimatePayload?.availableTokens ?? 0)));
+      const canAfford = estimatePayload?.canAfford !== false;
+      const enforcementEnabled = estimatePayload?.enforcementEnabled !== false;
+      if (enforcementEnabled && !canAfford) {
+        toast({
+          title: "Insufficient tokens",
+          description: `Estimated ${estimatedCost} tokens, available ${availableTokens}.`
+        });
+        return;
+      }
+
       markNodesPreparingRun(startNodeId);
       const endpoint = startNodeId
         ? `/api/projects/${projectId}/nodes/${startNodeId}/run`
@@ -2299,14 +2360,21 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(startNodeId ? { graphId: latestGraphId } : { graphId: latestGraphId, startNodeId })
       });
-      if (!res.ok) throw new Error("Failed to queue run");
+      if (!res.ok) throw new Error(await readApiErrorMessage(res, "Failed to queue run"));
 
       const data = await res.json();
       setActiveRunId(data.run.id);
-      toast({ title: "Run started", description: `Run ${data.run.id.slice(0, 8)} queued` });
+      const reservedCost = Math.max(0, Math.round(Number(data?.billing?.estimatedTokenCost ?? estimatedCost)));
+      const description =
+        reservedCost > 0
+          ? `Run ${data.run.id.slice(0, 8)} queued • ${reservedCost} tokens reserved`
+          : `Run ${data.run.id.slice(0, 8)} queued`;
+      toast({ title: "Run started", description });
       pollRun(data.run.id, startNodeId ?? null);
     } catch (error) {
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
+    } finally {
+      setIsStartingRun(false);
     }
   };
 
@@ -2406,10 +2474,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
     if (!selectedNode || selectedNode.type !== "model.groundingdino") return null;
     return selectedNodeArtifacts.find((artifact) => artifact.kind === "json") ?? null;
   }, [selectedNode, selectedNodeArtifacts]);
-  const viewerArtifactId =
-    selectedNode?.data.latestArtifactId ?? nodes.find((node) => Boolean(node.data.latestArtifactId))?.data.latestArtifactId ?? null;
-  const viewerHref = viewerArtifactId
-    ? `/app/p/${projectId}/viewer?artifactId=${viewerArtifactId}`
+  const selectedNodeSceneArtifactId = selectedNode
+    ? selectedNode.type === "pipeline.scene_generation"
+      ? selectedNode.data.outputArtifacts?.generatedScene?.id ??
+        selectedNode.data.outputArtifacts?.scene?.id ??
+        selectedNode.data.latestArtifactId ??
+        null
+      : selectedNode.type === "model.sam3d_objects"
+        ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
+        : selectedNode.data.latestArtifactId ?? null
+    : null;
+  const viewerHref = selectedNodeSceneArtifactId
+    ? `/app/p/${projectId}/viewer?artifactId=${selectedNodeSceneArtifactId}${selectedNode ? `&nodeId=${selectedNode.id}` : ""}`
     : `/app/p/${projectId}/viewer`;
 
   const inspectArtifactJson = useCallback(
@@ -2470,33 +2546,64 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
   return (
     <div className="h-full">
-      <div className="flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
-        <div className="flex flex-wrap items-center gap-2 border-b border-border/70 bg-black/30 p-2.5">
-          <Badge className="rounded-full border border-white/10 bg-black/30 text-[11px] text-zinc-300" variant="secondary">
+      <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
+        <div className="pointer-events-none absolute left-3 right-3 top-3 z-30">
+          <div className="pointer-events-auto flex items-center gap-2 overflow-x-auto rounded-2xl studio-toolbar p-2">
+          <div className="inline-flex shrink-0 items-center rounded-xl border border-border/70 bg-background/40 p-1 text-xs">
+            <Link
+              href={`/app/p/${projectId}/canvas`}
+              className="rounded-lg bg-primary/15 px-2.5 py-1 text-primary"
+            >
+              Canvas
+            </Link>
+            <Link
+              href={`/app/p/${projectId}/runs`}
+              className="rounded-lg px-2.5 py-1 text-zinc-300 motion-fast hover:bg-white/10 hover:text-white"
+            >
+              Runs
+            </Link>
+            <Link
+              href={`/app/p/${projectId}/viewer`}
+              className="rounded-lg px-2.5 py-1 text-zinc-300 motion-fast hover:bg-white/10 hover:text-white"
+            >
+              Viewer
+            </Link>
+          </div>
+          <Badge className="shrink-0 rounded-full studio-chip text-[11px]" variant="secondary">
             {projectName}
           </Badge>
-          <Button size="sm" className="rounded-xl" onClick={() => startRun()}>
+          <Button size="sm" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => startRun()} disabled={isStartingRun}>
             <Play className="mr-1 h-4 w-4" /> Run workflow
           </Button>
           <Button
             size="sm"
             variant="secondary"
-            className="rounded-xl"
+            className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs lg:inline-flex"
             onClick={() => startRun(selectedNode?.id)}
-            disabled={!selectedNode || !canNodeRun(selectedNode)}
+            disabled={isStartingRun || !selectedNode || !canNodeRun(selectedNode)}
           >
             <Zap className="mr-1 h-4 w-4" /> Run from selection
           </Button>
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={cancelRun} disabled={!activeRunId}>
+          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={cancelRun} disabled={!activeRunId}>
             <Square className="mr-1 h-4 w-4" /> Stop
           </Button>
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void saveGraph()} disabled={isSaving}>
+          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => void saveGraph()} disabled={isSaving}>
             <Save className="mr-1 h-4 w-4" /> {isSaving ? "Saving..." : "Save"}
           </Button>
+          {isStartingRun || activeRunId ? (
+            <Badge
+              className={`shrink-0 rounded-full border border-emerald-400/35 bg-emerald-500/10 text-[11px] text-emerald-200 ${
+                activeRunId ? "running-pulse" : ""
+              }`}
+              variant="secondary"
+            >
+              {isStartingRun ? "Starting run..." : "Run active"}
+            </Badge>
+          ) : null}
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="rounded-xl">
+              <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs">
                 <SlidersHorizontal className="mr-1 h-4 w-4" /> Edit
               </Button>
             </DropdownMenuTrigger>
@@ -2563,12 +2670,12 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button size="sm" variant="outline" className="rounded-xl" onClick={shareProject}>
+          <Button size="sm" variant="outline" className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs xl:inline-flex" onClick={shareProject}>
             <Share2 className="mr-1 h-4 w-4" /> Share
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="rounded-xl">
+              <Button size="sm" variant="outline" className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs xl:inline-flex">
                 <WandSparkles className="mr-1 h-4 w-4" /> Workflow
               </Button>
             </DropdownMenuTrigger>
@@ -2588,327 +2695,30 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="rounded-xl">
-                <SlidersHorizontal className="mr-1 h-4 w-4" /> Inspector
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-[430px] rounded-xl border-border/70 bg-[#090d18]/95 p-2 text-zinc-100">
-              <Tabs defaultValue="params" className="w-full">
-                <TabsList className="grid w-full grid-cols-3 rounded-xl bg-background/70">
-                  <TabsTrigger value="params" className="rounded-lg">Params</TabsTrigger>
-                  <TabsTrigger value="outputs" className="rounded-lg">Outputs</TabsTrigger>
-                  <TabsTrigger value="logs" className="rounded-lg">Logs</TabsTrigger>
-                </TabsList>
+          <Button
+            size="sm"
+            variant={inspectorOpen ? "default" : "outline"}
+            className="h-8 shrink-0 rounded-lg px-2.5 text-xs"
+            onClick={() => setInspectorOpen((value) => !value)}
+          >
+            <SlidersHorizontal className="mr-1 h-4 w-4" /> Inspector
+          </Button>
 
-                <TabsContent value="params" className="mt-3">
-                  {!selectedNode || !spec ? (
-                    <p className="text-sm text-muted-foreground">Select a node to edit parameters.</p>
-                  ) : (
-                    <>
-                      <div className="mb-3 space-y-1">
-                        <h3 className="font-semibold text-white">{spec.title}</h3>
-                        <p className="text-xs text-muted-foreground">{selectedNode.id}</p>
-                        {selectedNode.type === "model.sam2" ? (
-                          <p className="text-xs text-cyan-300">
-                            Mode:{" "}
-                            {selectedNode.data.runtimeMode === "guided"
-                              ? "Guided segmentation (from ObjectDetection)"
-                              : "Full segmentation"}
-                          </p>
-                        ) : null}
-                        {selectedNode.data.runtimeWarning ? (
-                          <p className="text-xs text-amber-300">{selectedNode.data.runtimeWarning}</p>
-                        ) : null}
-                      </div>
-                      <Separator className="mb-3" />
-                      {canNodeRun(selectedNode) ? (
-                        <Button className="mb-3 w-full rounded-xl" onClick={() => startRun(selectedNode.id)}>
-                          <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
-                        </Button>
-                      ) : selectedNode.type === "input.image" ? (
-                        <div className="mb-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
-                          Run is available only when source mode is <span className="text-zinc-200">generate</span>.
-                        </div>
-                      ) : null}
-                      <ScrollArea className="h-[44vh] pr-2">
-                        <div className="space-y-3">
-                          {spec.paramFields.length === 0 ? (
-                            <p className="text-sm text-muted-foreground">No editable parameters.</p>
-                          ) : (
-                            spec.paramFields.map((field) => {
-                              const inputSourceMode =
-                                selectedNode.type === "input.image" && selectedNode.data.params?.sourceMode === "generate"
-                                  ? "generate"
-                                  : "upload";
-                              if (
-                                selectedNode.type === "input.image" &&
-                                inputSourceMode === "upload" &&
-                                (field.key === "generatorModel" || field.key === "prompt")
-                              ) {
-                                return null;
-                              }
-                              if (
-                                selectedNode.type === "input.image" &&
-                                inputSourceMode === "generate" &&
-                                field.key === "storageKey"
-                              ) {
-                                return null;
-                              }
-                              const value = selectedNode.data.params[field.key];
-                              const boolValue =
-                                value === true ||
-                                value === "true" ||
-                                value === 1 ||
-                                value === "1";
-                              const key = `${selectedNode.id}-${field.key}`;
-                              return (
-                                <div key={key} className="space-y-1.5">
-                                  <Label>{field.label}</Label>
-                                  {field.input === "textarea" || field.input === "json" ? (
-                                    <Textarea
-                                      value={String(value ?? "")}
-                                      onChange={(e) => updateSelectedNodeParam(field.key, e.target.value)}
-                                      rows={field.input === "json" ? 5 : 3}
-                                      className="rounded-xl"
-                                    />
-                                  ) : field.input === "select" ? (
-                                    <Select value={String(value ?? field.options?.[0] ?? "")} onValueChange={(v) => updateSelectedNodeParam(field.key, v)}>
-                                      <SelectTrigger className="rounded-xl">
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        {(field.options ?? []).map((option) => (
-                                          <SelectItem key={option} value={option}>
-                                            {option}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                  ) : field.input === "boolean" ? (
-                                    <Button
-                                      type="button"
-                                      variant={boolValue ? "default" : "outline"}
-                                      className="h-9 w-full justify-start rounded-xl"
-                                      onClick={() => updateSelectedNodeParam(field.key, !boolValue)}
-                                    >
-                                      {boolValue ? "Enabled" : "Disabled"}
-                                    </Button>
-                                  ) : (
-                                    <Input
-                                      type={field.input === "number" ? "number" : "text"}
-                                      value={String(value ?? "")}
-                                      min={field.input === "number" ? field.min : undefined}
-                                      max={field.input === "number" ? field.max : undefined}
-                                      step={field.input === "number" ? field.step ?? "any" : undefined}
-                                      onChange={(e) =>
-                                        updateSelectedNodeParam(
-                                          field.key,
-                                          field.input === "number"
-                                            ? Number.isFinite(Number(e.target.value))
-                                              ? Number(e.target.value)
-                                              : 0
-                                            : e.target.value
-                                        )
-                                      }
-                                      placeholder={field.placeholder}
-                                      className="rounded-xl"
-                                    />
-                                  )}
-                                </div>
-                              );
-                            })
-                          )}
-                          {(selectedNode.type === "model.groundingdino" ||
-                            selectedNode.type === "model.sam2" ||
-                            selectedNode.type === "model.sam3d_objects" ||
-                            selectedNode.type === "pipeline.scene_generation") &&
-                          selectedNodeArtifacts.length > 0 ? (
-                            <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
-                              <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
-                              <div className="space-y-1">
-                                {selectedNodeArtifacts.slice(0, 4).map((artifact) => (
-                                  <button
-                                    key={`param-artifact-${artifact.id}`}
-                                    type="button"
-                                    onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
-                                    className="block w-full rounded-lg border border-border/70 bg-background/45 px-2 py-1 text-left text-xs text-zinc-300 transition hover:bg-accent"
-                                  >
-                                    {artifact.outputId} • {artifact.kind}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-                          {groundingDinoJsonArtifact ? (
-                            <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
-                              <div className="mb-2 flex items-center justify-between gap-2">
-                                <p className="text-xs font-medium text-zinc-300">ObjectDetection descriptor</p>
-                                <div className="flex items-center gap-2">
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="rounded-lg"
-                                    onClick={() => void inspectArtifactJson(groundingDinoJsonArtifact.id)}
-                                    disabled={inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id}
-                                  >
-                                    {inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id
-                                      ? "Loading..."
-                                      : "Reload JSON"}
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="rounded-lg"
-                                    onClick={() => window.open(`/api/artifacts/${groundingDinoJsonArtifact.id}`, "_blank")}
-                                  >
-                                    Open file
-                                  </Button>
-                                </div>
-                              </div>
-                              <p className="mb-2 text-[11px] text-zinc-500">Detection descriptor JSON generated by ObjectDetection.</p>
-                              {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
-                                <p className="text-xs text-rose-300">{inspectedJsonError}</p>
-                              ) : null}
-                              {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonContent ? (
-                                <pre className="max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
-                                  {inspectedJsonContent}
-                                </pre>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </div>
-                      </ScrollArea>
-                    </>
-                  )}
-                </TabsContent>
-
-                <TabsContent value="outputs" className="mt-3 space-y-3">
-                  {!selectedNode || selectedNodeArtifacts.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No output for selected node yet.</p>
-                  ) : (
-                    <>
-                      <Card className="rounded-xl border-primary/35 bg-primary/5">
-                        <CardContent className="space-y-2 p-3 text-sm">
-                          <p className="font-medium text-white">Visible outputs</p>
-                          <div className="space-y-2">
-                            {visibleNodeArtifacts.map((artifact) => (
-                              <div key={`artifact-visible-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/45 p-2">
-                                <p className="text-xs text-zinc-200">
-                                  {artifact.outputId} • {artifact.kind}
-                                </p>
-                                <div className="mt-1 flex gap-2">
-                                  {artifact.kind === "mesh_glb" || artifact.kind === "point_ply" || artifact.kind === "splat_ksplat" ? (
-                                    <Button
-                                      size="sm"
-                                      className="rounded-lg"
-                                      onClick={() => window.location.assign(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`)}
-                                    >
-                                      Open viewer
-                                    </Button>
-                                  ) : null}
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="rounded-lg"
-                                    onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
-                                  >
-                                    Meta
-                                  </Button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                          {selectedArtifactPreview.previewUrl ? (
-                            <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
-                          ) : null}
-                          {selectedArtifactPreview.jsonSnippet ? (
-                            <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">
-                              {selectedArtifactPreview.jsonSnippet}
-                            </pre>
-                          ) : null}
-                        </CardContent>
-                      </Card>
-
-                      {advancedNodeArtifacts.length > 0 ? (
-                        <div className="space-y-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="rounded-lg"
-                            onClick={() => setShowAdvancedInspector((value) => !value)}
-                          >
-                            {showAdvancedInspector ? "Hide Advanced Outputs" : "Show Advanced Outputs"}
-                          </Button>
-                          {showAdvancedInspector ? (
-                            <Card className="rounded-xl border-border/70 bg-background/45">
-                              <CardContent className="space-y-2 p-3">
-                                {advancedNodeArtifacts.map((artifact) => (
-                                  <div key={`artifact-hidden-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/60 p-2">
-                                    <p className="text-xs text-zinc-300">
-                                      {artifact.outputId} • {artifact.kind} (hidden)
-                                    </p>
-                                    <div className="mt-1 flex gap-2">
-                                      {artifact.kind === "json" ? (
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          className="rounded-lg"
-                                          onClick={() => void inspectArtifactJson(artifact.id)}
-                                          disabled={inspectedJsonLoading && inspectedJsonArtifactId === artifact.id}
-                                        >
-                                          {inspectedJsonLoading && inspectedJsonArtifactId === artifact.id
-                                            ? "Loading..."
-                                            : "Inspect JSON"}
-                                        </Button>
-                                      ) : null}
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        className="rounded-lg"
-                                        onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
-                                      >
-                                        Open JSON/meta
-                                      </Button>
-                                    </div>
-                                    {inspectedJsonArtifactId === artifact.id && inspectedJsonError ? (
-                                      <p className="mt-2 text-xs text-rose-300">{inspectedJsonError}</p>
-                                    ) : null}
-                                    {inspectedJsonArtifactId === artifact.id && inspectedJsonContent ? (
-                                      <pre className="mt-2 max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
-                                        {inspectedJsonContent}
-                                      </pre>
-                                    ) : null}
-                                  </div>
-                                ))}
-                              </CardContent>
-                            </Card>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </>
-                  )}
-                </TabsContent>
-
-                <TabsContent value="logs" className="mt-3">
-                  <ScrollArea className="h-[50vh] rounded-xl border border-border/70 bg-black/30 p-3">
-                    <pre className="whitespace-pre-wrap text-xs text-zinc-300">{runLogs || "No logs yet. Run workflow to stream logs."}</pre>
-                  </ScrollArea>
-                </TabsContent>
-              </Tabs>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <Button size="sm" variant="outline" className="rounded-xl" asChild>
+          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" asChild>
             <Link href={viewerHref}>
               <ExternalLink className="mr-1 h-4 w-4" /> Viewer
             </Link>
           </Button>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
+              {nodes.length} nodes
+            </Badge>
+            <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
+              {edges.length} edges
+            </Badge>
             <Select value={nodeScalePreset} onValueChange={(value) => applyNodeScalePreset(value as NodeUiScale)}>
-              <SelectTrigger className="h-9 w-[170px] rounded-xl">
+              <SelectTrigger className="h-8 w-[150px] rounded-lg text-xs">
                 <SelectValue placeholder="Node size" />
               </SelectTrigger>
               <SelectContent>
@@ -2934,7 +2744,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                 toast({ title: "Version loaded", description: `v${version.version}` });
               }}
             >
-              <SelectTrigger className="h-9 w-[180px] rounded-xl">
+              <SelectTrigger className="h-8 w-[164px] rounded-lg text-xs">
                 <SelectValue placeholder="Graph version" />
               </SelectTrigger>
               <SelectContent>
@@ -2947,16 +2757,17 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             </Select>
           </div>
         </div>
+        </div>
 
         <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
-          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 px-3 py-2">
+          <div className="pointer-events-none absolute left-3 top-[84px] z-20 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 px-3 py-2">
             <p className="text-[11px] font-medium text-zinc-200">{projectName}</p>
             <p className="text-[10px] text-zinc-500">Workspace canvas</p>
           </div>
 
           <div
             data-no-connect-menu="true"
-            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2"
+            className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-xl border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2 shadow-[0_12px_35px_rgba(0,0,0,0.45)]"
           >
             <Button size="icon" variant="ghost" className="h-8 w-8 rounded-lg" onClick={() => reactFlow.zoomIn({ duration: 180 })}>
               <ZoomIn className="h-4 w-4" />
@@ -3030,7 +2841,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <div
               ref={nodeSearchMenuRef}
               data-no-connect-menu="true"
-              className="absolute z-40 w-[320px] rounded-md border border-[#34363d] bg-[#1b1d23] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.52)]"
+              className="absolute z-40 w-[320px] rounded-xl border border-[#34363d] bg-[#1b1d23] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.52)] panel-fade-in"
               style={{ left: nodeSearchMenu.x, top: nodeSearchMenu.y }}
             >
               <Input
@@ -3128,7 +2939,7 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             <div
               ref={nodeMenuRef}
               data-no-connect-menu="true"
-              className="absolute z-30 w-56 rounded-xl border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              className="absolute z-30 w-56 rounded-xl border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.6)] panel-fade-in"
               style={{ left: nodeMenu.x, top: nodeMenu.y }}
             >
               <button
@@ -3155,6 +2966,320 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </button>
             </div>
           ) : null}
+
+          <div
+            data-no-connect-menu="true"
+            className={`absolute bottom-3 right-3 top-[88px] z-30 w-[430px] max-w-[calc(100%-24px)] rounded-2xl border border-border/70 bg-[#090d18]/92 p-2 text-zinc-100 backdrop-blur-md shadow-[0_24px_64px_rgba(0,0,0,0.5)] motion-panel ${
+              inspectorOpen ? "translate-x-0 opacity-100" : "translate-x-[102%] opacity-0 pointer-events-none"
+            }`}
+          >
+            <Tabs defaultValue="params" className="flex h-full w-full flex-col">
+              <TabsList className="grid w-full grid-cols-3 rounded-xl bg-background/70">
+                <TabsTrigger value="params" className="rounded-lg">Params</TabsTrigger>
+                <TabsTrigger value="outputs" className="rounded-lg">Outputs</TabsTrigger>
+                <TabsTrigger value="logs" className="rounded-lg">Logs</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="params" className="mt-3 min-h-0 flex-1">
+                {!selectedNode || !spec ? (
+                  <p className="text-sm text-muted-foreground">Select a node to edit parameters.</p>
+                ) : (
+                  <>
+                    <div className="mb-3 space-y-1">
+                      <h3 className="font-semibold text-white">{spec.title}</h3>
+                      <p className="text-xs text-muted-foreground">{selectedNode.id}</p>
+                      {selectedNode.type === "model.sam2" ? (
+                        <p className="text-xs text-cyan-300">
+                          Mode:{" "}
+                          {selectedNode.data.runtimeMode === "guided"
+                            ? "Guided segmentation (from ObjectDetection)"
+                            : "Full segmentation"}
+                        </p>
+                      ) : null}
+                      {selectedNode.data.runtimeWarning ? (
+                        <p className="text-xs text-amber-300">{selectedNode.data.runtimeWarning}</p>
+                      ) : null}
+                    </div>
+                    <Separator className="mb-3" />
+                    {canNodeRun(selectedNode) ? (
+                      <Button className="mb-3 w-full rounded-xl" disabled={isStartingRun} onClick={() => startRun(selectedNode.id)}>
+                        <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
+                      </Button>
+                    ) : selectedNode.type === "input.image" ? (
+                      <div className="mb-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
+                        Run is available only when source mode is <span className="text-zinc-200">generate</span>.
+                      </div>
+                    ) : null}
+                    <ScrollArea className="h-[calc(100vh-260px)] max-h-[46vh] pr-2">
+                      <div className="space-y-3">
+                        {spec.paramFields.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">No editable parameters.</p>
+                        ) : (
+                          spec.paramFields.map((field) => {
+                            const inputSourceMode =
+                              selectedNode.type === "input.image" && selectedNode.data.params?.sourceMode === "generate"
+                                ? "generate"
+                                : "upload";
+                            if (
+                              selectedNode.type === "input.image" &&
+                              inputSourceMode === "upload" &&
+                              (field.key === "generatorModel" || field.key === "prompt")
+                            ) {
+                              return null;
+                            }
+                            if (
+                              selectedNode.type === "input.image" &&
+                              inputSourceMode === "generate" &&
+                              field.key === "storageKey"
+                            ) {
+                              return null;
+                            }
+                            const value = selectedNode.data.params[field.key];
+                            const boolValue =
+                              value === true ||
+                              value === "true" ||
+                              value === 1 ||
+                              value === "1";
+                            const key = `${selectedNode.id}-${field.key}`;
+                            return (
+                              <div key={key} className="space-y-1.5">
+                                <Label>{field.label}</Label>
+                                {field.input === "textarea" || field.input === "json" ? (
+                                  <Textarea
+                                    value={String(value ?? "")}
+                                    onChange={(e) => updateSelectedNodeParam(field.key, e.target.value)}
+                                    rows={field.input === "json" ? 5 : 3}
+                                    className="rounded-xl"
+                                  />
+                                ) : field.input === "select" ? (
+                                  <Select value={String(value ?? field.options?.[0] ?? "")} onValueChange={(v) => updateSelectedNodeParam(field.key, v)}>
+                                    <SelectTrigger className="rounded-xl">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {(field.options ?? []).map((option) => (
+                                        <SelectItem key={option} value={option}>
+                                          {option}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                ) : field.input === "boolean" ? (
+                                  <Button
+                                    type="button"
+                                    variant={boolValue ? "default" : "outline"}
+                                    className="h-9 w-full justify-start rounded-xl"
+                                    onClick={() => updateSelectedNodeParam(field.key, !boolValue)}
+                                  >
+                                    {boolValue ? "Enabled" : "Disabled"}
+                                  </Button>
+                                ) : (
+                                  <Input
+                                    type={field.input === "number" ? "number" : "text"}
+                                    value={String(value ?? "")}
+                                    min={field.input === "number" ? field.min : undefined}
+                                    max={field.input === "number" ? field.max : undefined}
+                                    step={field.input === "number" ? field.step ?? "any" : undefined}
+                                    onChange={(e) =>
+                                      updateSelectedNodeParam(
+                                        field.key,
+                                        field.input === "number"
+                                          ? Number.isFinite(Number(e.target.value))
+                                            ? Number(e.target.value)
+                                            : 0
+                                          : e.target.value
+                                      )
+                                    }
+                                    placeholder={field.placeholder}
+                                    className="rounded-xl"
+                                  />
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                        {(selectedNode.type === "model.groundingdino" ||
+                          selectedNode.type === "model.sam2" ||
+                          selectedNode.type === "model.sam3d_objects" ||
+                          selectedNode.type === "pipeline.scene_generation") &&
+                        selectedNodeArtifacts.length > 0 ? (
+                          <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
+                            <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
+                            <div className="space-y-1">
+                              {selectedNodeArtifacts.slice(0, 4).map((artifact) => (
+                                <button
+                                  key={`param-artifact-${artifact.id}`}
+                                  type="button"
+                                  onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                  className="block w-full rounded-lg border border-border/70 bg-background/45 px-2 py-1 text-left text-xs text-zinc-300 transition hover:bg-accent"
+                                >
+                                  {artifact.outputId} • {artifact.kind}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {groundingDinoJsonArtifact ? (
+                          <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <p className="text-xs font-medium text-zinc-300">ObjectDetection descriptor</p>
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-lg"
+                                  onClick={() => void inspectArtifactJson(groundingDinoJsonArtifact.id)}
+                                  disabled={inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id}
+                                >
+                                  {inspectedJsonLoading && inspectedJsonArtifactId === groundingDinoJsonArtifact.id
+                                    ? "Loading..."
+                                    : "Reload JSON"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-lg"
+                                  onClick={() => window.open(`/api/artifacts/${groundingDinoJsonArtifact.id}`, "_blank")}
+                                >
+                                  Open file
+                                </Button>
+                              </div>
+                            </div>
+                            <p className="mb-2 text-[11px] text-zinc-500">Detection descriptor JSON generated by ObjectDetection.</p>
+                            {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonError ? (
+                              <p className="text-xs text-rose-300">{inspectedJsonError}</p>
+                            ) : null}
+                            {inspectedJsonArtifactId === groundingDinoJsonArtifact.id && inspectedJsonContent ? (
+                              <pre className="max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
+                                {inspectedJsonContent}
+                              </pre>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </ScrollArea>
+                  </>
+                )}
+              </TabsContent>
+
+              <TabsContent value="outputs" className="mt-3 min-h-0 flex-1 space-y-3">
+                {!selectedNode || selectedNodeArtifacts.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No output for selected node yet.</p>
+                ) : (
+                  <>
+                    <Card className="rounded-xl border-primary/35 bg-primary/5">
+                      <CardContent className="space-y-2 p-3 text-sm">
+                        <p className="font-medium text-white">Visible outputs</p>
+                        <div className="space-y-2">
+                          {visibleNodeArtifacts.map((artifact) => (
+                            <div key={`artifact-visible-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/45 p-2">
+                              <p className="text-xs text-zinc-200">
+                                {artifact.outputId} • {artifact.kind}
+                              </p>
+                              <div className="mt-1 flex gap-2">
+                                {artifact.kind === "mesh_glb" || artifact.kind === "point_ply" || artifact.kind === "splat_ksplat" ? (
+                                  <Button
+                                    size="sm"
+                                    className="rounded-lg"
+                                    onClick={() => window.location.assign(`/app/p/${projectId}/viewer?artifactId=${artifact.id}`)}
+                                  >
+                                    Open viewer
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-lg"
+                                  onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                >
+                                  Meta
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {selectedArtifactPreview.previewUrl ? (
+                          <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                        ) : null}
+                        {selectedArtifactPreview.jsonSnippet ? (
+                          <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">
+                            {selectedArtifactPreview.jsonSnippet}
+                          </pre>
+                        ) : null}
+                      </CardContent>
+                    </Card>
+
+                    {advancedNodeArtifacts.length > 0 ? (
+                      <div className="space-y-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-lg"
+                          onClick={() => setShowAdvancedInspector((value) => !value)}
+                        >
+                          {showAdvancedInspector ? "Hide Advanced Outputs" : "Show Advanced Outputs"}
+                        </Button>
+                        {showAdvancedInspector ? (
+                          <Card className="rounded-xl border-border/70 bg-background/45">
+                            <CardContent className="space-y-2 p-3">
+                              {advancedNodeArtifacts.map((artifact) => (
+                                <div key={`artifact-hidden-${artifact.id}`} className="rounded-lg border border-border/70 bg-background/60 p-2">
+                                  <p className="text-xs text-zinc-300">
+                                    {artifact.outputId} • {artifact.kind} (hidden)
+                                  </p>
+                                  <div className="mt-1 flex gap-2">
+                                    {artifact.kind === "json" ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="rounded-lg"
+                                        onClick={() => void inspectArtifactJson(artifact.id)}
+                                        disabled={inspectedJsonLoading && inspectedJsonArtifactId === artifact.id}
+                                      >
+                                        {inspectedJsonLoading && inspectedJsonArtifactId === artifact.id
+                                          ? "Loading..."
+                                          : "Inspect JSON"}
+                                      </Button>
+                                    ) : null}
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="rounded-lg"
+                                      onClick={() => window.open(`/api/artifacts/${artifact.id}`, "_blank")}
+                                    >
+                                      Open JSON/meta
+                                    </Button>
+                                  </div>
+                                  {inspectedJsonArtifactId === artifact.id && inspectedJsonError ? (
+                                    <p className="mt-2 text-xs text-rose-300">{inspectedJsonError}</p>
+                                  ) : null}
+                                  {inspectedJsonArtifactId === artifact.id && inspectedJsonContent ? (
+                                    <pre className="mt-2 max-h-56 overflow-auto rounded-lg border border-border/70 bg-background/70 p-2 text-xs text-zinc-200">
+                                      {inspectedJsonContent}
+                                    </pre>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </CardContent>
+                          </Card>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </TabsContent>
+
+              <TabsContent value="logs" className="mt-3 min-h-0 flex-1">
+                <ScrollArea className="h-[calc(100vh-220px)] max-h-[56vh] rounded-xl border border-border/70 bg-black/30 p-3">
+                  <pre className="whitespace-pre-wrap text-xs text-zinc-300">{runLogs || "No logs yet. Run workflow to stream logs."}</pre>
+                </ScrollArea>
+              </TabsContent>
+            </Tabs>
+          </div>
+
+          <div className="pointer-events-none absolute bottom-3 left-3 z-20 rounded-full border border-border/60 bg-black/55 px-3 py-1 text-[10px] text-zinc-300 backdrop-blur">
+            Tab: node search • Del: delete • Ctrl/Cmd+S: save • Esc: close menus
+          </div>
         </div>
       </div>
     </div>

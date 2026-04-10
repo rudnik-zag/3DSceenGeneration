@@ -317,6 +317,15 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  const nodeStatus = data.status ?? "idle";
+  const statusFxClass =
+    nodeStatus === "success"
+      ? "node-success-glow"
+      : nodeStatus === "error"
+        ? "node-error-glow"
+        : nodeStatus === "running"
+          ? "shadow-[0_0_0_1px_rgba(120,169,211,0.42),0_12px_34px_rgba(62,118,168,0.24)]"
+          : "";
 
   useEffect(() => {
     if (!isSam2Node) return;
@@ -352,9 +361,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   return (
     <div
       className={cn(
-        "relative rounded-[9px] border border-[#494949] bg-[#2f2f2f]/95 p-2.5 text-zinc-100 shadow-[0_8px_22px_rgba(0,0,0,0.55)] transition",
+        "relative rounded-[9px] border border-[#494949] bg-[#2f2f2f]/95 p-2.5 text-zinc-100 shadow-[0_8px_22px_rgba(0,0,0,0.55)] motion-fast hover:scale-[1.01] hover:border-[#5b83a8] hover:shadow-[0_0_0_1px_rgba(91,131,168,0.3),0_12px_34px_rgba(0,0,0,0.62)]",
         sizeClass,
-        selected && "border-[#78a9d3] shadow-[0_0_0_1px_rgba(120,169,211,0.65),0_10px_30px_rgba(0,0,0,0.6)]"
+        selected && "scale-[1.02] border-[#78a9d3] shadow-[0_0_0_1px_rgba(120,169,211,0.65),0_10px_30px_rgba(0,0,0,0.6)]",
+        statusFxClass
       )}
     >
       <NodeResizer
@@ -408,13 +418,14 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {nodeStatus === "running" ? <span className="h-2 w-2 rounded-full bg-cyan-300 running-pulse" /> : null}
           {tag ? (
             <Badge className="rounded border border-[#525252] bg-[#2a2a2a] px-1.5 py-0.5 text-[10px] text-zinc-300" variant="secondary">
               {tag}
             </Badge>
           ) : null}
-          <Badge className={cn("rounded border px-1.5 py-0.5 text-[10px] capitalize", statusClass[data.status ?? "idle"])} variant="secondary">
-            {data.status ?? "idle"}
+          <Badge className={cn("rounded border px-1.5 py-0.5 text-[10px] capitalize", statusClass[nodeStatus])} variant="secondary">
+            {nodeStatus}
           </Badge>
         </div>
       </div>

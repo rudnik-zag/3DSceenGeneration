@@ -1,4 +1,5 @@
 import { RunsPanel } from "@/components/layout/runs-panel";
+import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 
 export default async function RunsPage({
@@ -7,11 +8,19 @@ export default async function RunsPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
+  await requirePageProjectAccess(projectId, "viewer");
 
   const runs = await prisma.run.findMany({
     where: { projectId },
     orderBy: { createdAt: "desc" },
     include: {
+      creator: {
+        select: {
+          id: true,
+          name: true,
+          email: true
+        }
+      },
       graph: {
         select: {
           id: true,

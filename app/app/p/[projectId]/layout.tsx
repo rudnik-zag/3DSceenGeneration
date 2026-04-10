@@ -1,6 +1,5 @@
-import { notFound } from "next/navigation";
-
 import { ProjectLayoutShell } from "@/components/layout/project-layout-shell";
+import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 
 export default async function ProjectLayout({
@@ -12,8 +11,9 @@ export default async function ProjectLayout({
 }) {
   const { projectId } = await params;
 
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
+  const access = await requirePageProjectAccess(projectId, "viewer");
+  const project = await prisma.project.findUniqueOrThrow({
+    where: { id: access.project.id },
     include: {
       _count: {
         select: {
@@ -24,10 +24,6 @@ export default async function ProjectLayout({
       }
     }
   });
-
-  if (!project) {
-    notFound();
-  }
 
   const nav = [
     { href: `/app/p/${projectId}/canvas`, label: "Canvas" },

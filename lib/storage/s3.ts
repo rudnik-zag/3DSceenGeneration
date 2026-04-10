@@ -57,6 +57,16 @@ function nowMs() {
   return Date.now();
 }
 
+function resolveSignedUrlTtl(requested: number | undefined, fallback: number) {
+  const configuredDefault = Number.isFinite(env.SIGNED_URL_TTL_SEC) ? env.SIGNED_URL_TTL_SEC : fallback;
+  const configuredMax = Number.isFinite(env.SIGNED_URL_MAX_TTL_SEC)
+    ? Math.max(1, Math.floor(env.SIGNED_URL_MAX_TTL_SEC))
+    : Math.max(1, Math.floor(fallback));
+  const candidate = Number.isFinite(requested as number) ? Number(requested) : configuredDefault;
+  const normalized = Math.max(1, Math.floor(candidate));
+  return Math.min(normalized, configuredMax);
+}
+
 function isS3TemporarilyDisabled() {
   return nowMs() < s3DisabledUntil;
 }
@@ -240,7 +250,7 @@ export async function putObjectToStorage(params: {
   }
 }
 
-export async function getSignedDownloadUrl(key: string, expiresIn = 60 * 60) {
+export async function getSignedDownloadUrl(key: string, expiresIn?: number) {
   await ensureBucket();
   const client = getClient();
   return getSignedUrl(
@@ -249,13 +259,13 @@ export async function getSignedDownloadUrl(key: string, expiresIn = 60 * 60) {
       Bucket: env.S3_BUCKET,
       Key: key
     }),
-    { expiresIn }
+    { expiresIn: resolveSignedUrlTtl(expiresIn, 120) }
   );
 }
 
 export async function safeGetSignedDownloadUrl(
   key: string,
-  expiresIn = 60 * 60
+  expiresIn?: number
 ): Promise<string | null> {
   if (await localObjectExists(key)) {
     return `/api/storage/object?key=${encodeURIComponent(key)}`;
@@ -302,7 +312,7 @@ export async function storageObjectExists(key: string): Promise<boolean> {
 export async function getSignedUploadUrl(
   key: string,
   contentType: string,
-  expiresIn = 60 * 15
+  expiresIn?: number
 ) {
   await ensureBucket();
   const client = getClient();
@@ -313,14 +323,14 @@ export async function getSignedUploadUrl(
       Key: key,
       ContentType: contentType
     }),
-    { expiresIn }
+    { expiresIn: resolveSignedUrlTtl(expiresIn, 120) }
   );
 }
 
 export async function safeGetSignedUploadUrl(
   key: string,
   contentType: string,
-  expiresIn = 60 * 15
+  expiresIn?: number
 ): Promise<string | null> {
   if (isS3TemporarilyDisabled()) {
     return null;

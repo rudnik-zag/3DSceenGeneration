@@ -225,3 +225,42 @@ Use corepack setup above.
   - DB entities (`Project`, `Graph`, `Run`, `Artifact`, `CacheEntry`, `UploadAsset`)
   - Storage prefix `projects/{projectId}/` in S3 and local fallback.
 - Storage module automatically throttles repeated fallback warnings.
+
+## 11) Billing + Token Ops
+
+### Protected billing surfaces
+- `/billing`
+- `/settings`
+- `/api/billing/*`
+
+### Billing APIs
+- `GET /api/billing/summary`
+- `POST /api/billing/estimate`
+- `POST /api/billing/checkout/subscription`
+- `POST /api/billing/checkout/token-pack`
+- `POST /api/billing/portal`
+- `POST /api/billing/webhook`
+
+### Stripe webhook setup
+Configure webhook destination:
+- `POST /api/billing/webhook`
+
+Subscribe to:
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `invoice.paid`
+
+Use signing secret in:
+- `STRIPE_WEBHOOK_SECRET`
+
+### Run token lifecycle
+1. Client asks estimate (`/api/billing/estimate`)
+2. Run creation reserves tokens (server-side)
+3. Worker finalizes usage on completion/error/cancel
+4. Refund is appended to ledger when actual usage < reservation
+
+### Rollout switch
+- `BILLING_ENFORCEMENT_ENABLED=true` enforces plan/token limits
+- `BILLING_ENFORCEMENT_ENABLED=false` keeps APIs/UI live but does not block product usage
