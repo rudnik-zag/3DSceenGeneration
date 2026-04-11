@@ -11,6 +11,8 @@ CONDA_ENV_NAME="${CONDA_ENV_NAME:-general_env}"
 USE_DOCKER_INFRA="${USE_DOCKER_INFRA:-1}"
 COREPACK_HOME_DIR="${COREPACK_HOME_DIR:-/tmp/corepack}"
 STOP_DOCKER_INFRA="${STOP_DOCKER_INFRA:-1}"
+COMFYUI_MODE="${COMFYUI_MODE:-}"
+COMFYUI_ENABLED="${COMFYUI_ENABLED:-}"
 MINIO_STANDALONE_WHEN_NO_DOCKER="${MINIO_STANDALONE_WHEN_NO_DOCKER:-1}"
 STOP_STANDALONE_MINIO="${STOP_STANDALONE_MINIO:-1}"
 MINIO_BIN="${MINIO_BIN:-minio}"
@@ -51,7 +53,49 @@ Environment variables:
   AUTO_PNPM_INSTALL_ON_START 1=run pnpm install when critical modules are missing (default: 1)
   AUTO_PRISMA_GENERATE_ON_START 1=run prisma generate before starting services (default: 1)
   COREPACK_HOME_DIR  Corepack home for pnpm fallback (default: /tmp/corepack)
+  COMFYUI_MODE       on_demand|always_on (default from .env or on_demand)
+  COMFYUI_ENABLED    true|false (default from .env or false)
 EOF
+}
+
+read_env_value() {
+  local key="$1"
+  local env_file="${ROOT_DIR}/.env"
+  if [[ ! -f "${env_file}" ]]; then
+    return 1
+  fi
+  local line
+  line="$(grep -E "^[[:space:]]*${key}=" "${env_file}" | tail -n 1 || true)"
+  if [[ -z "${line}" ]]; then
+    return 1
+  fi
+  local value="${line#*=}"
+  value="${value%\"}"
+  value="${value#\"}"
+  echo "${value}"
+}
+
+resolve_setting() {
+  local key="$1"
+  local fallback="$2"
+  local current_value="$3"
+  if [[ -n "${current_value}" ]]; then
+    echo "${current_value}"
+    return 0
+  fi
+  local from_env
+  from_env="$(read_env_value "${key}" || true)"
+  if [[ -n "${from_env}" ]]; then
+    echo "${from_env}"
+    return 0
+  fi
+  echo "${fallback}"
+}
+
+is_truthy() {
+  local value="${1:-}"
+  value="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
+  [[ "${value}" == "1" || "${value}" == "true" || "${value}" == "yes" || "${value}" == "on" ]]
 }
 
 ensure_conda() {
@@ -281,6 +325,45 @@ stop_standalone_minio() {
     return 0
   fi
   stop_service "minio-standalone"
+}
+
+should_start_comfy_always_on() {
+  local comfy_mode comfy_enabled
+  comfy_mode="$(resolve_setting "COMFYUI_MODE" "on_demand" "${COMFYUI_MODE}")"
+  comfy_enabled="$(resolve_setting "COMFYUI_ENABLED" "false" "${COMFYUI_ENABLED}")"
+
+  if [[ "${comfy_mode}" != "always_on" ]]; then
+    return 1
+  fi
+  if ! is_truthy "${comfy_enabled}"; then
+    return 1
+  fi
+  return 0
+}
+
+start_comfy_service_if_needed() {
+  if ! should_start_comfy_always_on; then
+    return 0
+  fi
+
+  start_service "comfyui" "cd '${ROOT_DIR}' && bash scripts/comfyui-start.sh"
+}
+
+stop_on_demand_comfy_process() {
+  local pid_file="${PID_DIR}/comfyui-ondemand.pid"
+  if ! is_running_pid "${pid_file}"; then
+    rm -f "${pid_file}"
+    return 0
+  fi
+  local pid
+  pid="$(cat "${pid_file}")"
+  echo "[dev-stack] Stopping comfyui-ondemand (pid=${pid})"
+  kill "${pid}" >/dev/null 2>&1 || true
+  sleep 0.5
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill -9 "${pid}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${pid_file}"
 }
 
 resolve_redis_url() {
@@ -587,6 +670,7 @@ start_all() {
   start_infra
   start_standalone_minio_if_needed
   wait_for_redis
+  start_comfy_service_if_needed
   start_service "next-dev" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && PORT='${APP_PORT}' ${PNPM_CMD[*]} dev"
   start_service "worker" "set +u && source '${CONDA_SH_PATH}' && conda activate '${CONDA_ENV_NAME}' && set -u && cd '${ROOT_DIR}' && ${PNPM_CMD[*]} worker"
 }
@@ -594,6 +678,8 @@ start_all() {
 stop_all() {
   stop_service "worker"
   stop_service "next-dev"
+  stop_service "comfyui"
+  stop_on_demand_comfy_process
   stop_workspace_next_dev
   stop_workspace_worker
   stop_standalone_minio
@@ -607,6 +693,9 @@ show_logs() {
   echo
   echo "== worker log =="
   tail -n 60 "${LOG_DIR}/worker.log" 2>/dev/null || echo "(no log yet)"
+  echo
+  echo "== comfyui log =="
+  tail -n 60 "${LOG_DIR}/comfyui.log" 2>/dev/null || echo "(no log yet)"
 }
 
 cmd="${1:-}"
@@ -627,6 +716,8 @@ case "${cmd}" in
   status)
     status_service "next-dev"
     status_service "worker"
+    status_service "comfyui"
+    status_service "comfyui-ondemand"
     if [[ -f "${PID_DIR}/minio-standalone.pid" ]]; then
       status_service "minio-standalone"
     fi

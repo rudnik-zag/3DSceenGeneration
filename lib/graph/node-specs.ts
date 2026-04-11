@@ -13,6 +13,15 @@ const imageInput = z.object({
   sourceMode: z.enum(["upload", "generate"]).default("upload"),
   generatorModel: z.string().default(""),
   prompt: z.string().default(""),
+  negativePrompt: z.string().default(""),
+  seed: z.number().int().min(-1).max(2147483647).default(-1),
+  steps: z.number().int().min(1).max(150).default(20),
+  cfg: z.number().min(1).max(30).default(8),
+  width: z.number().int().min(256).max(2048).default(1024),
+  height: z.number().int().min(256).max(2048).default(1024),
+  sampler: z.string().default("euler"),
+  scheduler: z.string().default("normal"),
+  checkpoint: z.string().default(""),
   storageKey: z.string().optional(),
   filename: z.string().default("image.png")
 });
@@ -91,18 +100,73 @@ export const nodeSpecEntries = [
     category: "Inputs",
     title: "Input Image",
     icon: "Image",
-    description: "Upload or reference a source image.",
+    description: "Upload/reference a source image or generate one with Comfy-backed models.",
     inputPorts: [],
     outputPorts: [{ id: "image", label: "Image", artifactType: "Image" }],
     paramSchema: imageInput,
     paramFields: [
       { key: "sourceMode", label: "Source Mode", input: "select", options: ["upload", "generate"] },
-      { key: "generatorModel", label: "Generator Model", input: "select", options: ["Z-Image-Turbo"] },
-      { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Cinematic lighting, detailed scene..." },
+      {
+        key: "generatorModel",
+        label: "Generator Model",
+        input: "select",
+        options: ["Qwen-Distill", "Qwen-Image-Edit", "Z-Image-Turbo"]
+      },
+      { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Describe the target image or edit intent..." },
+      { key: "negativePrompt", label: "Negative Prompt", input: "textarea", placeholder: "blurry, low quality, artifacts" },
+      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: 2147483647, step: 1 },
+      { key: "steps", label: "Steps", input: "number", min: 1, max: 150, step: 1 },
+      { key: "cfg", label: "CFG", input: "number", min: 1, max: 30, step: 0.5 },
+      { key: "width", label: "Width", input: "number", min: 256, max: 2048, step: 64 },
+      { key: "height", label: "Height", input: "number", min: 256, max: 2048, step: 64 },
+      {
+        key: "sampler",
+        label: "Sampler",
+        input: "select",
+        options: [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpm_2",
+          "dpm_2_ancestral",
+          "lms",
+          "dpm_fast",
+          "dpm_adaptive",
+          "dpmpp_2s_ancestral",
+          "dpmpp_sde",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "ddim",
+          "uni_pc",
+          "uni_pc_bh2"
+        ]
+      },
+      {
+        key: "scheduler",
+        label: "Scheduler",
+        input: "select",
+        options: ["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"]
+      },
+      { key: "checkpoint", label: "Checkpoint Override", input: "text", placeholder: "z-image-turbo.safetensors" },
       { key: "filename", label: "Filename", input: "text" },
       { key: "storageKey", label: "Storage Key", input: "text", placeholder: "projects/..." }
     ],
-    defaultParams: { sourceMode: "upload", generatorModel: "Z-Image-Turbo", prompt: "", filename: "image.png", storageKey: "" },
+    defaultParams: {
+      sourceMode: "upload",
+      generatorModel: "Qwen-Distill",
+      prompt: "",
+      negativePrompt: "",
+      seed: -1,
+      steps: 20,
+      cfg: 8,
+      width: 1024,
+      height: 1024,
+      sampler: "euler",
+      scheduler: "normal",
+      checkpoint: "",
+      filename: "image.png",
+      storageKey: ""
+    },
     ui: {
       previewOutputIds: ["image"],
       nodeRunEnabled: true

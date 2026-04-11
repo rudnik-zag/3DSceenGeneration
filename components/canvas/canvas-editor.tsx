@@ -3020,10 +3020,64 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               selectedNode.type === "input.image" && selectedNode.data.params?.sourceMode === "generate"
                                 ? "generate"
                                 : "upload";
+                            const inputGeneratorModel =
+                              selectedNode.type === "input.image" && typeof selectedNode.data.params?.generatorModel === "string"
+                                ? selectedNode.data.params.generatorModel
+                                : "";
+                            const inputGenerateOnlyFields = new Set([
+                              "generatorModel",
+                              "prompt",
+                              "negativePrompt",
+                              "seed",
+                              "steps",
+                              "cfg",
+                              "width",
+                              "height",
+                              "sampler",
+                              "scheduler",
+                              "checkpoint"
+                            ]);
+                            const inputZImageOnlyFields = new Set([
+                              "negativePrompt",
+                              "steps",
+                              "cfg",
+                              "width",
+                              "height",
+                              "sampler",
+                              "scheduler",
+                              "checkpoint"
+                            ]);
+                            const inputPromptOnlyModelFields = new Set([
+                              "negativePrompt",
+                              "seed",
+                              "steps",
+                              "cfg",
+                              "width",
+                              "height",
+                              "sampler",
+                              "scheduler",
+                              "checkpoint"
+                            ]);
                             if (
                               selectedNode.type === "input.image" &&
                               inputSourceMode === "upload" &&
-                              (field.key === "generatorModel" || field.key === "prompt")
+                              inputGenerateOnlyFields.has(field.key)
+                            ) {
+                              return null;
+                            }
+                            if (
+                              selectedNode.type === "input.image" &&
+                              inputSourceMode === "generate" &&
+                              inputGeneratorModel === "Qwen-Image-Edit" &&
+                              inputZImageOnlyFields.has(field.key)
+                            ) {
+                              return null;
+                            }
+                            if (
+                              selectedNode.type === "input.image" &&
+                              inputSourceMode === "generate" &&
+                              inputGeneratorModel === "Qwen-Distill" &&
+                              inputPromptOnlyModelFields.has(field.key)
                             ) {
                               return null;
                             }

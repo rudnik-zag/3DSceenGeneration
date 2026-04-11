@@ -257,6 +257,98 @@ SAM3D_CONDA_ENV=sam3d-objects
   - SAM2: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/sam2/`
   - SceneGeneration: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/scene_generation/`
 
+## ComfyUI Runtime (Z-Image + Qwen Edit)
+ComfyUI is integrated as an internal backend inference service called by worker executors.
+
+Start ComfyUI in the dedicated conda env:
+```bash
+pnpm comfy:start
+```
+
+Optional launcher envs (for the script above):
+```bash
+export COMFYUI_CONDA_ENV=comfyui
+export COMFYUI_APP_DIR=/absolute/path/to/ComfyUI
+export COMFYUI_HOST=127.0.0.1
+export COMFYUI_PORT=8188
+```
+`scripts/comfyui-start.sh` also loads values from project `.env`, so you can set them there instead of exporting each session.
+
+Current real nodes:
+- `input.image` with `sourceMode=generate` and `generatorModel=Qwen-Distill` (default)
+- `model.qwen_image_edit`
+
+Required env:
+```env
+COMFYUI_ENABLED=true
+COMFYUI_BASE_URL=http://127.0.0.1:8188
+COMFYUI_MODE=on_demand
+COMFYUI_ON_DEMAND_IDLE_MS=15000
+COMFYUI_START_TIMEOUT_MS=120000
+COMFYUI_AUTH_TOKEN=
+COMFYUI_TIMEOUT_MS=180000
+COMFYUI_ALLOW_MOCK_FALLBACK=true
+```
+
+Z-Image settings:
+```env
+COMFYUI_ZIMAGE_CHECKPOINT=z-image-turbo.safetensors
+COMFYUI_ZIMAGE_WORKFLOW_PATH=
+COMFYUI_ZIMAGE_OUTPUT_NODE_ID=
+COMFYUI_ZIMAGE_TIMEOUT_MS=300000
+```
+- If `COMFYUI_ZIMAGE_WORKFLOW_PATH` is empty, a built-in Comfy API workflow is used.
+- `COMFYUI_ZIMAGE_CHECKPOINT` must exist in ComfyUI checkpoints directory.
+
+Qwen Edit settings:
+```env
+COMFYUI_QWEN_EDIT_WORKFLOW_PATH=/absolute/path/to/exported_qwen_edit_api_workflow.json
+COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID=
+COMFYUI_QWEN_EDIT_TIMEOUT_MS=360000
+# Optional dedicated workflow for prompt-only generation on input.image:
+COMFYUI_QWEN_GENERATE_WORKFLOW_PATH=
+COMFYUI_QWEN_GENERATE_OUTPUT_NODE_ID=
+COMFYUI_QWEN_GENERATE_TIMEOUT_MS=360000
+```
+- `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` should point to a ComfyUI `File -> Export (API)` workflow.
+- Template placeholders supported in workflow JSON:
+  - `__PROMPT__`
+  - `__INPUT_IMAGE__`
+  - `__FILENAME_PREFIX__`
+  - `__SEED__`
+
+Qwen Distill preset settings (`input.image` -> `Qwen-Distill`):
+```env
+COMFYUI_QWEN_DISTILL_WORKFLOW_PATH=
+COMFYUI_QWEN_DISTILL_OUTPUT_NODE_ID=60
+COMFYUI_QWEN_DISTILL_TIMEOUT_MS=420000
+COMFYUI_QWEN_DISTILL_UNET=qwen_image_distill_full_fp8_e4m3fn.safetensors
+COMFYUI_QWEN_DISTILL_VAE=qwen_image_vae.safetensors
+COMFYUI_QWEN_DISTILL_CLIP=qwen_2.5_vl_7b_fp8_scaled.safetensors
+COMFYUI_QWEN_DISTILL_CLIP_TYPE=qwen_image
+COMFYUI_QWEN_DISTILL_CLIP_DEVICE=default
+COMFYUI_QWEN_DISTILL_UNET_WEIGHT_DTYPE=default
+COMFYUI_QWEN_DISTILL_STEPS=10
+COMFYUI_QWEN_DISTILL_CFG=1
+COMFYUI_QWEN_DISTILL_SAMPLER=res_multistep
+COMFYUI_QWEN_DISTILL_SCHEDULER=simple
+COMFYUI_QWEN_DISTILL_DENOISE=1
+COMFYUI_QWEN_DISTILL_WIDTH=1328
+COMFYUI_QWEN_DISTILL_HEIGHT=1328
+COMFYUI_QWEN_DISTILL_AURAFLOW_SHIFT=3
+COMFYUI_QWEN_DISTILL_NEGATIVE_PROMPT=
+```
+- If `COMFYUI_QWEN_DISTILL_WORKFLOW_PATH` is empty, the app uses built-in workflow defaults extracted from ComfyUI blueprint `image_qwen_image_distill`.
+- If you provide a custom path, it must be Comfy API JSON (`Workflow -> Export API`), not UI graph JSON.
+
+Security recommendation:
+- Keep ComfyUI private/internal only (no public ingress).
+- Browser must never call ComfyUI directly.
+
+Runtime modes:
+- `COMFYUI_MODE=on_demand` (default): worker auto-starts ComfyUI for Comfy nodes and auto-stops it after `COMFYUI_ON_DEMAND_IDLE_MS`.
+- `COMFYUI_MODE=always_on`: keep ComfyUI running as a managed service (`bash scripts/dev-stack.sh start|restart` will start it when `COMFYUI_ENABLED=true`).
+
 ## Common Troubleshooting
 ### `curl: (1) Received HTTP/0.9 when not allowed` on MinIO health URL
 Port `9000` is serving something that is not valid MinIO HTTP API for your app.

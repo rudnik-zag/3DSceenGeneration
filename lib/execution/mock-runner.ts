@@ -7,6 +7,12 @@ import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdin
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
 import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
 import {
+  executeComfyQwenDistillNode,
+  executeComfyQwenImageEditNode,
+  executeComfyQwenImageGenerateNode,
+  executeComfyZImageNode
+} from "@/lib/execution/executors/comfy-image";
+import {
   createGeneratedImageSvgBuffer,
   createJsonBuffer,
   createMinimalGlbBuffer,
@@ -52,7 +58,19 @@ export class MockModelRunner implements NodeExecutor {
       case "input.image": {
         const sourceMode = ctx.params.sourceMode === "generate" ? "generate" : "upload";
         if (sourceMode === "generate") {
-          const model = typeof ctx.params.generatorModel === "string" && ctx.params.generatorModel.trim() ? ctx.params.generatorModel.trim() : "Z-Image-Turbo";
+          const model =
+            typeof ctx.params.generatorModel === "string" && ctx.params.generatorModel.trim()
+              ? ctx.params.generatorModel.trim()
+              : "Qwen-Distill";
+          if (model === "Qwen-Distill") {
+            return executeComfyQwenDistillNode(ctx);
+          }
+          if (model === "Qwen-Image-Edit") {
+            return executeComfyQwenImageGenerateNode(ctx);
+          }
+          if (model === "Z-Image-Turbo") {
+            return executeComfyZImageNode(ctx);
+          }
           const prompt = typeof ctx.params.prompt === "string" ? ctx.params.prompt : "";
           await new Promise((resolve) => setTimeout(resolve, 1100));
           const generated = createGeneratedImageSvgBuffer({ model, prompt });
@@ -152,25 +170,7 @@ export class MockModelRunner implements NodeExecutor {
           outputs: [jsonOutput("json", { summary: "Mock VLM analysis output", createdAt: now })]
         };
       case "model.qwen_image_edit": {
-        const hash = hashBuffer(ONE_PIXEL_PNG);
-        return {
-          outputs: [
-            {
-              outputId: "image",
-              kind: "image",
-              mimeType: "image/png",
-              extension: "png",
-              buffer: ONE_PIXEL_PNG,
-              preview: {
-                extension: "png",
-                mimeType: "image/png",
-                buffer: ONE_PIXEL_PNG
-              },
-              meta: { outputKey: "image", prompt: ctx.params.prompt ?? "", createdAt: now },
-              hidden: false
-            }
-          ]
-        };
+        return executeComfyQwenImageEditNode(ctx);
       }
       case "geo.depth_estimation": {
         const hash = hashBuffer(ONE_PIXEL_PNG);
