@@ -48,10 +48,20 @@ function extractProjectIdFromUploadStorageKey(storageKey: string) {
   return candidate && candidate.length > 0 ? candidate : null;
 }
 
-function extractRunIdFromRunsStorageKey(storageKey: string) {
-  const match = storageKey.match(/^projects\/[^/]+\/runs\/([^/]+)\//);
-  const candidate = match?.[1]?.trim();
-  return candidate && candidate.length > 0 ? candidate : null;
+function extractRunLabelFromRunsStorageKey(storageKey: string) {
+  const match = storageKey.match(/^projects\/([^/]+)\/runs\/([^/]+)\//);
+  const projectSlug = match?.[1]?.trim();
+  const runLabel = match?.[2]?.trim();
+  if (!projectSlug || !runLabel) return null;
+  return { projectSlug, runLabel };
+}
+
+function parseRunNumberFromRunLabel(runLabel: string) {
+  const match = runLabel.match(/^run[-_]?(\d+)$/i);
+  if (!match?.[1]) return null;
+  const value = Number(match[1]);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  return value;
 }
 
 function extractLegacyProjectSegment(storageKey: string) {
@@ -148,14 +158,20 @@ export async function requireStorageObjectAccess(storageKey: string, minimumRole
       });
 
   const parsedProjectId = extractProjectIdFromUploadStorageKey(key);
-  const parsedRunId = extractRunIdFromRunsStorageKey(key);
+  const parsedRunLabel = extractRunLabelFromRunsStorageKey(key);
   const parsedLegacySegment = extractLegacyProjectSegment(key);
 
+  const parsedRunNumber = parsedRunLabel ? parseRunNumberFromRunLabel(parsedRunLabel.runLabel) : null;
   const runProjectId =
-    !artifact && !uploadAsset && parsedRunId
+    !artifact && !uploadAsset && parsedRunLabel && parsedRunNumber
       ? (
-          await prisma.run.findUnique({
-            where: { id: parsedRunId },
+          await prisma.run.findFirst({
+            where: {
+              runNumber: parsedRunNumber,
+              project: {
+                slug: parsedRunLabel.projectSlug
+              }
+            },
             select: { projectId: true }
           })
         )?.projectId ?? null

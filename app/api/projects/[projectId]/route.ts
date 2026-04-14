@@ -5,6 +5,7 @@ import { requireProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
+import { formatRunFolderLabel } from "@/lib/runs/numbering";
 import { buildProjectUploadsPrefix, resolveProjectStorageSlug, slugifyProjectName } from "@/lib/storage/project-path";
 import { deleteStoragePrefix } from "@/lib/storage/s3";
 
@@ -59,8 +60,9 @@ export async function DELETE(
       select: {
         id: true,
         name: true,
+        slug: true,
         runs: {
-          select: { id: true }
+          select: { id: true, runNumber: true }
         },
         artifacts: {
           select: {
@@ -98,6 +100,7 @@ export async function DELETE(
     });
 
     const projectSlug = resolveProjectStorageSlug({
+      projectSlug: project.slug,
       projectName: project.name,
       projectId: project.id
     });
@@ -116,7 +119,7 @@ export async function DELETE(
     prefixesToDelete.add(`${buildProjectUploadsPrefix({ projectSlug })}/${project.id}/`);
 
     for (const run of project.runs) {
-      prefixesToDelete.add(`projects/${projectSlug}/runs/${run.id}/`);
+      prefixesToDelete.add(`projects/${projectSlug}/runs/${formatRunFolderLabel(run.runNumber)}/`);
     }
 
     for (const artifact of project.artifacts) {

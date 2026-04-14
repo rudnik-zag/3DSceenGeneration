@@ -188,7 +188,7 @@ Artifacts are persisted by your standard storage layer:
 - local fallback under `.local-storage` if S3 is unavailable
 
 Storage key pattern:
-- `projects/{project-slug}/runs/{runId}/nodes/{nodeId}/artifact_{artifactId}.{ext}`
+- `projects/{project-slug}/runs/{runLabel}/steps/{stepLabel}/attempt-{nn}/outputs/{outputName}.{ext}`
 
 Important MinIO note:
 - In MinIO data directory (`~/minio-data/...`) objects are stored in internal XL layout (`xl.meta`, `part.1` etc.), not plain user-visible PNG files.
@@ -241,4 +241,3 @@ Security model is backend-only by design:
 - `Qwen Image Edit` real execution requires a valid API workflow path.
 - Passing Comfy UI-exported graph JSON instead of API JSON will fail intentionally.
 - If `COMFYUI_ALLOW_MOCK_FALLBACK=true`, unavailable Comfy returns mock images with warnings instead of hard fail.
-

@@ -20,6 +20,7 @@ import { buildExecutionPlan, parseGraphDocument } from "@/lib/graph/plan";
 import { artifactPreviewStorageKey, artifactStorageKey } from "@/lib/storage/keys";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { getObjectBuffer, putObjectToStorage } from "@/lib/storage/s3";
+import { formatRunFolderLabel } from "@/lib/runs/numbering";
 import { ArtifactType, GraphNode, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
 
 export interface RunWorkflowInput {
@@ -54,6 +55,80 @@ function inferArtifactKindFromMime(mimeType: string): ArtifactKind {
 
 function appendLog(prev: string, line: string) {
   return prev ? `${prev}\n${line}` : line;
+}
+
+const STEP_CODE_MAP: Partial<Record<WorkflowNodeType, string>> = {
+  "input.image": "INPUT_IMAGE",
+  "input.text": "INPUT_TEXT",
+  "input.cameraPath": "INPUT_CAMERA_PATH",
+  "viewer.environment": "VIEWER_ENVIRONMENT",
+  "model.groundingdino": "OBJECT_DETECTION",
+  "model.sam2": "IMAGE_SEGMENTATION",
+  "model.sam3d_objects": "CUSTOM_SCENE_GENERATION",
+  "pipeline.scene_generation": "SCENE_GENERATION_PIPELINE",
+  "model.qwen_vl": "QWEN_VL_ANALYSIS",
+  "model.qwen_image_edit": "QWEN_IMAGE_EDIT",
+  "model.texturing": "TEXTURING",
+  "geo.depth_estimation": "DEPTH_ESTIMATION",
+  "geo.pointcloud_from_depth": "POINT_CLOUD",
+  "geo.mesh_reconstruction": "MESH_RECONSTRUCTION",
+  "geo.uv_unwrap": "UV_UNWRAP",
+  "geo.bake_textures": "TEXTURE_BAKE",
+  "out.export_scene": "EXPORT_SCENE",
+  "out.open_in_viewer": "OPEN_IN_VIEWER"
+};
+
+function toStepCode(nodeType: WorkflowNodeType | string) {
+  const mapped = typeof nodeType === "string" ? STEP_CODE_MAP[nodeType as WorkflowNodeType] : null;
+  if (mapped) return mapped;
+  return nodeType
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_");
+}
+
+function sanitizeStorageSegment(value: string, fallback: string) {
+  const normalized = value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function toStepSlug(stepCode: string) {
+  return sanitizeStorageSegment(stepCode.toLowerCase().replace(/_/g, "-"), "step");
+}
+
+function toNodeStorageLabel(input: {
+  sequence: number;
+  stepCode: string;
+  nodeHint?: string | null;
+}) {
+  const sequence = String(Math.max(1, Math.floor(input.sequence))).padStart(2, "0");
+  const stepSlug = toStepSlug(input.stepCode);
+  const hint =
+    typeof input.nodeHint === "string" && input.nodeHint.trim().length > 0
+      ? sanitizeStorageSegment(input.nodeHint, "node")
+      : null;
+  if (hint) {
+    return `${sequence}-${stepSlug}-${hint}`;
+  }
+  return `${sequence}-${stepSlug}`;
+}
+
+function toOutputStorageName(outputId: string) {
+  const normalized = sanitizeStorageSegment(outputId, "main");
+  return normalized === "default" ? "main" : normalized;
+}
+
+function runManifestStorageKey(input: {
+  projectSlug: string;
+  runFolderLabel: string;
+}) {
+  return `projects/${input.projectSlug}/runs/${input.runFolderLabel}/meta/run_manifest.json`;
 }
 
 async function updateRun(runId: string, data: Prisma.RunUpdateInput) {
@@ -265,6 +340,107 @@ async function createRuntimeArtifactFromLocalPath(params: {
   } as RuntimeArtifactRef;
 }
 
+async function writeRunManifest(params: {
+  runId: string;
+  projectSlug: string;
+  runFolderLabel: string;
+  status: RunStatus;
+  errorMessage?: string | null;
+}) {
+  try {
+    const [runRow, runSteps, artifacts] = await Promise.all([
+      prisma.run.findUnique({
+        where: { id: params.runId },
+        select: {
+          id: true,
+          projectId: true,
+          graphId: true,
+          runNumber: true,
+          status: true,
+          progress: true,
+          createdBy: true,
+          createdAt: true,
+          startedAt: true,
+          finishedAt: true
+        }
+      }),
+      prisma.runStep.findMany({
+        where: { runId: params.runId },
+        orderBy: [{ sequence: "asc" }, { createdAt: "asc" }],
+        select: {
+          id: true,
+          sequence: true,
+          nodeId: true,
+          nodeType: true,
+          stepCode: true,
+          stepLabel: true,
+          attempt: true,
+          status: true,
+          startedAt: true,
+          finishedAt: true,
+          durationMs: true,
+          cacheHit: true,
+          inputSummary: true,
+          outputSummary: true,
+          errorMessage: true
+        }
+      }),
+      prisma.artifact.findMany({
+        where: { runId: params.runId },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          nodeId: true,
+          kind: true,
+          mimeType: true,
+          byteSize: true,
+          hash: true,
+          storageKey: true,
+          previewStorageKey: true,
+          meta: true,
+          createdAt: true
+        }
+      })
+    ]);
+
+    if (!runRow) return;
+
+    const manifest = {
+      generatedAt: new Date().toISOString(),
+      run: {
+        id: runRow.id,
+        runNumber: runRow.runNumber,
+        runFolderLabel: params.runFolderLabel,
+        projectId: runRow.projectId,
+        graphId: runRow.graphId,
+        createdBy: runRow.createdBy,
+        status: params.status,
+        progress: runRow.progress,
+        createdAt: runRow.createdAt,
+        startedAt: runRow.startedAt,
+        finishedAt: runRow.finishedAt,
+        errorMessage: params.errorMessage ?? null
+      },
+      steps: runSteps,
+      artifacts
+    };
+
+    await putObjectToStorage({
+      key: runManifestStorageKey({
+        projectSlug: params.projectSlug,
+        runFolderLabel: params.runFolderLabel
+      }),
+      body: Buffer.from(JSON.stringify(manifest, null, 2), "utf8"),
+      contentType: "application/json"
+    });
+  } catch (error) {
+    console.warn(
+      `[worker] failed to write run manifest for ${params.runId}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
 export async function executeWorkflowRun(input: RunWorkflowInput) {
   const run = await prisma.run.findUnique({ where: { id: input.runId } });
   if (!run) {
@@ -287,6 +463,11 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     return;
   }
 
+  let projectSlug = resolveProjectStorageSlug({
+    projectId: input.projectId
+  });
+  const runFolderLabel = formatRunFolderLabel(run.runNumber);
+
   await updateRun(input.runId, {
     status: "running",
     startedAt: new Date(),
@@ -307,9 +488,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
   try {
     const project = await prisma.project.findUnique({
       where: { id: input.projectId },
-      select: { id: true, name: true }
+      select: { id: true, name: true, slug: true }
     });
-    const projectSlug = resolveProjectStorageSlug({
+    projectSlug = resolveProjectStorageSlug({
+      projectSlug: project?.slug,
       projectName: project?.name,
       projectId: input.projectId
     });
@@ -330,6 +512,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const task = plan.tasks[i];
       activeNodeContext = { nodeId: task.nodeId, nodeType: task.nodeType };
       const spec = nodeSpecRegistry[task.nodeType];
+      const stepCode = toStepCode(task.nodeType);
+      const stepLabel = spec.title;
+      const nodeStorageLabel = toNodeStorageLabel({
+        sequence: i + 1,
+        stepCode
+      });
       const resolvedParams = mergeNodeParamsWithDefaults(task.nodeType, task.params);
       const now = new Date().toISOString();
       const forcedNodeSet = new Set(input.forceNodeIds ?? []);
@@ -568,6 +756,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         userId: run.createdBy ?? null,
         nodeId: task.nodeId,
         nodeType: task.nodeType,
+        stepCode,
+        stepLabel,
+        attempt: 1,
         sequence: i + 1,
         inputSummary,
         metadata: {
@@ -587,6 +778,8 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         message: `Node started: ${task.nodeType}`,
         metadata: {
           sequence: i + 1,
+          stepCode,
+          stepLabel,
           mode: runtimeMode ?? null,
           cacheBypass: shouldBypassCache
         } as Prisma.InputJsonValue
@@ -896,10 +1089,19 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             continue;
           }
 
+          const internalStepFolderLabel = toNodeStorageLabel({
+            sequence: i + 1,
+            stepCode: toStepCode(internalNode.type),
+            nodeHint: internalNodeId
+          });
+
           const internalResult = await runner.executeNode({
             projectId: input.projectId,
             projectSlug,
             runId: input.runId,
+            runFolderLabel,
+            stepFolderLabel: internalStepFolderLabel,
+            attempt: 1,
             nodeId: internalNodeRuntimeId,
             nodeType: internalNode.type,
             params: internalParams,
@@ -961,9 +1163,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             const key = artifactStorageKey({
               projectSlug,
               projectId: input.projectId,
-              runId: input.runId,
-              nodeId: internalNodeRuntimeId,
-              artifactId: created.id,
+              runLabel: runFolderLabel,
+              stepLabel: internalStepFolderLabel,
+              attempt: 1,
+              outputName: toOutputStorageName(output.outputId),
               extension: output.extension
             });
 
@@ -978,9 +1181,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
               previewKey = artifactPreviewStorageKey({
                 projectSlug,
                 projectId: input.projectId,
-                runId: input.runId,
-                nodeId: internalNodeRuntimeId,
-                artifactId: created.id,
+                runLabel: runFolderLabel,
+                stepLabel: internalStepFolderLabel,
+                attempt: 1,
+                outputName: toOutputStorageName(output.outputId),
                 extension: output.preview.extension
               });
               await putObjectToStorage({
@@ -1134,6 +1338,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         projectId: input.projectId,
         projectSlug,
         runId: input.runId,
+        runFolderLabel,
+        stepFolderLabel: nodeStorageLabel,
+        attempt: 1,
         nodeId: task.nodeId,
         nodeType: task.nodeType,
         params: resolvedParams,
@@ -1191,9 +1398,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         const key = artifactStorageKey({
           projectSlug,
           projectId: input.projectId,
-          runId: input.runId,
-          nodeId: task.nodeId,
-          artifactId: created.id,
+          runLabel: runFolderLabel,
+          stepLabel: nodeStorageLabel,
+          attempt: 1,
+          outputName: toOutputStorageName(output.outputId),
           extension: output.extension
         });
 
@@ -1208,9 +1416,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           previewKey = artifactPreviewStorageKey({
             projectSlug,
             projectId: input.projectId,
-            runId: input.runId,
-            nodeId: task.nodeId,
-            artifactId: created.id,
+            runLabel: runFolderLabel,
+            stepLabel: nodeStorageLabel,
+            attempt: 1,
+            outputName: toOutputStorageName(output.outputId),
             extension: output.preview.extension
           });
 
@@ -1286,6 +1495,8 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         message: "Node completed",
         metadata: {
           cacheHit: false,
+          stepCode,
+          stepLabel,
           outputs: outputs.map((output) => output.outputId),
           warnings: result.warnings ?? runtimeWarnings
         } as Prisma.InputJsonValue
@@ -1311,6 +1522,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     });
     await finalizeRunUsage({
       runId: input.runId,
+      status: "success"
+    });
+    await writeRunManifest({
+      runId: input.runId,
+      projectSlug,
+      runFolderLabel,
       status: "success"
     });
   } catch (error) {
@@ -1362,6 +1579,13 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         finalizeError instanceof Error ? finalizeError.message : String(finalizeError)
       );
     }
+    await writeRunManifest({
+      runId: input.runId,
+      projectSlug,
+      runFolderLabel,
+      status,
+      errorMessage: message
+    });
     throw error;
   }
 }

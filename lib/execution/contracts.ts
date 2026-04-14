@@ -36,6 +36,9 @@ export interface NodeExecutionContext {
   projectId: string;
   projectSlug: string;
   runId: string;
+  runFolderLabel?: string;
+  stepFolderLabel?: string;
+  attempt?: number;
   nodeId: string;
   nodeType: WorkflowNodeType;
   params: Record<string, unknown>;

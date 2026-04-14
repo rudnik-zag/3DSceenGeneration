@@ -29,6 +29,9 @@ export interface StartRunStepInput {
   userId?: string | null;
   nodeId: string;
   nodeType: string;
+  stepCode?: string | null;
+  stepLabel?: string | null;
+  attempt?: number | null;
   sequence: number;
   inputSummary?: string | null;
   metadata?: Prisma.InputJsonValue;
@@ -78,14 +81,21 @@ export async function startRunStep(input: StartRunStepInput): Promise<StartedRun
       ? Prisma.sql`NULL`
       : Prisma.sql`CAST(${JSON.stringify(input.metadata)} AS jsonb)`;
   const runningStatus = Prisma.sql`CAST(${"running"} AS "RunStatus")`;
+  const resolvedAttempt =
+    Number.isFinite(Number(input.attempt)) && Number(input.attempt) > 0 ? Math.floor(Number(input.attempt)) : 1;
+  const resolvedStepCode =
+    typeof input.stepCode === "string" && input.stepCode.trim().length > 0 ? input.stepCode.trim() : null;
+  const resolvedStepLabel =
+    typeof input.stepLabel === "string" && input.stepLabel.trim().length > 0 ? input.stepLabel.trim() : null;
   try {
     const created = await prisma.$queryRaw<Array<{ id: string; startedAt: Date }>>(
       Prisma.sql`
         INSERT INTO "RunStep"
-          ("id","runId","projectId","graphId","userId","nodeId","nodeType","sequence","status","startedAt","inputSummary","metadata","createdAt","updatedAt")
+          ("id","runId","projectId","graphId","userId","nodeId","nodeType","stepCode","stepLabel","attempt","sequence","status","startedAt","inputSummary","metadata","createdAt","updatedAt")
         VALUES
           (${randomUUID()}, ${input.runId}, ${input.projectId}, ${input.graphId}, ${input.userId ?? null},
-           ${input.nodeId}, ${input.nodeType}, ${input.sequence}, ${runningStatus}, NOW(), ${input.inputSummary ?? null},
+           ${input.nodeId}, ${input.nodeType}, ${resolvedStepCode}, ${resolvedStepLabel}, ${resolvedAttempt},
+           ${input.sequence}, ${runningStatus}, NOW(), ${input.inputSummary ?? null},
            ${metadataValue}, NOW(), NOW())
         RETURNING "id","startedAt"
       `

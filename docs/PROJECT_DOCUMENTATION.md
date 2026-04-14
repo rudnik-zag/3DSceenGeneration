@@ -315,7 +315,7 @@ Implementation: `lib/storage/s3.ts`.
 
 ### 9.2 Object Key Patterns
 
-- Run artifacts: `projects/{projectSlug}/runs/{runId}/nodes/{nodeId}/...`
+- Run artifacts: `projects/{projectSlug}/runs/{runLabel}/steps/{stepLabel}/attempt-{nn}/outputs/{outputName}.{ext}`
 - Uploads: `projects/{projectSlug}/uploads/{projectId}/images/...`
 
 ### 9.3 Cleanup
@@ -547,4 +547,3 @@ Use this file as the main architecture reference, plus:
 - `docs/IMPLEMENTATION_RUNBOOK.md` (operational details)
 - `docs/OBSERVABILITY_ANALYTICS_GUIDE.md` (telemetry and monitoring)
 - `docs/METABASE_ANALYTICS_PLAYBOOK.md` (dashboard setup)
-

@@ -4,9 +4,10 @@ interface ArtifactStorageKeyInput {
   projectSlug?: string | null;
   projectName?: string | null;
   projectId?: string | null;
-  runId: string;
-  nodeId: string;
-  artifactId: string;
+  runLabel: string;
+  stepLabel: string;
+  attempt?: number | null;
+  outputName: string;
   extension: string;
 }
 
@@ -15,10 +16,11 @@ export function artifactStorageKey(input: ArtifactStorageKeyInput) {
     projectSlug: input.projectSlug,
     projectName: input.projectName,
     projectId: input.projectId,
-    runId: input.runId,
-    nodeId: input.nodeId
+    runLabel: input.runLabel,
+    stepLabel: input.stepLabel,
+    attempt: input.attempt
   });
-  return `${prefix}/artifact_${input.artifactId}.${input.extension}`;
+  return `${prefix}/outputs/${input.outputName}.${input.extension}`;
 }
 
 export function artifactPreviewStorageKey(input: ArtifactStorageKeyInput) {
@@ -26,8 +28,9 @@ export function artifactPreviewStorageKey(input: ArtifactStorageKeyInput) {
     projectSlug: input.projectSlug,
     projectName: input.projectName,
     projectId: input.projectId,
-    runId: input.runId,
-    nodeId: input.nodeId
+    runLabel: input.runLabel,
+    stepLabel: input.stepLabel,
+    attempt: input.attempt
   });
-  return `${prefix}/artifact_${input.artifactId}_preview.${input.extension}`;
+  return `${prefix}/outputs/${input.outputName}_preview.${input.extension}`;
 }

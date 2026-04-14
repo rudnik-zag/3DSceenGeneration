@@ -726,13 +726,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
-      if (target && paneMenuRef.current?.contains(target)) {
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const pathContains = (element: HTMLElement | null) => Boolean(element && path.includes(element));
+      if ((target && paneMenuRef.current?.contains(target)) || pathContains(paneMenuRef.current)) {
         return;
       }
-      if (target && nodeMenuRef.current?.contains(target)) {
+      if ((target && nodeMenuRef.current?.contains(target)) || pathContains(nodeMenuRef.current)) {
         return;
       }
-      if (target && nodeSearchMenuRef.current?.contains(target)) {
+      if ((target && nodeSearchMenuRef.current?.contains(target)) || pathContains(nodeSearchMenuRef.current)) {
         return;
       }
       setPaneMenu(null);

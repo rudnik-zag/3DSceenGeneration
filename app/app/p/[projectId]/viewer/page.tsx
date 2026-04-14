@@ -107,17 +107,20 @@ function toUniqueSignedUrlsByAssetPath(values: string[]) {
 async function resolveAdditionalSceneUrlsFromManifest(input: {
   projectId: string;
   projectName: string;
+  projectSlug?: string | null;
   runId: string;
   nodeId: string;
+  storageKey?: string;
 }): Promise<string[]> {
   const localRoot = getLocalStorageRoot();
   const projectSlug = resolveProjectStorageSlug({
+    projectSlug: input.projectSlug,
     projectName: input.projectName,
     projectId: input.projectId
   });
   const projectSegments = toUniqueStrings([projectSlug, input.projectId]);
 
-  const manifestCandidates = projectSegments.map((segment) =>
+  const legacyManifestCandidates = projectSegments.map((segment) =>
     path.join(
       localRoot,
       "projects",
@@ -131,6 +134,29 @@ async function resolveAdditionalSceneUrlsFromManifest(input: {
       "result_manifest.json"
     )
   );
+  const readableMatch =
+    typeof input.storageKey === "string" && input.storageKey.length > 0
+      ? input.storageKey.match(/^projects\/([^/]+)\/runs\/([^/]+)\/steps\/([^/]+)\/(attempt-\d{2})\/outputs\/[^/]+$/)
+      : null;
+  const readableManifestCandidates =
+    readableMatch && readableMatch[1] && readableMatch[2] && readableMatch[3] && readableMatch[4]
+      ? [
+          path.join(
+            localRoot,
+            "projects",
+            readableMatch[1],
+            "runs",
+            readableMatch[2],
+            "steps",
+            readableMatch[3],
+            readableMatch[4],
+            "scene_generation",
+            "outputs",
+            "result_manifest.json"
+          )
+        ]
+      : [];
+  const manifestCandidates = toUniqueStrings([...readableManifestCandidates, ...legacyManifestCandidates]);
 
   for (const manifestPath of manifestCandidates) {
     try {
@@ -476,8 +502,10 @@ export default async function ViewerPage({
         ? await resolveAdditionalSceneUrlsFromManifest({
             projectId: project.id,
             projectName: project.name,
+            projectSlug: project.slug,
             runId: candidate.runId,
-            nodeId: candidate.nodeId
+            nodeId: candidate.nodeId,
+            storageKey: candidate.storageKey
           })
         : [];
     const metadataAdditionalSceneUrls = (

@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { env } from "@/lib/env";
 import { recordRunEvent } from "@/lib/execution/telemetry";
 import { runWorkflowQueue } from "@/lib/queue/queues";
+import { reserveNextRunNumber } from "@/lib/runs/numbering";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
@@ -76,15 +77,19 @@ export async function POST(
       : null;
     const run =
       reservation?.run ??
-      (await prisma.run.create({
-        data: {
-          projectId,
-          graphId: graph.id,
-          createdBy: access.user.id,
-          status: "queued",
-          logs: initialLog,
-          progress: 0
-        }
+      (await prisma.$transaction(async (tx) => {
+        const runNumber = await reserveNextRunNumber(tx, projectId);
+        return tx.run.create({
+          data: {
+            projectId,
+            graphId: graph.id,
+            runNumber,
+            createdBy: access.user.id,
+            status: "queued",
+            logs: initialLog,
+            progress: 0
+          }
+        });
       }));
     const queueOptions: { jobId: string; priority?: number } = {
       jobId: run.id

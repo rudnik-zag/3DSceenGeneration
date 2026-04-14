@@ -316,7 +316,7 @@ start_standalone_minio_if_needed() {
   fi
 
   mkdir -p "${MINIO_DATA_DIR}"
-  start_service "minio-standalone" "'${MINIO_BIN}' server '${MINIO_DATA_DIR}' --address '${MINIO_ADDRESS}' --console-address '${MINIO_CONSOLE_ADDRESS}'"
+  start_service "minio-standalone" "'${MINIO_BIN}' server '${MINIO_DATA_DIR}' --address '${MINIO_ADDRESS}' --console-address '${MINIO_CONSOLE_ADDRESS}'" "0"
 }
 
 stop_standalone_minio() {
@@ -351,18 +351,40 @@ start_comfy_service_if_needed() {
 
 stop_on_demand_comfy_process() {
   local pid_file="${PID_DIR}/comfyui-ondemand.pid"
-  if ! is_running_pid "${pid_file}"; then
-    rm -f "${pid_file}"
-    return 0
+
+  local pid=""
+  local pgid=""
+  if [[ -f "${pid_file}" ]]; then
+    if grep -q "{" "${pid_file}" 2>/dev/null; then
+      pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${pid_file}" | head -n 1 || true)"
+      pgid="$(sed -n 's/.*"pgid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${pid_file}" | head -n 1 || true)"
+    else
+      pid="$(head -n 1 "${pid_file}" | tr -dc '0-9' || true)"
+      pgid="${pid}"
+    fi
   fi
-  local pid
-  pid="$(cat "${pid_file}")"
-  echo "[dev-stack] Stopping comfyui-ondemand (pid=${pid})"
-  kill "${pid}" >/dev/null 2>&1 || true
-  sleep 0.5
-  if kill -0 "${pid}" >/dev/null 2>&1; then
-    kill -9 "${pid}" >/dev/null 2>&1 || true
+
+  if [[ -n "${pgid}" ]]; then
+    echo "[dev-stack] Stopping comfyui-ondemand process group (pgid=${pgid})"
+    kill -TERM "-${pgid}" >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL "-${pgid}" >/dev/null 2>&1 || true
+  elif [[ -n "${pid}" ]]; then
+    echo "[dev-stack] Stopping comfyui-ondemand (pid=${pid})"
+    kill "${pid}" >/dev/null 2>&1 || true
+    sleep 0.5
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    fi
   fi
+
+  # Fallback: kill any lingering Comfy main.py on configured host/port.
+  local comfy_host comfy_port
+  comfy_host="$(resolve_setting "COMFYUI_HOST" "127.0.0.1" "${COMFYUI_HOST:-}")"
+  comfy_port="$(resolve_setting "COMFYUI_PORT" "8188" "${COMFYUI_PORT:-}")"
+  pgrep -af "python main.py --listen ${comfy_host} --port ${comfy_port}" >/dev/null 2>&1 && \
+    pkill -f "python main.py --listen ${comfy_host} --port ${comfy_port}" >/dev/null 2>&1 || true
+
   rm -f "${pid_file}"
 }
 
@@ -589,6 +611,7 @@ free_stop_ports() {
 start_service() {
   local name="$1"
   local cmd="$2"
+  local required="${3:-1}"
   local pid_file="${PID_DIR}/${name}.pid"
   local log_file="${LOG_DIR}/${name}.log"
 
@@ -610,9 +633,16 @@ start_service() {
   if is_running_pid "${pid_file}"; then
     echo "[dev-stack] ${name} started (pid=$(cat "${pid_file}"))"
   else
-    echo "[dev-stack] ERROR: ${name} failed to start. Check ${log_file}"
+    if [[ "${required}" == "1" ]]; then
+      echo "[dev-stack] ERROR: ${name} failed to start. Check ${log_file}"
+    else
+      echo "[dev-stack] WARNING: ${name} failed to start. Continuing without it. Check ${log_file}"
+    fi
     rm -f "${pid_file}"
-    exit 1
+    if [[ "${required}" == "1" ]]; then
+      exit 1
+    fi
+    return 0
   fi
 }
 

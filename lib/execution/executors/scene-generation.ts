@@ -698,9 +698,10 @@ async function collectRealOutputs(params: {
         "projects",
         params.ctx.projectSlug || params.ctx.projectId,
         "runs",
-        params.ctx.runId,
-        "nodes",
-        params.ctx.nodeId,
+        params.ctx.runFolderLabel ?? params.ctx.runId,
+        "steps",
+        params.ctx.stepFolderLabel ?? params.ctx.nodeId,
+        `attempt-${String(params.ctx.attempt ?? 1).padStart(2, "0")}`,
         "scene_generation",
         "outputs",
         "mesh_objects_transformed",
@@ -1004,15 +1005,19 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
   const configInput = ctx.inputs.config?.[0] ?? ctx.inputs.masksDir?.[0] ?? ctx.inputs.maskDir?.[0] ?? null;
   const mode = resolveMode(ctx);
   const warnings = [...(ctx.warnings ?? [])];
+  const runFolderSegment = ctx.runFolderLabel ?? ctx.runId;
+  const stepFolderSegment = ctx.stepFolderLabel ?? ctx.nodeId;
+  const attemptSegment = `attempt-${String(ctx.attempt ?? 1).padStart(2, "0")}`;
 
   const nodeOutputRoot = path.join(
     getLocalStorageRoot(),
     "projects",
     ctx.projectSlug || ctx.projectId,
     "runs",
-    ctx.runId,
-    "nodes",
-    ctx.nodeId,
+    runFolderSegment,
+    "steps",
+    stepFolderSegment,
+    attemptSegment,
     "scene_generation"
   );
   const outputDir = path.join(nodeOutputRoot, "outputs");

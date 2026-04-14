@@ -161,8 +161,17 @@ model Project {
   usageEvents  UsageEvent[]
   runEvents    RunEvent[]
   runSteps     RunStep[]
+  runCounter   ProjectRunCounter?
 
   @@index([ownerId])
+}
+
+model ProjectRunCounter {
+  projectId     String   @id
+  nextRunNumber Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
 
 model ProjectMember {
@@ -219,6 +228,7 @@ model Run {
   id         String     @id @default(cuid())
   projectId  String
   graphId    String
+  runNumber  Int
   createdBy  String?
   status     RunStatus  @default(queued)
   startedAt  DateTime?
@@ -236,6 +246,7 @@ model Run {
   steps       RunStep[]
 
   @@index([projectId])
+  @@unique([projectId, runNumber])
   @@index([graphId])
   @@index([status])
   @@index([createdBy])
@@ -274,6 +285,9 @@ model RunStep {
   userId        String?
   nodeId        String
   nodeType      String
+  stepCode      String?
+  stepLabel     String?
+  attempt       Int      @default(1)
   sequence      Int
   status        RunStatus @default(running)
   startedAt     DateTime  @default(now())
@@ -293,6 +307,7 @@ model RunStep {
 
   @@unique([runId, sequence])
   @@index([runId, status, sequence])
+  @@index([runId, stepCode, sequence])
   @@index([projectId, createdAt])
   @@index([graphId, createdAt])
   @@index([userId, createdAt])

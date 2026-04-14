@@ -190,12 +190,18 @@ function RightClickMenuImpl({ x, y, items, onClose }: RightClickMenuProps) {
   }, [activePath, columns, onClose]);
 
   return (
-    <div ref={rootRef} className="absolute z-40 panel-fade-in" style={{ left: resolvedPosition.x, top: resolvedPosition.y }}>
+    <div
+      ref={rootRef}
+      className="absolute z-40 panel-fade-in"
+      style={{ left: resolvedPosition.x, top: resolvedPosition.y }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
       <div className="flex items-start gap-1">
         {columns.map((columnItems, depth) => (
           <div
             key={`menu-column-${depth}`}
-            className="min-w-[218px] rounded-md border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.45)]"
+            className="max-h-[min(72vh,520px)] min-w-[218px] overflow-y-auto rounded-md border border-[#34363d] bg-[#1b1d23] p-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.45)]"
           >
             {columnItems.map((entry, index) => {
               if (entry.kind === "separator") {

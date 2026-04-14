@@ -257,14 +257,18 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
   const prompt = typeof ctx.params.prompt === "string" ? ctx.params.prompt.trim() : "";
   const tokenSpans = typeof ctx.params.tokenSpans === "string" ? ctx.params.tokenSpans.trim() : "";
 
+  const runFolderSegment = ctx.runFolderLabel ?? ctx.runId;
+  const stepFolderSegment = ctx.stepFolderLabel ?? ctx.nodeId;
+  const attemptSegment = `attempt-${String(ctx.attempt ?? 1).padStart(2, "0")}`;
   const outputDir = path.join(
     getLocalStorageRoot(),
     "projects",
     ctx.projectSlug || ctx.projectId,
     "runs",
-    ctx.runId,
-    "nodes",
-    ctx.nodeId,
+    runFolderSegment,
+    "steps",
+    stepFolderSegment,
+    attemptSegment,
     "groundingdino"
   );
   await fs.mkdir(outputDir, { recursive: true });

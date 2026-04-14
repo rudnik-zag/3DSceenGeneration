@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { createHash } from "crypto";
 
+import { formatRunFolderLabel, reserveNextRunNumber } from "../lib/runs/numbering";
 import { slugifyProjectName } from "../lib/storage/project-path";
 import { putObjectToStorage } from "../lib/storage/s3";
 
@@ -81,17 +82,21 @@ async function main() {
     }
   });
 
-  const run = await prisma.run.create({
-    data: {
-      projectId: project.id,
-      graphId: graph.id,
-      createdBy: user.id,
-      status: "success",
-      logs: "Seed run created for demo project",
-      progress: 100,
-      startedAt: new Date(),
-      finishedAt: new Date()
-    }
+  const run = await prisma.$transaction(async (tx) => {
+    const runNumber = await reserveNextRunNumber(tx, project.id);
+    return tx.run.create({
+      data: {
+        projectId: project.id,
+        graphId: graph.id,
+        runNumber,
+        createdBy: user.id,
+        status: "success",
+        logs: "Seed run created for demo project",
+        progress: 100,
+        startedAt: new Date(),
+        finishedAt: new Date()
+      }
+    });
   });
 
   const seededArtifact = await prisma.artifact.create({
@@ -126,7 +131,8 @@ async function main() {
   );
   const hash = createHash("sha256").update(maskSvg).digest("hex");
   const projectSlug = slugifyProjectName(project.name);
-  const storageKey = `projects/${projectSlug}/runs/${run.id}/nodes/n3/artifact_${seededArtifact.id}.svg`;
+  const runLabel = formatRunFolderLabel(run.runNumber);
+  const storageKey = `projects/${projectSlug}/runs/${runLabel}/steps/03-image-segmentation/attempt-01/outputs/mask.svg`;
 
   try {
     await putObjectToStorage({

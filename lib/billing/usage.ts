@@ -5,6 +5,7 @@ import { RunCostEstimate, estimateRunTokenCost } from "@/lib/billing/pricing";
 import { SubscriptionPlanKey, getPlanDefinition, isSubscriptionPlanKey } from "@/lib/billing/plans";
 import { prisma } from "@/lib/db";
 import { parseGraphDocument } from "@/lib/graph/plan";
+import { reserveNextRunNumber } from "@/lib/runs/numbering";
 import { HttpError } from "@/lib/security/errors";
 
 function clampInt(value: number, min = 0) {
@@ -138,10 +139,12 @@ export async function createRunWithTokenReservation(input: {
       amount: estimate.estimatedTokenCost
     });
 
+    const runNumber = await reserveNextRunNumber(tx, input.projectId);
     const run = await tx.run.create({
       data: {
         projectId: input.projectId,
         graphId: input.graphId,
+        runNumber,
         createdBy: input.userId,
         status: "queued",
         logs: input.logs,
@@ -162,7 +165,7 @@ export async function createRunWithTokenReservation(input: {
           breakdown: estimate.breakdown,
           monthlyDebited: split.monthlyDebited,
           purchasedDebited: split.purchasedDebited
-        } as Prisma.InputJsonValue
+        } as unknown as Prisma.InputJsonValue
       }
     });
 
@@ -192,7 +195,7 @@ export async function createRunWithTokenReservation(input: {
           monthlyDebited: split.monthlyDebited,
           purchasedDebited: split.purchasedDebited,
           featureKey: estimate.featureKey
-        } as Prisma.InputJsonValue
+        } as unknown as Prisma.InputJsonValue
       }
     });
 
