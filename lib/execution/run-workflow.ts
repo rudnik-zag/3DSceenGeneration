@@ -530,21 +530,24 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
       const inputsByPort: Record<string, RuntimeArtifactRef[]> = {};
       for (const binding of task.inputBindings) {
         const sourceNode = documentNodeById.get(binding.sourceNodeId);
-        const produced = producedByOutput.get(mapKey(binding.sourceNodeId, binding.sourceOutputId));
-        let resolved: RuntimeArtifactRef | null | undefined = produced;
-        if (!resolved) {
-          const selectedArtifactId = resolveSelectedArtifactIdForOutput(sourceNode, binding.sourceOutputId);
-          if (selectedArtifactId) {
-            const selectedArtifact = await findArtifactById(input.projectId, selectedArtifactId);
-            if (
-              selectedArtifact &&
-              selectedArtifact.nodeId === binding.sourceNodeId &&
-              selectedArtifact.outputId === binding.sourceOutputId
-            ) {
-              resolved = selectedArtifact;
-            }
+        let resolved: RuntimeArtifactRef | null | undefined = null;
+        const selectedArtifactId = resolveSelectedArtifactIdForOutput(sourceNode, binding.sourceOutputId);
+        if (selectedArtifactId) {
+          const selectedArtifact = await findArtifactById(input.projectId, selectedArtifactId);
+          if (
+            selectedArtifact &&
+            selectedArtifact.nodeId === binding.sourceNodeId &&
+            selectedArtifact.outputId === binding.sourceOutputId
+          ) {
+            resolved = selectedArtifact;
           }
         }
+
+        if (!resolved) {
+          const produced = producedByOutput.get(mapKey(binding.sourceNodeId, binding.sourceOutputId));
+          resolved = produced;
+        }
+
         if (!resolved) {
           resolved = await findLatestArtifactByNodeOutput(input.projectId, binding.sourceNodeId, binding.sourceOutputId);
         }
