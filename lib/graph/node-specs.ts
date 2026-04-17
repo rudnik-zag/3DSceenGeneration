@@ -100,7 +100,7 @@ export const nodeSpecEntries = [
     category: "Inputs",
     title: "Input Image",
     icon: "Image",
-    description: "Upload/reference a source image or generate one with Comfy-backed models.",
+    description: "Upload/reference a source image or generate one with Comfy-backed text-to-image models.",
     inputPorts: [],
     outputPorts: [{ id: "image", label: "Image", artifactType: "Image" }],
     paramSchema: imageInput,
@@ -110,9 +110,9 @@ export const nodeSpecEntries = [
         key: "generatorModel",
         label: "Generator Model",
         input: "select",
-        options: ["Qwen-Distill", "Qwen-Image-Edit", "Z-Image-Turbo"]
+        options: ["Qwen-Distill", "Z-Image-Turbo"]
       },
-      { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Describe the target image or edit intent..." },
+      { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Describe the target image..." },
       { key: "negativePrompt", label: "Negative Prompt", input: "textarea", placeholder: "blurry, low quality, artifacts" },
       { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: 2147483647, step: 1 },
       { key: "steps", label: "Steps", input: "number", min: 1, max: 150, step: 1 },
@@ -124,6 +124,7 @@ export const nodeSpecEntries = [
         label: "Sampler",
         input: "select",
         options: [
+          "res_multistep",
           "euler",
           "euler_ancestral",
           "heun",
@@ -147,7 +148,7 @@ export const nodeSpecEntries = [
         input: "select",
         options: ["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"]
       },
-      { key: "checkpoint", label: "Checkpoint Override", input: "text", placeholder: "z-image-turbo.safetensors" },
+      { key: "checkpoint", label: "Checkpoint Override", input: "text", placeholder: "z_image_turbo_bf16.safetensors" },
       { key: "filename", label: "Filename", input: "text" },
       { key: "storageKey", label: "Storage Key", input: "text", placeholder: "projects/..." }
     ],
@@ -157,12 +158,12 @@ export const nodeSpecEntries = [
       prompt: "",
       negativePrompt: "",
       seed: -1,
-      steps: 20,
-      cfg: 8,
-      width: 1024,
-      height: 1024,
-      sampler: "euler",
-      scheduler: "normal",
+      steps: 10,
+      cfg: 1,
+      width: 1328,
+      height: 1328,
+      sampler: "res_multistep",
+      scheduler: "simple",
       checkpoint: "",
       filename: "image.png",
       storageKey: ""
@@ -555,6 +556,38 @@ export function mergeNodeParamsWithDefaults(nodeType: WorkflowNodeType, rawParam
       return applySceneGenerationPreset(normalizedScene, normalizedScene.configPreset);
     }
     return normalizedScene;
+  }
+
+  if (nodeType === "input.image") {
+    const normalizedModel = merged.generatorModel === "Qwen-Image-Edit" ? "Qwen-Distill" : merged.generatorModel;
+    const normalized = {
+      ...merged,
+      generatorModel: normalizedModel
+    } as Record<string, unknown>;
+
+    const isLegacyZImageDefaults =
+      normalizedModel === "Z-Image-Turbo" &&
+      Number(normalized.steps) === 20 &&
+      Number(normalized.cfg) === 8 &&
+      String(normalized.sampler ?? "") === "euler" &&
+      String(normalized.scheduler ?? "") === "normal";
+
+    if (isLegacyZImageDefaults) {
+      return {
+        ...normalized,
+        seed: -1,
+        steps: 4,
+        cfg: 1,
+        width: 1024,
+        height: 1024,
+        sampler: "res_multistep",
+        scheduler: "simple",
+        negativePrompt: "",
+        checkpoint: ""
+      };
+    }
+
+    return normalized;
   }
 
   return merged;

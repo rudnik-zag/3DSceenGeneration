@@ -11,7 +11,6 @@ ComfyUI is integrated as a backend inference service used by worker executors.
 Implemented model paths:
 - `input.image` (when `sourceMode=generate`) supports:
   - `Qwen-Distill` (default)
-  - `Qwen-Image-Edit` (generate mode)
   - `Z-Image-Turbo`
 - `model.qwen_image_edit` uses a real ComfyUI executor (requires image input).
 
@@ -34,7 +33,6 @@ Main files:
 2. Worker resolves task execution in `lib/execution/mock-runner.ts`.
 3. Comfy-backed nodes call one of:
    - `executeComfyZImageNode`
-   - `executeComfyQwenImageGenerateNode`
    - `executeComfyQwenImageEditNode`
    - `executeComfyQwenDistillNode`
 4. Executor wraps inference with `withComfyRuntime(...)`:
@@ -82,23 +80,17 @@ Controlled by env:
 - Supports env overrides for UNET, VAE, CLIP, sampler, scheduler, dimensions, etc.
 - Output metadata includes model params and Comfy prompt id.
 
-## 4.2 `input.image` with `Qwen-Image-Edit` (generate mode)
-- Executor: `executeComfyQwenImageGenerateNode`
-- Uses:
-  - `COMFYUI_QWEN_GENERATE_WORKFLOW_PATH`, fallback to
-  - `COMFYUI_QWEN_EDIT_WORKFLOW_PATH`
-- Uploads a 1x1 seed image (`ONE_PIXEL_PNG`) when workflow expects `__INPUT_IMAGE__`.
-
-## 4.3 `input.image` with `Z-Image-Turbo`
+## 4.2 `input.image` with `Z-Image-Turbo`
 - Executor: `executeComfyZImageNode`
 - Uses built-in workflow if `COMFYUI_ZIMAGE_WORKFLOW_PATH` is empty.
-- Validates/sanitizes sampler/scheduler/dimensions.
+- Built-in template is derived from `image_z_image_turbo` blueprint structure.
+- Supports env overrides for UNET, VAE, CLIP, sampler, scheduler, denoise, and AuraFlow shift.
 
-## 4.4 `model.qwen_image_edit`
+## 4.3 `model.qwen_image_edit`
 - Executor: `executeComfyQwenImageEditNode`
 - Requires an input image artifact.
-- Requires `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` for real run.
-- If missing or Comfy unavailable and fallback is allowed, returns mock output with warning.
+- Uses built-in API workflow defaults when `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` is empty.
+- Supports env-based mapping for model files + sampler settings + turbo LoRA mode.
 
 ## 5) Workflow Template Rules
 
@@ -109,9 +101,13 @@ If file looks like UI graph JSON (`nodes` array), executor throws:
 
 Common placeholders used:
 - `__PROMPT__`
+- `__NEGATIVE_PROMPT__`
 - `__INPUT_IMAGE__`
 - `__FILENAME_PREFIX__`
 - `__SEED__`
+- `__STEPS__`, `__CFG__`, `__SAMPLER__`, `__SCHEDULER__`, `__DENOISE__`
+- `__UNET__`, `__VAE__`, `__CLIP__`, `__CLIP_TYPE__`, `__CLIP_DEVICE__`, `__UNET_WEIGHT_DTYPE__`
+- `__AURAFLOW_SHIFT__`, `__LORA__`, `__LORA_STRENGTH__`
 - plus model-specific placeholders for distill/z-image
 
 ## 6) Current Env Variables (Comfy)
@@ -155,20 +151,46 @@ Qwen Distill:
 - `COMFYUI_QWEN_DISTILL_NEGATIVE_PROMPT=`
 
 Qwen Edit:
-- `COMFYUI_QWEN_EDIT_WORKFLOW_PATH=...`
-- `COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID=`
+- `COMFYUI_QWEN_EDIT_WORKFLOW_PATH=`
+- `COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID=60`
 - `COMFYUI_QWEN_EDIT_TIMEOUT_MS=360000`
-
-Qwen Generate helper:
-- `COMFYUI_QWEN_GENERATE_WORKFLOW_PATH=`
-- `COMFYUI_QWEN_GENERATE_OUTPUT_NODE_ID=`
-- `COMFYUI_QWEN_GENERATE_TIMEOUT_MS=360000`
+- `COMFYUI_QWEN_EDIT_UNET=qwen_image_edit_fp8_e4m3fn.safetensors`
+- `COMFYUI_QWEN_EDIT_VAE=qwen_image_vae.safetensors`
+- `COMFYUI_QWEN_EDIT_CLIP=qwen_2.5_vl_7b_fp8_scaled.safetensors`
+- `COMFYUI_QWEN_EDIT_CLIP_TYPE=qwen_image`
+- `COMFYUI_QWEN_EDIT_CLIP_DEVICE=default`
+- `COMFYUI_QWEN_EDIT_UNET_WEIGHT_DTYPE=default`
+- `COMFYUI_QWEN_EDIT_ENABLE_TURBO_MODE=false`
+- `COMFYUI_QWEN_EDIT_STEPS=20`
+- `COMFYUI_QWEN_EDIT_CFG=2.5`
+- `COMFYUI_QWEN_EDIT_TURBO_STEPS=4`
+- `COMFYUI_QWEN_EDIT_TURBO_CFG=1`
+- `COMFYUI_QWEN_EDIT_SAMPLER=euler`
+- `COMFYUI_QWEN_EDIT_SCHEDULER=simple`
+- `COMFYUI_QWEN_EDIT_DENOISE=1`
+- `COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT=3`
+- `COMFYUI_QWEN_EDIT_NEGATIVE_PROMPT=`
+- `COMFYUI_QWEN_EDIT_LORA=Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors`
+- `COMFYUI_QWEN_EDIT_LORA_STRENGTH=1`
 
 Z-Image:
-- `COMFYUI_ZIMAGE_CHECKPOINT=z-image-turbo.safetensors`
 - `COMFYUI_ZIMAGE_WORKFLOW_PATH=`
-- `COMFYUI_ZIMAGE_OUTPUT_NODE_ID=`
+- `COMFYUI_ZIMAGE_OUTPUT_NODE_ID=60`
 - `COMFYUI_ZIMAGE_TIMEOUT_MS=300000`
+- `COMFYUI_ZIMAGE_UNET=z_image_turbo_bf16.safetensors`
+- `COMFYUI_ZIMAGE_VAE=ae.safetensors`
+- `COMFYUI_ZIMAGE_CLIP=qwen_3_4b.safetensors`
+- `COMFYUI_ZIMAGE_CLIP_TYPE=lumina2`
+- `COMFYUI_ZIMAGE_CLIP_DEVICE=default`
+- `COMFYUI_ZIMAGE_UNET_WEIGHT_DTYPE=default`
+- `COMFYUI_ZIMAGE_STEPS=4`
+- `COMFYUI_ZIMAGE_CFG=1`
+- `COMFYUI_ZIMAGE_SAMPLER=res_multistep`
+- `COMFYUI_ZIMAGE_SCHEDULER=simple`
+- `COMFYUI_ZIMAGE_DENOISE=1`
+- `COMFYUI_ZIMAGE_AURAFLOW_SHIFT=3`
+- `COMFYUI_ZIMAGE_NEGATIVE_PROMPT=`
+- `COMFYUI_ZIMAGE_CHECKPOINT=` (legacy fallback alias)
 
 ## 7) Node UX Behavior (Current)
 
@@ -178,8 +200,8 @@ Z-Image:
 
 Inspector behavior:
 - Generate-only fields hidden in upload mode.
-- For `Qwen-Image-Edit`, Z-image-only tuning fields are hidden.
 - For `Qwen-Distill`, prompt-first UI hides advanced tuning fields in inspector.
+- `Qwen-Image-Edit` is exposed as dedicated model node (`model.qwen_image_edit`) and not as `input.image` generator option.
 
 ## 8) Output Storage and Where Images Actually Live
 
@@ -238,6 +260,6 @@ Security model is backend-only by design:
 
 ## 12) Known Constraints
 
-- `Qwen Image Edit` real execution requires a valid API workflow path.
+- `Qwen Image Edit` runs with built-in API workflow if no custom path is provided.
 - Passing Comfy UI-exported graph JSON instead of API JSON will fail intentionally.
 - If `COMFYUI_ALLOW_MOCK_FALLBACK=true`, unavailable Comfy returns mock images with warnings instead of hard fail.

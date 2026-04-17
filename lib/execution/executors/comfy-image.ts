@@ -12,54 +12,75 @@ const DEFAULT_ZIMAGE_WORKFLOW: Record<string, JsonValue> = {
   "3": {
     class_type: "KSampler",
     inputs: {
+      model: ["11", 0],
+      positive: ["27", 0],
+      negative: ["33", 0],
+      latent_image: ["13", 0],
+      seed: "__SEED__",
+      steps: "__STEPS__",
       cfg: "__CFG__",
-      denoise: 1,
-      latent_image: ["5", 0],
-      model: ["4", 0],
-      negative: ["7", 0],
-      positive: ["6", 0],
       sampler_name: "__SAMPLER__",
       scheduler: "__SCHEDULER__",
-      seed: "__SEED__",
-      steps: "__STEPS__"
-    }
-  },
-  "4": {
-    class_type: "CheckpointLoaderSimple",
-    inputs: {
-      ckpt_name: "__CHECKPOINT__"
-    }
-  },
-  "5": {
-    class_type: "EmptyLatentImage",
-    inputs: {
-      batch_size: 1,
-      height: "__HEIGHT__",
-      width: "__WIDTH__"
-    }
-  },
-  "6": {
-    class_type: "CLIPTextEncode",
-    inputs: {
-      clip: ["4", 1],
-      text: "__PROMPT__"
-    }
-  },
-  "7": {
-    class_type: "CLIPTextEncode",
-    inputs: {
-      clip: ["4", 1],
-      text: "__NEGATIVE_PROMPT__"
+      denoise: "__DENOISE__"
     }
   },
   "8": {
     class_type: "VAEDecode",
     inputs: {
       samples: ["3", 0],
-      vae: ["4", 2]
+      vae: ["29", 0]
     }
   },
-  "9": {
+  "11": {
+    class_type: "ModelSamplingAuraFlow",
+    inputs: {
+      model: ["28", 0],
+      shift: "__AURAFLOW_SHIFT__"
+    }
+  },
+  "13": {
+    class_type: "EmptySD3LatentImage",
+    inputs: {
+      width: "__WIDTH__",
+      height: "__HEIGHT__",
+      batch_size: 1,
+    }
+  },
+  "27": {
+    class_type: "CLIPTextEncode",
+    inputs: {
+      clip: ["30", 0],
+      text: "__PROMPT__"
+    }
+  },
+  "28": {
+    class_type: "UNETLoader",
+    inputs: {
+      unet_name: "__UNET__",
+      weight_dtype: "__UNET_WEIGHT_DTYPE__"
+    }
+  },
+  "29": {
+    class_type: "VAELoader",
+    inputs: {
+      vae_name: "__VAE__"
+    }
+  },
+  "30": {
+    class_type: "CLIPLoader",
+    inputs: {
+      clip_name: "__CLIP__",
+      type: "__CLIP_TYPE__",
+      device: "__CLIP_DEVICE__"
+    }
+  },
+  "33": {
+    class_type: "ConditioningZeroOut",
+    inputs: {
+      conditioning: ["27", 0]
+    }
+  },
+  "60": {
     class_type: "SaveImage",
     inputs: {
       filename_prefix: "__FILENAME_PREFIX__",
@@ -146,6 +167,212 @@ const DEFAULT_QWEN_DISTILL_WORKFLOW: Record<string, JsonValue> = {
       width: "__WIDTH__",
       height: "__HEIGHT__",
       batch_size: 1
+    }
+  }
+};
+
+const DEFAULT_QWEN_EDIT_WORKFLOW_BASE: Record<string, JsonValue> = {
+  "3": {
+    class_type: "KSampler",
+    inputs: {
+      model: ["75", 0],
+      positive: ["76", 0],
+      negative: ["77", 0],
+      latent_image: ["88", 0],
+      seed: "__SEED__",
+      steps: "__STEPS__",
+      cfg: "__CFG__",
+      sampler_name: "__SAMPLER__",
+      scheduler: "__SCHEDULER__",
+      denoise: "__DENOISE__"
+    }
+  },
+  "8": {
+    class_type: "VAEDecode",
+    inputs: {
+      samples: ["3", 0],
+      vae: ["39", 0]
+    }
+  },
+  "37": {
+    class_type: "UNETLoader",
+    inputs: {
+      unet_name: "__UNET__",
+      weight_dtype: "__UNET_WEIGHT_DTYPE__"
+    }
+  },
+  "38": {
+    class_type: "CLIPLoader",
+    inputs: {
+      clip_name: "__CLIP__",
+      type: "__CLIP_TYPE__",
+      device: "__CLIP_DEVICE__"
+    }
+  },
+  "39": {
+    class_type: "VAELoader",
+    inputs: {
+      vae_name: "__VAE__"
+    }
+  },
+  "60": {
+    class_type: "SaveImage",
+    inputs: {
+      filename_prefix: "__FILENAME_PREFIX__",
+      images: ["8", 0]
+    }
+  },
+  "66": {
+    class_type: "ModelSamplingAuraFlow",
+    inputs: {
+      model: ["37", 0],
+      shift: "__AURAFLOW_SHIFT__"
+    }
+  },
+  "75": {
+    class_type: "CFGNorm",
+    inputs: {
+      model: ["66", 0],
+      strength: 1
+    }
+  },
+  "76": {
+    class_type: "TextEncodeQwenImageEdit",
+    inputs: {
+      clip: ["38", 0],
+      vae: ["39", 0],
+      image: ["78", 0],
+      prompt: "__PROMPT__"
+    }
+  },
+  "77": {
+    class_type: "TextEncodeQwenImageEdit",
+    inputs: {
+      clip: ["38", 0],
+      vae: ["39", 0],
+      image: ["78", 0],
+      prompt: "__NEGATIVE_PROMPT__"
+    }
+  },
+  "78": {
+    class_type: "LoadImage",
+    inputs: {
+      image: "__INPUT_IMAGE__",
+      upload: "image"
+    }
+  },
+  "88": {
+    class_type: "VAEEncode",
+    inputs: {
+      pixels: ["78", 0],
+      vae: ["39", 0]
+    }
+  }
+};
+
+const DEFAULT_QWEN_EDIT_WORKFLOW_TURBO: Record<string, JsonValue> = {
+  "3": {
+    class_type: "KSampler",
+    inputs: {
+      model: ["75", 0],
+      positive: ["76", 0],
+      negative: ["77", 0],
+      latent_image: ["88", 0],
+      seed: "__SEED__",
+      steps: "__STEPS__",
+      cfg: "__CFG__",
+      sampler_name: "__SAMPLER__",
+      scheduler: "__SCHEDULER__",
+      denoise: "__DENOISE__"
+    }
+  },
+  "8": {
+    class_type: "VAEDecode",
+    inputs: {
+      samples: ["3", 0],
+      vae: ["39", 0]
+    }
+  },
+  "37": {
+    class_type: "UNETLoader",
+    inputs: {
+      unet_name: "__UNET__",
+      weight_dtype: "__UNET_WEIGHT_DTYPE__"
+    }
+  },
+  "38": {
+    class_type: "CLIPLoader",
+    inputs: {
+      clip_name: "__CLIP__",
+      type: "__CLIP_TYPE__",
+      device: "__CLIP_DEVICE__"
+    }
+  },
+  "39": {
+    class_type: "VAELoader",
+    inputs: {
+      vae_name: "__VAE__"
+    }
+  },
+  "60": {
+    class_type: "SaveImage",
+    inputs: {
+      filename_prefix: "__FILENAME_PREFIX__",
+      images: ["8", 0]
+    }
+  },
+  "66": {
+    class_type: "ModelSamplingAuraFlow",
+    inputs: {
+      model: ["89", 0],
+      shift: "__AURAFLOW_SHIFT__"
+    }
+  },
+  "75": {
+    class_type: "CFGNorm",
+    inputs: {
+      model: ["66", 0],
+      strength: 1
+    }
+  },
+  "76": {
+    class_type: "TextEncodeQwenImageEdit",
+    inputs: {
+      clip: ["38", 0],
+      vae: ["39", 0],
+      image: ["78", 0],
+      prompt: "__PROMPT__"
+    }
+  },
+  "77": {
+    class_type: "TextEncodeQwenImageEdit",
+    inputs: {
+      clip: ["38", 0],
+      vae: ["39", 0],
+      image: ["78", 0],
+      prompt: "__NEGATIVE_PROMPT__"
+    }
+  },
+  "78": {
+    class_type: "LoadImage",
+    inputs: {
+      image: "__INPUT_IMAGE__",
+      upload: "image"
+    }
+  },
+  "88": {
+    class_type: "VAEEncode",
+    inputs: {
+      pixels: ["78", 0],
+      vae: ["39", 0]
+    }
+  },
+  "89": {
+    class_type: "LoraLoaderModelOnly",
+    inputs: {
+      model: ["37", 0],
+      lora_name: "__LORA__",
+      strength_model: "__LORA_STRENGTH__"
     }
   }
 };
@@ -272,6 +499,17 @@ function coerceInt(value: unknown, fallback: number, min: number, max: number) {
   return rounded;
 }
 
+function coerceBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
+    if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+  }
+  return fallback;
+}
+
 function coerceFloat(value: unknown, fallback: number, min: number, max: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -288,6 +526,7 @@ function snapToStep(value: number, step: number, min: number, max: number) {
 }
 
 const ZIMAGE_ALLOWED_SAMPLERS = new Set([
+  "res_multistep",
   "euler",
   "euler_ancestral",
   "heun",
@@ -486,23 +725,41 @@ async function executeComfyWorkflowAndExtractImage(params: {
 
 export async function executeComfyZImageNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
   const prompt = await resolvePrompt(ctx);
+  const negativePromptParam = typeof ctx.params.negativePrompt === "string" ? ctx.params.negativePrompt.trim() : "";
+  const negativePrompt = negativePromptParam || process.env.COMFYUI_ZIMAGE_NEGATIVE_PROMPT?.trim() || "";
   const checkpointParam = typeof ctx.params.checkpoint === "string" ? ctx.params.checkpoint.trim() : "";
-  const checkpoint = checkpointParam || process.env.COMFYUI_ZIMAGE_CHECKPOINT?.trim() || "z-image-turbo.safetensors";
-  const negativePrompt =
-    typeof ctx.params.negativePrompt === "string" && ctx.params.negativePrompt.trim().length > 0
-      ? ctx.params.negativePrompt.trim()
-      : "blurry, artifacts, low quality";
+  const unet =
+    process.env.COMFYUI_ZIMAGE_UNET?.trim() ||
+    checkpointParam ||
+    process.env.COMFYUI_ZIMAGE_CHECKPOINT?.trim() ||
+    "z_image_turbo_bf16.safetensors";
+  const vae = process.env.COMFYUI_ZIMAGE_VAE?.trim() || "ae.safetensors";
+  const clip = process.env.COMFYUI_ZIMAGE_CLIP?.trim() || "qwen_3_4b.safetensors";
+  const clipType = process.env.COMFYUI_ZIMAGE_CLIP_TYPE?.trim() || "lumina2";
+  const clipDevice = process.env.COMFYUI_ZIMAGE_CLIP_DEVICE?.trim() || "default";
+  const unetWeightDType = process.env.COMFYUI_ZIMAGE_UNET_WEIGHT_DTYPE?.trim() || "default";
   const seed = chooseSeed(ctx);
-  const steps = coerceInt(ctx.params.steps, 20, 1, 150);
-  const cfg = coerceFloat(ctx.params.cfg, 8, 1, 30);
+  const steps = coerceInt(ctx.params.steps, coerceInt(process.env.COMFYUI_ZIMAGE_STEPS, 4, 1, 150), 1, 150);
+  const cfg = coerceFloat(ctx.params.cfg, coerceFloat(process.env.COMFYUI_ZIMAGE_CFG, 1, 0.1, 30), 0.1, 30);
   const width = normalizeZImageDimension(ctx.params.width, 1024);
   const height = normalizeZImageDimension(ctx.params.height, 1024);
-  const sampler = normalizeZImageSampler(ctx.params.sampler);
-  const scheduler = normalizeZImageScheduler(ctx.params.scheduler);
+  const sampler = normalizeZImageSampler(
+    typeof ctx.params.sampler === "string" && ctx.params.sampler.trim().length > 0
+      ? ctx.params.sampler
+      : process.env.COMFYUI_ZIMAGE_SAMPLER
+  );
+  const scheduler = normalizeZImageScheduler(
+    typeof ctx.params.scheduler === "string" && ctx.params.scheduler.trim().length > 0
+      ? ctx.params.scheduler
+      : process.env.COMFYUI_ZIMAGE_SCHEDULER
+  );
+  const denoise = coerceFloat(ctx.params.denoise, coerceFloat(process.env.COMFYUI_ZIMAGE_DENOISE, 1, 0, 1), 0, 1);
+  const auraFlowShift = coerceFloat(process.env.COMFYUI_ZIMAGE_AURAFLOW_SHIFT, 3, 0, 12);
   const workflowPath = process.env.COMFYUI_ZIMAGE_WORKFLOW_PATH?.trim() || null;
   const loaded = await loadWorkflowTemplate(workflowPath);
   const workflow = loaded ?? DEFAULT_ZIMAGE_WORKFLOW;
-  const preferredOutputNodeId = process.env.COMFYUI_ZIMAGE_OUTPUT_NODE_ID?.trim() || null;
+  const preferredOutputNodeId = process.env.COMFYUI_ZIMAGE_OUTPUT_NODE_ID?.trim() || "60";
+  const workflowTemplateSource = loaded ? (workflowPath as string) : "builtin:z-image-turbo";
 
   const placeholders: Record<string, JsonValue> = {
     __PROMPT__: prompt.length > 0 ? prompt : "cinematic detailed 3d environment concept art",
@@ -514,7 +771,15 @@ export async function executeComfyZImageNode(ctx: NodeExecutionContext): Promise
     __HEIGHT__: height,
     __SAMPLER__: sampler,
     __SCHEDULER__: scheduler,
-    __CHECKPOINT__: checkpoint,
+    __DENOISE__: denoise,
+    __AURAFLOW_SHIFT__: auraFlowShift,
+    __UNET__: unet,
+    __VAE__: vae,
+    __CLIP__: clip,
+    __CLIP_TYPE__: clipType,
+    __CLIP_DEVICE__: clipDevice,
+    __UNET_WEIGHT_DTYPE__: unetWeightDType,
+    __CHECKPOINT__: unet,
     __FILENAME_PREFIX__: `tribalai_${ctx.runId}_${ctx.nodeId}`
   };
 
@@ -541,6 +806,7 @@ export async function executeComfyZImageNode(ctx: NodeExecutionContext): Promise
     output.meta = {
       ...(output.meta ?? {}),
       model: "z-image-turbo",
+      mode: "generate",
       prompt: placeholders.__PROMPT__,
       negativePrompt,
       seed,
@@ -550,7 +816,16 @@ export async function executeComfyZImageNode(ctx: NodeExecutionContext): Promise
       height,
       sampler,
       scheduler,
-      checkpoint
+      denoise,
+      auraFlowShift,
+      unet,
+      vae,
+      clip,
+      clipType,
+      clipDevice,
+      unetWeightDType,
+      checkpoint: unet,
+      workflowTemplateSource
     };
     return result;
   } catch (error) {
@@ -566,22 +841,54 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
     throw new Error("Qwen Image Edit requires image input.");
   }
   const prompt = await resolvePrompt(ctx);
+  const negativePromptParam = typeof ctx.params.negativePrompt === "string" ? ctx.params.negativePrompt.trim() : "";
+  const negativePrompt = negativePromptParam || process.env.COMFYUI_QWEN_EDIT_NEGATIVE_PROMPT?.trim() || "";
+
+  const envTurboMode = isTruthy(process.env.COMFYUI_QWEN_EDIT_ENABLE_TURBO_MODE);
+  const turboMode = coerceBoolean(ctx.params.enableTurboMode, envTurboMode);
+  const envBaseSteps = coerceInt(process.env.COMFYUI_QWEN_EDIT_STEPS, 20, 1, 150);
+  const envTurboSteps = coerceInt(process.env.COMFYUI_QWEN_EDIT_TURBO_STEPS, 4, 1, 150);
+  const envBaseCfg = coerceFloat(process.env.COMFYUI_QWEN_EDIT_CFG, 2.5, 0.1, 30);
+  const envTurboCfg = coerceFloat(process.env.COMFYUI_QWEN_EDIT_TURBO_CFG, 1, 0.1, 30);
+  const steps = coerceInt(ctx.params.steps, turboMode ? envTurboSteps : envBaseSteps, 1, 150);
+  const cfg = coerceFloat(ctx.params.cfg, turboMode ? envTurboCfg : envBaseCfg, 0.1, 30);
+  const sampler = normalizeZImageSampler(
+    typeof ctx.params.sampler === "string" && ctx.params.sampler.trim().length > 0
+      ? ctx.params.sampler
+      : process.env.COMFYUI_QWEN_EDIT_SAMPLER
+  );
+  const scheduler = normalizeZImageScheduler(
+    typeof ctx.params.scheduler === "string" && ctx.params.scheduler.trim().length > 0
+      ? ctx.params.scheduler
+      : process.env.COMFYUI_QWEN_EDIT_SCHEDULER
+  );
+  const denoise = coerceFloat(
+    ctx.params.denoise,
+    coerceFloat(process.env.COMFYUI_QWEN_EDIT_DENOISE, 1, 0, 1),
+    0,
+    1
+  );
+  const seed = chooseSeed(ctx);
+  const auraFlowShift = coerceFloat(process.env.COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT, 3, 0, 12);
+  const unet = process.env.COMFYUI_QWEN_EDIT_UNET?.trim() || "qwen_image_edit_fp8_e4m3fn.safetensors";
+  const vae = process.env.COMFYUI_QWEN_EDIT_VAE?.trim() || "qwen_image_vae.safetensors";
+  const clip = process.env.COMFYUI_QWEN_EDIT_CLIP?.trim() || "qwen_2.5_vl_7b_fp8_scaled.safetensors";
+  const clipType = process.env.COMFYUI_QWEN_EDIT_CLIP_TYPE?.trim() || "qwen_image";
+  const clipDevice = process.env.COMFYUI_QWEN_EDIT_CLIP_DEVICE?.trim() || "default";
+  const unetWeightDType = process.env.COMFYUI_QWEN_EDIT_UNET_WEIGHT_DTYPE?.trim() || "default";
+  const lora = process.env.COMFYUI_QWEN_EDIT_LORA?.trim() || "Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors";
+  const loraStrength = coerceFloat(process.env.COMFYUI_QWEN_EDIT_LORA_STRENGTH, 1, 0, 4);
+  const preferredOutputNodeId = process.env.COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID?.trim() || "60";
+  const timeoutMs = Number(process.env.COMFYUI_QWEN_EDIT_TIMEOUT_MS ?? process.env.COMFYUI_TIMEOUT_MS ?? 360_000);
+
   const qwenWorkflowPath = process.env.COMFYUI_QWEN_EDIT_WORKFLOW_PATH?.trim() || null;
-
-  if (!qwenWorkflowPath) {
-    if (!resolveMockFallbackAllowed()) {
-      throw new Error(
-        "COMFYUI_QWEN_EDIT_WORKFLOW_PATH is required for real Qwen Edit execution. Provide an exported Comfy API workflow template."
-      );
-    }
-    const mock = buildMockEditImage(ctx, prompt);
-    return resultWithWarning(mock, "Missing COMFYUI_QWEN_EDIT_WORKFLOW_PATH; using mock Qwen edit output.");
-  }
-
-  const workflow = await loadWorkflowTemplate(qwenWorkflowPath);
-  if (!workflow) {
-    throw new Error("Failed to load COMFYUI_QWEN_EDIT_WORKFLOW_PATH workflow template.");
-  }
+  const loaded = await loadWorkflowTemplate(qwenWorkflowPath);
+  const workflow = loaded ?? (turboMode ? DEFAULT_QWEN_EDIT_WORKFLOW_TURBO : DEFAULT_QWEN_EDIT_WORKFLOW_BASE);
+  const workflowTemplateSource = loaded
+    ? (qwenWorkflowPath as string)
+    : turboMode
+      ? "builtin:qwen-image-edit:turbo"
+      : "builtin:qwen-image-edit:base";
 
   if (!resolveComfyEnabled()) {
     return resultWithWarning(buildMockEditImage(ctx, prompt), "COMFYUI_ENABLED=false");
@@ -605,11 +912,25 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
       });
       const placeholders: Record<string, JsonValue> = {
         __PROMPT__: prompt.length > 0 ? prompt : "enhance details and preserve structure",
+        __NEGATIVE_PROMPT__: negativePrompt,
         __INPUT_IMAGE__: uploaded.filename,
         __FILENAME_PREFIX__: `tribalai_qwen_edit_${ctx.runId}_${ctx.nodeId}`,
-        __SEED__: chooseSeed(ctx)
+        __SEED__: seed,
+        __STEPS__: steps,
+        __CFG__: cfg,
+        __SAMPLER__: sampler,
+        __SCHEDULER__: scheduler,
+        __DENOISE__: denoise,
+        __AURAFLOW_SHIFT__: auraFlowShift,
+        __UNET__: unet,
+        __VAE__: vae,
+        __CLIP__: clip,
+        __CLIP_TYPE__: clipType,
+        __CLIP_DEVICE__: clipDevice,
+        __UNET_WEIGHT_DTYPE__: unetWeightDType,
+        __LORA__: lora,
+        __LORA_STRENGTH__: loraStrength
       };
-      const preferredOutputNodeId = process.env.COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID?.trim() || null;
       const executed = await executeComfyWorkflowAndExtractImage({
         ctx,
         workflow,
@@ -620,7 +941,7 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
           tribalai_node_id: ctx.nodeId,
           tribalai_node_type: ctx.nodeType
         },
-        timeoutMs: Number(process.env.COMFYUI_QWEN_EDIT_TIMEOUT_MS ?? process.env.COMFYUI_TIMEOUT_MS ?? 360_000)
+        timeoutMs
       });
       return { executed, uploaded, placeholders };
     });
@@ -628,7 +949,23 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
     output.meta = {
       ...(output.meta ?? {}),
       model: "qwen-image-edit",
+      mode: "edit",
       prompt: result.placeholders.__PROMPT__,
+      negativePrompt,
+      seed,
+      steps,
+      cfg,
+      sampler,
+      scheduler,
+      denoise,
+      auraFlowShift,
+      turboMode,
+      unet,
+      vae,
+      clip,
+      lora: turboMode ? lora : null,
+      loraStrength: turboMode ? loraStrength : null,
+      workflowTemplateSource,
       sourceImageArtifactId: sourceImage.artifactId,
       sourceImageHash: sourceImage.hash,
       sourceImageStorageKey: sourceImage.storageKey,
@@ -644,25 +981,110 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
 
 export async function executeComfyQwenImageGenerateNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
   const prompt = await resolvePrompt(ctx);
+  const negativePromptParam = typeof ctx.params.negativePrompt === "string" ? ctx.params.negativePrompt.trim() : "";
+  const negativePrompt =
+    negativePromptParam ||
+    process.env.COMFYUI_QWEN_GENERATE_NEGATIVE_PROMPT?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_NEGATIVE_PROMPT?.trim() ||
+    "";
+  const envTurboMode =
+    isTruthy(process.env.COMFYUI_QWEN_GENERATE_ENABLE_TURBO_MODE) ||
+    isTruthy(process.env.COMFYUI_QWEN_EDIT_ENABLE_TURBO_MODE);
+  const turboMode = coerceBoolean(ctx.params.enableTurboMode, envTurboMode);
+  const envBaseSteps = coerceInt(
+    process.env.COMFYUI_QWEN_GENERATE_STEPS ?? process.env.COMFYUI_QWEN_EDIT_STEPS,
+    20,
+    1,
+    150
+  );
+  const envTurboSteps = coerceInt(
+    process.env.COMFYUI_QWEN_GENERATE_TURBO_STEPS ?? process.env.COMFYUI_QWEN_EDIT_TURBO_STEPS,
+    4,
+    1,
+    150
+  );
+  const envBaseCfg = coerceFloat(
+    process.env.COMFYUI_QWEN_GENERATE_CFG ?? process.env.COMFYUI_QWEN_EDIT_CFG,
+    2.5,
+    0.1,
+    30
+  );
+  const envTurboCfg = coerceFloat(
+    process.env.COMFYUI_QWEN_GENERATE_TURBO_CFG ?? process.env.COMFYUI_QWEN_EDIT_TURBO_CFG,
+    1,
+    0.1,
+    30
+  );
+  const steps = coerceInt(ctx.params.steps, turboMode ? envTurboSteps : envBaseSteps, 1, 150);
+  const cfg = coerceFloat(ctx.params.cfg, turboMode ? envTurboCfg : envBaseCfg, 0.1, 30);
+  const sampler = normalizeZImageSampler(
+    typeof ctx.params.sampler === "string" && ctx.params.sampler.trim().length > 0
+      ? ctx.params.sampler
+      : process.env.COMFYUI_QWEN_GENERATE_SAMPLER ?? process.env.COMFYUI_QWEN_EDIT_SAMPLER
+  );
+  const scheduler = normalizeZImageScheduler(
+    typeof ctx.params.scheduler === "string" && ctx.params.scheduler.trim().length > 0
+      ? ctx.params.scheduler
+      : process.env.COMFYUI_QWEN_GENERATE_SCHEDULER ?? process.env.COMFYUI_QWEN_EDIT_SCHEDULER
+  );
+  const denoise = coerceFloat(
+    ctx.params.denoise,
+    coerceFloat(process.env.COMFYUI_QWEN_GENERATE_DENOISE ?? process.env.COMFYUI_QWEN_EDIT_DENOISE, 1, 0, 1),
+    0,
+    1
+  );
+  const seed = chooseSeed(ctx);
+  const auraFlowShift = coerceFloat(
+    process.env.COMFYUI_QWEN_GENERATE_AURAFLOW_SHIFT ?? process.env.COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT,
+    3,
+    0,
+    12
+  );
+  const unet =
+    process.env.COMFYUI_QWEN_GENERATE_UNET?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_UNET?.trim() ||
+    "qwen_image_edit_fp8_e4m3fn.safetensors";
+  const vae =
+    process.env.COMFYUI_QWEN_GENERATE_VAE?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_VAE?.trim() ||
+    "qwen_image_vae.safetensors";
+  const clip =
+    process.env.COMFYUI_QWEN_GENERATE_CLIP?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_CLIP?.trim() ||
+    "qwen_2.5_vl_7b_fp8_scaled.safetensors";
+  const clipType =
+    process.env.COMFYUI_QWEN_GENERATE_CLIP_TYPE?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_CLIP_TYPE?.trim() ||
+    "qwen_image";
+  const clipDevice =
+    process.env.COMFYUI_QWEN_GENERATE_CLIP_DEVICE?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_CLIP_DEVICE?.trim() ||
+    "default";
+  const unetWeightDType =
+    process.env.COMFYUI_QWEN_GENERATE_UNET_WEIGHT_DTYPE?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_UNET_WEIGHT_DTYPE?.trim() ||
+    "default";
+  const lora =
+    process.env.COMFYUI_QWEN_GENERATE_LORA?.trim() ||
+    process.env.COMFYUI_QWEN_EDIT_LORA?.trim() ||
+    "Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors";
+  const loraStrength = coerceFloat(
+    process.env.COMFYUI_QWEN_GENERATE_LORA_STRENGTH ?? process.env.COMFYUI_QWEN_EDIT_LORA_STRENGTH,
+    1,
+    0,
+    4
+  );
   const qwenWorkflowPath =
     process.env.COMFYUI_QWEN_GENERATE_WORKFLOW_PATH?.trim() ||
     process.env.COMFYUI_QWEN_EDIT_WORKFLOW_PATH?.trim() ||
     null;
-
-  if (!qwenWorkflowPath) {
-    if (!resolveMockFallbackAllowed()) {
-      throw new Error(
-        "COMFYUI_QWEN_GENERATE_WORKFLOW_PATH (or COMFYUI_QWEN_EDIT_WORKFLOW_PATH) is required for Qwen image generation."
-      );
-    }
-    const mock = buildMockGeneratedSvg(ctx, "Qwen-Image-Edit", prompt);
-    return resultWithWarning(mock, "Missing Qwen workflow path; using mock generated image.");
-  }
-
-  const workflow = await loadWorkflowTemplate(qwenWorkflowPath);
-  if (!workflow) {
-    throw new Error("Failed to load Qwen workflow template for image generation.");
-  }
+  const loaded = await loadWorkflowTemplate(qwenWorkflowPath);
+  const workflow = loaded ?? (turboMode ? DEFAULT_QWEN_EDIT_WORKFLOW_TURBO : DEFAULT_QWEN_EDIT_WORKFLOW_BASE);
+  const workflowTemplateSource = loaded
+    ? (qwenWorkflowPath as string)
+    : turboMode
+      ? "builtin:qwen-image-edit:turbo"
+      : "builtin:qwen-image-edit:base";
 
   if (!resolveComfyEnabled()) {
     return resultWithWarning(buildMockGeneratedSvg(ctx, "Qwen-Image-Edit", prompt), "COMFYUI_ENABLED=false");
@@ -679,14 +1101,29 @@ export async function executeComfyQwenImageGenerateNode(ctx: NodeExecutionContex
       });
       const placeholders: Record<string, JsonValue> = {
         __PROMPT__: prompt.length > 0 ? prompt : "Generate a detailed cinematic 3D environment concept image.",
+        __NEGATIVE_PROMPT__: negativePrompt,
         __INPUT_IMAGE__: uploaded.filename,
         __FILENAME_PREFIX__: `tribalai_qwen_generate_${ctx.runId}_${ctx.nodeId}`,
-        __SEED__: chooseSeed(ctx)
+        __SEED__: seed,
+        __STEPS__: steps,
+        __CFG__: cfg,
+        __SAMPLER__: sampler,
+        __SCHEDULER__: scheduler,
+        __DENOISE__: denoise,
+        __AURAFLOW_SHIFT__: auraFlowShift,
+        __UNET__: unet,
+        __VAE__: vae,
+        __CLIP__: clip,
+        __CLIP_TYPE__: clipType,
+        __CLIP_DEVICE__: clipDevice,
+        __UNET_WEIGHT_DTYPE__: unetWeightDType,
+        __LORA__: lora,
+        __LORA_STRENGTH__: loraStrength
       };
       const preferredOutputNodeId =
         process.env.COMFYUI_QWEN_GENERATE_OUTPUT_NODE_ID?.trim() ||
         process.env.COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID?.trim() ||
-        null;
+        "60";
       const executed = await executeComfyWorkflowAndExtractImage({
         ctx,
         workflow,
@@ -712,6 +1149,21 @@ export async function executeComfyQwenImageGenerateNode(ctx: NodeExecutionContex
       model: "qwen-image-edit",
       mode: "generate",
       prompt: result.placeholders.__PROMPT__,
+      negativePrompt,
+      seed,
+      steps,
+      cfg,
+      sampler,
+      scheduler,
+      denoise,
+      auraFlowShift,
+      turboMode,
+      unet,
+      vae,
+      clip,
+      lora: turboMode ? lora : null,
+      loraStrength: turboMode ? loraStrength : null,
+      workflowTemplateSource,
       comfyInputImage: result.uploaded
     };
     return result.executed;

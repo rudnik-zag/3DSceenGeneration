@@ -9,7 +9,6 @@ import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-gene
 import {
   executeComfyQwenDistillNode,
   executeComfyQwenImageEditNode,
-  executeComfyQwenImageGenerateNode,
   executeComfyZImageNode
 } from "@/lib/execution/executors/comfy-image";
 import {
@@ -66,7 +65,23 @@ export class MockModelRunner implements NodeExecutor {
             return executeComfyQwenDistillNode(ctx);
           }
           if (model === "Qwen-Image-Edit") {
-            return executeComfyQwenImageGenerateNode(ctx);
+            const fallback = await executeComfyQwenDistillNode(ctx);
+            const warnings = [...(fallback.warnings ?? [])];
+            const warning = "Input Image generation no longer supports Qwen-Image-Edit. Automatically used Qwen-Distill.";
+            if (!warnings.includes(warning)) warnings.push(warning);
+            const outputs = fallback.outputs.map((output) => ({
+              ...output,
+              meta: {
+                ...(output.meta ?? {}),
+                requestedGeneratorModel: "Qwen-Image-Edit",
+                generatorModelFallback: "Qwen-Distill"
+              }
+            }));
+            return {
+              ...fallback,
+              warnings,
+              outputs
+            };
           }
           if (model === "Z-Image-Turbo") {
             return executeComfyZImageNode(ctx);

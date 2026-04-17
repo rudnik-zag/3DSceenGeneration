@@ -175,7 +175,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
   const inputImageModel =
     isInputImageNode && typeof data.params?.generatorModel === "string"
-      ? data.params.generatorModel
+      ? data.params.generatorModel === "Qwen-Image-Edit"
+        ? "Qwen-Distill"
+        : data.params.generatorModel
       : "";
   const inputImagePrompt =
     isInputImageNode && typeof data.params?.prompt === "string"
@@ -683,7 +685,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 onChange={(event) => data.onUpdateParam?.(id, "generatorModel", event.target.value)}
               >
                 <option value="Qwen-Distill">Qwen-Distill</option>
-                <option value="Qwen-Image-Edit">Qwen-Image-Edit</option>
                 <option value="Z-Image-Turbo">Z-Image-Turbo</option>
               </select>
               <input

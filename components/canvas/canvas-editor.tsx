@@ -206,6 +206,36 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
 };
 
 const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
+const MAX_IMAGE_GENERATION_SEED = 2_147_483_646;
+
+function createRandomImageGenerationSeed() {
+  return Math.floor(Math.random() * (MAX_IMAGE_GENERATION_SEED + 1));
+}
+
+const inputImageGeneratorModelPresets: Record<string, Record<string, string | number | boolean>> = {
+  "Qwen-Distill": {
+    seed: 0,
+    steps: 10,
+    cfg: 1,
+    width: 1328,
+    height: 1328,
+    sampler: "res_multistep",
+    scheduler: "simple",
+    negativePrompt: "",
+    checkpoint: ""
+  },
+  "Z-Image-Turbo": {
+    seed: 0,
+    steps: 4,
+    cfg: 1,
+    width: 1024,
+    height: 1024,
+    sampler: "res_multistep",
+    scheduler: "simple",
+    negativePrompt: "",
+    checkpoint: ""
+  }
+};
 
 function formatMenuCategoryLabel(category: string) {
   const normalized = category.trim();
@@ -1774,6 +1804,23 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             [key]: value
           } as Record<string, unknown>;
 
+          if (nodeType === "input.image" && key === "generatorModel" && typeof value === "string") {
+            const preset = inputImageGeneratorModelPresets[value];
+            if (preset) {
+              Object.assign(nextParams, {
+                ...preset,
+                seed: createRandomImageGenerationSeed()
+              });
+            }
+          }
+
+          if (nodeType === "input.image" && key === "sourceMode" && value === "generate") {
+            const parsedSeed = Number(nextParams.seed);
+            if (!Number.isInteger(parsedSeed) || parsedSeed < 0 || parsedSeed > MAX_IMAGE_GENERATION_SEED) {
+              nextParams.seed = createRandomImageGenerationSeed();
+            }
+          }
+
           if (nodeType === "model.sam3d_objects") {
             if (key === "configPreset" && typeof value === "string") {
               const applied = applySceneGenerationPreset(nextParams, value as "Default" | "HighQuality" | "FastPreview" | "Custom");
@@ -3024,23 +3071,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                                 : "upload";
                             const inputGeneratorModel =
                               selectedNode.type === "input.image" && typeof selectedNode.data.params?.generatorModel === "string"
-                                ? selectedNode.data.params.generatorModel
+                                ? selectedNode.data.params.generatorModel === "Qwen-Image-Edit"
+                                  ? "Qwen-Distill"
+                                  : selectedNode.data.params.generatorModel
                                 : "";
                             const inputGenerateOnlyFields = new Set([
                               "generatorModel",
                               "prompt",
                               "negativePrompt",
                               "seed",
-                              "steps",
-                              "cfg",
-                              "width",
-                              "height",
-                              "sampler",
-                              "scheduler",
-                              "checkpoint"
-                            ]);
-                            const inputZImageOnlyFields = new Set([
-                              "negativePrompt",
                               "steps",
                               "cfg",
                               "width",
@@ -3064,14 +3103,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               selectedNode.type === "input.image" &&
                               inputSourceMode === "upload" &&
                               inputGenerateOnlyFields.has(field.key)
-                            ) {
-                              return null;
-                            }
-                            if (
-                              selectedNode.type === "input.image" &&
-                              inputSourceMode === "generate" &&
-                              inputGeneratorModel === "Qwen-Image-Edit" &&
-                              inputZImageOnlyFields.has(field.key)
                             ) {
                               return null;
                             }
