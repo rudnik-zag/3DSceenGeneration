@@ -163,6 +163,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
+  const isQwenImageEditNode = nodeType === "model.qwen_image_edit";
   const isSam2Node = nodeType === "model.sam2";
   const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
@@ -242,6 +243,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
+  const qwenImageEditPrompt =
+    isQwenImageEditNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
@@ -640,6 +643,18 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           {dinoPrompt.trim().length === 0 ? (
             <p className="text-[10px] text-zinc-500">Empty prompt uses DEFAULT_GROUNDING_DINO_CLASSES.</p>
           ) : null}
+        </div>
+      ) : null}
+
+      {isQwenImageEditNode ? (
+        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+          <p className="text-[10px] text-zinc-400">Edit prompt</p>
+          <textarea
+            className="nodrag min-h-[68px] w-full resize-y rounded-md border border-[#555] bg-[#1f1f1f] px-2 py-1.5 text-[10px] text-[#d7d7d7] outline-none"
+            value={qwenImageEditPrompt}
+            onChange={(event) => data.onUpdateParam?.(id, "prompt", event.target.value)}
+            placeholder="Describe the edit to apply..."
+          />
         </div>
       ) : null}
 

@@ -83,6 +83,18 @@ const sceneGenerationTemplateParams = z.object({
   ScenePreviewStage: z.enum(["final", "detection", "segmentation"]).default("final")
 });
 const modelPrompt = z.object({ prompt: z.string().default("") });
+const qwenImageEditParams = z.object({
+  prompt: z.string().default(""),
+  negativePrompt: z.string().default(""),
+  enableTurboMode: z.boolean().default(false),
+  referenceLatentsMethod: z.enum(["offset", "index", "uxo/uno", "index_timestep_zero"]).default("index_timestep_zero"),
+  seed: z.number().int().min(-1).max(2147483647).default(-1),
+  steps: z.number().int().min(1).max(150).default(40),
+  cfg: z.number().min(0.1).max(30).default(4),
+  sampler: z.string().default("euler"),
+  scheduler: z.string().default("simple"),
+  denoise: z.number().min(0).max(1).default(1)
+});
 const depthParams = z.object({ model: z.string().default("fast-depth") });
 const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
 const meshReconstructionParams = z.object({ quality: z.string().default("balanced") });
@@ -397,16 +409,75 @@ export const nodeSpecEntries = [
     type: "model.qwen_image_edit",
     category: "Models",
     title: "Qwen Image Edit",
-    icon: "Wand",
-    description: "Prompt-guided image edit.",
+    icon: "WandSparkles",
+    description: "Prompt-guided multi-reference image edit (Qwen Image Edit 2511).",
     inputPorts: [
       { id: "image", label: "Image", artifactType: "Image", required: true },
-      { id: "text", label: "Prompt", artifactType: "JsonData" }
+      { id: "image2", label: "Ref Image 2", artifactType: "Image" },
+      { id: "image3", label: "Ref Image 3", artifactType: "Image" }
     ],
     outputPorts: [{ id: "image", label: "Edited", artifactType: "Image" }],
-    paramSchema: modelPrompt,
-    paramFields: [{ key: "prompt", label: "Edit Prompt", input: "textarea" }],
-    defaultParams: { prompt: "Enhance texture details." }
+    paramSchema: qwenImageEditParams,
+    paramFields: [
+      { key: "prompt", label: "Edit Prompt", input: "textarea", placeholder: "Describe the edit to apply..." },
+      { key: "negativePrompt", label: "Negative Prompt", input: "textarea", placeholder: "What to avoid..." },
+      { key: "enableTurboMode", label: "Enable Turbo Mode", input: "boolean" },
+      {
+        key: "referenceLatentsMethod",
+        label: "Reference Latents",
+        input: "select",
+        options: ["index_timestep_zero", "offset", "index", "uxo/uno"]
+      },
+      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: 2147483647, step: 1 },
+      { key: "steps", label: "Steps", input: "number", min: 1, max: 150, step: 1 },
+      { key: "cfg", label: "CFG", input: "number", min: 0.1, max: 30, step: 0.1 },
+      {
+        key: "sampler",
+        label: "Sampler",
+        input: "select",
+        options: [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpm_2",
+          "dpm_2_ancestral",
+          "lms",
+          "dpm_fast",
+          "dpm_adaptive",
+          "dpmpp_2s_ancestral",
+          "dpmpp_sde",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "ddim",
+          "uni_pc",
+          "uni_pc_bh2",
+          "res_multistep"
+        ]
+      },
+      {
+        key: "scheduler",
+        label: "Scheduler",
+        input: "select",
+        options: ["simple", "normal", "karras", "exponential", "sgm_uniform", "ddim_uniform", "beta"]
+      },
+      { key: "denoise", label: "Denoise", input: "number", min: 0, max: 1, step: 0.01 }
+    ],
+    defaultParams: {
+      prompt: "Change the furniture leather difference in image 1 to the fur material in image 2.",
+      negativePrompt: "",
+      enableTurboMode: false,
+      referenceLatentsMethod: "index_timestep_zero",
+      seed: -1,
+      steps: 40,
+      cfg: 4,
+      sampler: "euler",
+      scheduler: "simple",
+      denoise: 1
+    },
+    ui: {
+      previewOutputIds: ["image"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("model.texturing", {
     type: "model.texturing",

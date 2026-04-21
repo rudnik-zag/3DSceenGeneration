@@ -89,7 +89,8 @@ Controlled by env:
 ## 4.3 `model.qwen_image_edit`
 - Executor: `executeComfyQwenImageEditNode`
 - Requires an input image artifact.
-- Uses built-in API workflow defaults when `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` is empty.
+- Supports optional secondary/tertiary reference images (`image2`, `image3`).
+- Uses built-in API workflow defaults from the `image_qwen_image_edit_2511` blueprint structure when `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` is empty.
 - Supports env-based mapping for model files + sampler settings + turbo LoRA mode.
 
 ## 5) Workflow Template Rules
@@ -103,11 +104,13 @@ Common placeholders used:
 - `__PROMPT__`
 - `__NEGATIVE_PROMPT__`
 - `__INPUT_IMAGE__`
+- `__INPUT_IMAGE2__`, `__INPUT_IMAGE3__`
 - `__FILENAME_PREFIX__`
 - `__SEED__`
 - `__STEPS__`, `__CFG__`, `__SAMPLER__`, `__SCHEDULER__`, `__DENOISE__`
+- `__ENABLE_TURBO_MODE__`, `__BASE_STEPS__`, `__TURBO_STEPS__`, `__BASE_CFG__`, `__TURBO_CFG__`
 - `__UNET__`, `__VAE__`, `__CLIP__`, `__CLIP_TYPE__`, `__CLIP_DEVICE__`, `__UNET_WEIGHT_DTYPE__`
-- `__AURAFLOW_SHIFT__`, `__LORA__`, `__LORA_STRENGTH__`
+- `__AURAFLOW_SHIFT__`, `__LORA__`, `__LORA_STRENGTH__`, `__REFERENCE_LATENTS_METHOD__`
 - plus model-specific placeholders for distill/z-image
 
 ## 6) Current Env Variables (Comfy)
@@ -154,23 +157,24 @@ Qwen Edit:
 - `COMFYUI_QWEN_EDIT_WORKFLOW_PATH=`
 - `COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID=60`
 - `COMFYUI_QWEN_EDIT_TIMEOUT_MS=360000`
-- `COMFYUI_QWEN_EDIT_UNET=qwen_image_edit_fp8_e4m3fn.safetensors`
+- `COMFYUI_QWEN_EDIT_UNET=qwen_image_edit_2511_bf16.safetensors`
 - `COMFYUI_QWEN_EDIT_VAE=qwen_image_vae.safetensors`
 - `COMFYUI_QWEN_EDIT_CLIP=qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - `COMFYUI_QWEN_EDIT_CLIP_TYPE=qwen_image`
 - `COMFYUI_QWEN_EDIT_CLIP_DEVICE=default`
 - `COMFYUI_QWEN_EDIT_UNET_WEIGHT_DTYPE=default`
 - `COMFYUI_QWEN_EDIT_ENABLE_TURBO_MODE=false`
-- `COMFYUI_QWEN_EDIT_STEPS=20`
-- `COMFYUI_QWEN_EDIT_CFG=2.5`
+- `COMFYUI_QWEN_EDIT_STEPS=40`
+- `COMFYUI_QWEN_EDIT_CFG=4`
 - `COMFYUI_QWEN_EDIT_TURBO_STEPS=4`
 - `COMFYUI_QWEN_EDIT_TURBO_CFG=1`
 - `COMFYUI_QWEN_EDIT_SAMPLER=euler`
 - `COMFYUI_QWEN_EDIT_SCHEDULER=simple`
 - `COMFYUI_QWEN_EDIT_DENOISE=1`
-- `COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT=3`
+- `COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT=3.1`
+- `COMFYUI_QWEN_EDIT_REFERENCE_LATENTS_METHOD=index_timestep_zero`
 - `COMFYUI_QWEN_EDIT_NEGATIVE_PROMPT=`
-- `COMFYUI_QWEN_EDIT_LORA=Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors`
+- `COMFYUI_QWEN_EDIT_LORA=Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`
 - `COMFYUI_QWEN_EDIT_LORA_STRENGTH=1`
 
 Z-Image:
@@ -260,6 +264,6 @@ Security model is backend-only by design:
 
 ## 12) Known Constraints
 
-- `Qwen Image Edit` runs with built-in API workflow if no custom path is provided.
+- `Qwen Image Edit` runs with built-in `image_qwen_image_edit_2511`-aligned API workflow if no custom path is provided.
 - Passing Comfy UI-exported graph JSON instead of API JSON will fail intentionally.
 - If `COMFYUI_ALLOW_MOCK_FALLBACK=true`, unavailable Comfy returns mock images with warnings instead of hard fail.

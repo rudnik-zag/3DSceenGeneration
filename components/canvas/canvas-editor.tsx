@@ -508,6 +508,15 @@ async function readApiErrorMessage(response: Response, fallback: string) {
   return fallback;
 }
 
+function dispatchTokenStatus(detail: {
+  message?: string;
+  availableTokens?: number;
+  refresh?: boolean;
+}) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("billing:token-status", { detail }));
+}
+
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
@@ -2392,10 +2401,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const availableTokens = Math.max(0, Math.round(Number(estimatePayload?.availableTokens ?? 0)));
       const canAfford = estimatePayload?.canAfford !== false;
       const enforcementEnabled = estimatePayload?.enforcementEnabled !== false;
+      dispatchTokenStatus({
+        availableTokens,
+        message: `Estimate ${estimatedCost} tokens`
+      });
       if (enforcementEnabled && !canAfford) {
         toast({
           title: "Insufficient tokens",
           description: `Estimated ${estimatedCost} tokens, available ${availableTokens}.`
+        });
+        dispatchTokenStatus({
+          availableTokens,
+          message: `Need ${estimatedCost}, available ${availableTokens}`
         });
         return;
       }
@@ -2414,11 +2431,20 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const data = await res.json();
       setActiveRunId(data.run.id);
       const reservedCost = Math.max(0, Math.round(Number(data?.billing?.estimatedTokenCost ?? estimatedCost)));
+      const availableAfterReserve = Math.max(
+        0,
+        Math.round(Number(data?.billing?.availableTokensAfterReserve ?? availableTokens - reservedCost))
+      );
       const description =
         reservedCost > 0
           ? `Run ${data.run.id.slice(0, 8)} queued • ${reservedCost} tokens reserved`
           : `Run ${data.run.id.slice(0, 8)} queued`;
       toast({ title: "Run started", description });
+      dispatchTokenStatus({
+        availableTokens: availableAfterReserve,
+        message: reservedCost > 0 ? `Reserved ${reservedCost} tokens` : "Run queued",
+        refresh: true
+      });
       pollRun(data.run.id, startNodeId ?? null);
     } catch (error) {
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
