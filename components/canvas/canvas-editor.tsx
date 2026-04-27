@@ -18,13 +18,16 @@ import {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import {
-  ExternalLink,
+  Box,
+  EllipsisVertical,
+  FilePenLine,
+  Info,
   LocateFixed,
   Map as MapIcon,
   Minus,
   Play,
   SlidersHorizontal,
-  WandSparkles,
+  Workflow,
   ZoomIn
 } from "lucide-react";
 
@@ -41,6 +44,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
@@ -2618,202 +2624,248 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     <div className="h-full">
       <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
         <div className="pointer-events-none absolute left-3 right-3 top-3 z-30">
-          <div className="pointer-events-auto flex items-center gap-2 overflow-x-auto rounded-2xl studio-toolbar p-2">
-            <Button size="sm" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => startRun()} disabled={isStartingRun}>
-              <Play className="mr-1 h-4 w-4" /> Run workflow
+          <div className="pointer-events-auto absolute left-1/2 top-0 flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-border/70 bg-[#0a1020]/90 p-1.5 shadow-[0_16px_45px_rgba(0,0,0,0.5)] backdrop-blur-md">
+            <Button
+              size="icon"
+              className="h-9 w-9 rounded-xl border border-emerald-300/30 bg-emerald-500/85 text-emerald-50 hover:bg-emerald-400"
+              onClick={() => startRun()}
+              disabled={isStartingRun}
+              title="Run workflow"
+              aria-label="Run workflow"
+            >
+              <Play className="h-4 w-4" />
             </Button>
-            {isStartingRun || activeRunId ? (
+            <Button
+              size="icon"
+              variant={inspectorOpen ? "default" : "ghost"}
+              className="h-9 w-9 rounded-xl"
+              onClick={() => setInspectorOpen((value) => !value)}
+              title="Inspector"
+              aria-label="Inspector"
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+            </Button>
+            <Button size="icon" variant="ghost" className="h-9 w-9 rounded-xl" asChild title="3D Viewer" aria-label="3D Viewer">
+              <Link href={viewerHref}>
+                <Box className="h-4 w-4" />
+              </Link>
+            </Button>
+            <span className="mx-1 h-6 w-px bg-border/70" />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="icon" variant="ghost" className="h-9 w-9 rounded-xl" title="More actions" aria-label="More actions">
+                  <EllipsisVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-72 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className="mb-1 rounded-lg border border-sky-400/35 bg-sky-500/10 px-3 py-2 font-medium text-sky-100 focus:bg-sky-500/20 data-[state=open]:bg-sky-500/20">
+                    <FilePenLine className="mr-2 h-4 w-4" />
+                    Edit Workflow
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      disabled={isSaving}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        void saveGraph();
+                      }}
+                    >
+                      {isSaving ? "Saving..." : "Save graph"}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!activeRunId}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        cancelRun();
+                      }}
+                    >
+                      Stop active run
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        shareProject();
+                      }}
+                    >
+                      Share project
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      disabled={!hasNodeSelection && !hasEdgeSelection}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+                        if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
+                        if (selectedNodeIds.length > 0) {
+                          const nodeSet = new Set(selectedNodeIds);
+                          setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+                          setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+                        }
+                        if (selectedEdgeIds.length > 0) {
+                          const edgeSet = new Set(selectedEdgeIds);
+                          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+                        }
+                        const parts: string[] = [];
+                        if (selectedNodeIds.length > 0) {
+                          parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+                        }
+                        if (selectedEdgeIds.length > 0) {
+                          parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+                        }
+                        toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
+                      }}
+                    >
+                      Delete selected
+                      <span className="ml-auto text-[11px] text-zinc-500">Del</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!hasEdgeSelection}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        deleteSelectedEdges();
+                      }}
+                    >
+                      Disconnect selected edges
+                      <span className="ml-auto text-[11px] text-zinc-500">Ctrl+Shift+X</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!hasNodeSelection}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                        disconnectEdgesForNodeIds(selectedIds);
+                      }}
+                    >
+                      Disconnect selected nodes
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">View</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        setShowMiniMap((value) => !value);
+                      }}
+                    >
+                      {showMiniMap ? "Hide minimap" : "Show minimap"}
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className="rounded-lg border border-emerald-400/35 bg-emerald-500/10 px-3 py-2 font-medium text-emerald-100 focus:bg-emerald-500/20 data-[state=open]:bg-emerald-500/20">
+                    <Workflow className="mr-2 h-4 w-4" />
+                    Workflow Management
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Presets</DropdownMenuLabel>
+                    {workflowPresets.map((preset) => (
+                      <DropdownMenuItem
+                        key={`workflow-preset-${preset.id}`}
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          insertWorkflowPreset(preset.id);
+                        }}
+                      >
+                        {preset.label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          {isStartingRun || activeRunId ? (
+            <div className="pointer-events-none absolute left-1/2 top-12 -translate-x-1/2">
               <Badge
-                className={`shrink-0 rounded-full border border-emerald-400/35 bg-emerald-500/10 text-[11px] text-emerald-200 ${
+                className={`rounded-full border border-emerald-400/35 bg-emerald-500/10 text-[11px] text-emerald-200 ${
                   activeRunId ? "running-pulse" : ""
                 }`}
                 variant="secondary"
               >
                 {isStartingRun ? "Starting run..." : "Run active"}
               </Badge>
-            ) : null}
+            </div>
+          ) : null}
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs">
-                <SlidersHorizontal className="mr-1 h-4 w-4" /> Edit
+              <Button
+                size="icon"
+                variant="outline"
+                className="pointer-events-auto absolute right-0 top-0 h-9 w-9 rounded-full border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                title="Scene and configuration info"
+                aria-label="Scene and configuration info"
+              >
+                <Info className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
-              <DropdownMenuItem
-                disabled={isSaving}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  void saveGraph();
-                }}
-              >
-                {isSaving ? "Saving..." : "Save graph"}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={!activeRunId}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  cancelRun();
-                }}
-              >
-                Stop active run
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={(event) => {
-                  event.preventDefault();
-                  shareProject();
-                }}
-              >
-                Share project
-              </DropdownMenuItem>
+            <DropdownMenuContent align="end" sideOffset={10} className="w-[340px] rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+              <DropdownMenuLabel className="text-base font-semibold text-zinc-100">Scene &amp; Configuration Info</DropdownMenuLabel>
+              <div className="space-y-2 px-2 pb-2 text-xs text-zinc-300">
+                <p className="text-[11px] uppercase tracking-[0.15em] text-zinc-400">Scene Information</p>
+                <div className="grid grid-cols-[1fr_auto] gap-y-1">
+                  <span>Entities</span>
+                  <span>{nodes.length}</span>
+                  <span>Connections</span>
+                  <span>{edges.length}</span>
+                  <span>Artifacts</span>
+                  <span>{nodeArtifacts.length}</span>
+                </div>
+              </div>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
-              <DropdownMenuItem
-                disabled={!hasNodeSelection && !hasEdgeSelection}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-                  const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-                  if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
-                  if (selectedNodeIds.length > 0) {
-                    const nodeSet = new Set(selectedNodeIds);
-                    setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
-                    setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-                  }
-                  if (selectedEdgeIds.length > 0) {
-                    const edgeSet = new Set(selectedEdgeIds);
-                    setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-                  }
-                  const parts: string[] = [];
-                  if (selectedNodeIds.length > 0) {
-                    parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
-                  }
-                  if (selectedEdgeIds.length > 0) {
-                    parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
-                  }
-                  toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
-                }}
-              >
-                Delete selected
-                <span className="ml-auto text-[11px] text-zinc-500">Del</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={!hasEdgeSelection}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  deleteSelectedEdges();
-                }}
-              >
-                Disconnect selected edges
-                <span className="ml-auto text-[11px] text-zinc-500">Ctrl+Shift+X</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={!hasNodeSelection}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
-                  disconnectEdgesForNodeIds(selectedIds);
-                }}
-              >
-                Disconnect selected nodes
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">View</DropdownMenuLabel>
-              <DropdownMenuItem
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setShowMiniMap((value) => !value);
-                }}
-              >
-                {showMiniMap ? "Hide minimap" : "Show minimap"}
-              </DropdownMenuItem>
+              <div className="space-y-3 px-2 pb-2">
+                <div className="space-y-1.5">
+                  <p className="text-[11px] uppercase tracking-[0.15em] text-zinc-400">Configuration</p>
+                  <Label className="text-xs text-zinc-300">Node style</Label>
+                  <Select value={nodeScalePreset} onValueChange={(value) => applyNodeScalePreset(value as NodeUiScale)}>
+                    <SelectTrigger className="h-8 w-full rounded-lg text-xs">
+                      <SelectValue placeholder="Node style" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="compact">Compact</SelectItem>
+                      <SelectItem value="balanced">Balanced</SelectItem>
+                      <SelectItem value="cinematic">Cinematic</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-zinc-300">Version</Label>
+                  <Select
+                    value={selectedVersionId}
+                    onValueChange={(value) => {
+                      setSelectedVersionId(value);
+                      const version = versions.find((v) => v.id === value);
+                      if (!version) return;
+                      const migratedGraph = migrateGraphDocument(version.graphJson);
+                      const loadedNodes = migratedGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
+                      setNodes(loadedNodes);
+                      setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
+                      const loadedPreset = loadedNodes[0]?.data.uiScale;
+                      if (loadedPreset === "compact" || loadedPreset === "balanced" || loadedPreset === "cinematic") {
+                        setNodeScalePreset(loadedPreset);
+                      }
+                      toast({ title: "Version loaded", description: `v${version.version}` });
+                    }}
+                  >
+                    <SelectTrigger className="h-8 w-full rounded-lg text-xs">
+                      <SelectValue placeholder="Graph version" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {versions.map((v) => (
+                        <SelectItem key={v.id} value={v.id}>
+                          v{v.version} - {new Date(v.createdAt).toLocaleDateString()}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </DropdownMenuContent>
           </DropdownMenu>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs xl:inline-flex">
-                <WandSparkles className="mr-1 h-4 w-4" /> Workflow
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow</DropdownMenuLabel>
-              {workflowPresets.map((preset) => (
-                <DropdownMenuItem
-                  key={`workflow-preset-${preset.id}`}
-                  onSelect={(event) => {
-                    event.preventDefault();
-                    insertWorkflowPreset(preset.id);
-                  }}
-                >
-                  {preset.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <Button
-            size="sm"
-            variant={inspectorOpen ? "default" : "outline"}
-            className="h-8 shrink-0 rounded-lg px-2.5 text-xs"
-            onClick={() => setInspectorOpen((value) => !value)}
-          >
-            <SlidersHorizontal className="mr-1 h-4 w-4" /> Inspector
-          </Button>
-
-          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" asChild>
-            <Link href={viewerHref}>
-              <ExternalLink className="mr-1 h-4 w-4" /> Viewer
-            </Link>
-          </Button>
-
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
-              {nodes.length} nodes
-            </Badge>
-            <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
-              {edges.length} edges
-            </Badge>
-            <Select value={nodeScalePreset} onValueChange={(value) => applyNodeScalePreset(value as NodeUiScale)}>
-              <SelectTrigger className="h-8 w-[150px] rounded-lg text-xs">
-                <SelectValue placeholder="Node size" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="compact">Nodes: Compact</SelectItem>
-                <SelectItem value="balanced">Nodes: Balanced</SelectItem>
-                <SelectItem value="cinematic">Nodes: Cinematic</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              value={selectedVersionId}
-              onValueChange={(value) => {
-                setSelectedVersionId(value);
-                const version = versions.find((v) => v.id === value);
-                if (!version) return;
-                const migratedGraph = migrateGraphDocument(version.graphJson);
-                const loadedNodes = migratedGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
-                setNodes(loadedNodes);
-                setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
-                const loadedPreset = loadedNodes[0]?.data.uiScale;
-                if (loadedPreset === "compact" || loadedPreset === "balanced" || loadedPreset === "cinematic") {
-                  setNodeScalePreset(loadedPreset);
-                }
-                toast({ title: "Version loaded", description: `v${version.version}` });
-              }}
-            >
-              <SelectTrigger className="h-8 w-[164px] rounded-lg text-xs">
-                <SelectValue placeholder="Graph version" />
-              </SelectTrigger>
-              <SelectContent>
-                {versions.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    v{v.version} - {new Date(v.createdAt).toLocaleDateString()}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
         </div>
 
         <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
