@@ -30,15 +30,24 @@ export async function POST(req: NextRequest) {
       );
     }
     const plan = parsed.data.plan;
+    const isMockBilling = env.BILLING_PROVIDER === "mock";
+    if (isMockBilling && process.env.NODE_ENV === "production") {
+      throw new HttpError(403, "Mock billing provider is disabled in production.", "billing_provider_forbidden");
+    }
 
-    if (plan === "Free") {
+    if (isMockBilling || plan === "Free") {
+      const periodStart = new Date();
+      const periodEnd = new Date(periodStart);
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
       await syncSubscriptionFromBilling({
         userId: user.id,
-        plan: "Free",
+        plan,
         status: "active",
-        billingProvider: "manual",
+        billingProvider: isMockBilling ? "mock" : "manual",
         billingCustomerId: null,
         billingSubscriptionId: null,
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
         resetMonthlyAllowance: true
       });
       await logAuditEventFromRequest(req, {
@@ -48,7 +57,7 @@ export async function POST(req: NextRequest) {
         userId: user.id
       });
       return NextResponse.json({
-        url: "/billing?checkout=success&type=subscription&plan=Free"
+        url: `/billing?checkout=success&type=subscription&plan=${encodeURIComponent(plan)}`
       });
     }
 
@@ -100,4 +109,3 @@ export async function POST(req: NextRequest) {
     return toApiErrorResponse(error, "Failed to create subscription checkout");
   }
 }
-

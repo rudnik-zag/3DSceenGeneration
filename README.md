@@ -89,6 +89,7 @@ S3_FORCE_PATH_STYLE=true
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_SPLAT_RUNTIME=auto
 NEXT_PUBLIC_SPARK_ENABLED=true
+BILLING_PROVIDER=mock
 BILLING_ENFORCEMENT_ENABLED=false
 # Optional: force specific emails to at least Pro entitlements (advanced models enabled)
 BILLING_ADMIN_PRO_EMAILS=

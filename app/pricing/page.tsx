@@ -2,10 +2,14 @@ import Link from "next/link";
 
 import { allPlanDefinitions } from "@/lib/billing/entitlements";
 import { tokenPackDefinitions } from "@/lib/billing/plans";
+import { getAuthSession } from "@/lib/auth/session";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
-export default function PricingPage() {
+export default async function PricingPage() {
+  const session = await getAuthSession();
+  const isLoggedIn = Boolean(session?.user?.id);
+  const userLabel = session?.user?.email ?? session?.user?.name ?? null;
   const plans = allPlanDefinitions();
 
   return (
@@ -15,13 +19,29 @@ export default function PricingPage() {
         <p className="mt-3 max-w-3xl text-sm text-zinc-300 md:text-base">
           Subscription includes monthly tokens. Extra token packs can be purchased anytime.
         </p>
+        {isLoggedIn && userLabel ? (
+          <p className="mt-2 max-w-3xl text-xs text-emerald-300/90 md:text-sm">Signed in as {userLabel}</p>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button asChild>
-            <Link href="/register">Get Started</Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link href="/login">Login</Link>
-          </Button>
+          {isLoggedIn ? (
+            <>
+              <Button asChild>
+                <Link href="/app">Open App</Link>
+              </Button>
+              <Button asChild variant="outline">
+                <Link href="/billing">Billing</Link>
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button asChild>
+                <Link href="/register">Get Started</Link>
+              </Button>
+              <Button asChild variant="outline">
+                <Link href="/login">Login</Link>
+              </Button>
+            </>
+          )}
           <Button asChild variant="secondary">
             <Link href="/">Back to Landing</Link>
           </Button>
