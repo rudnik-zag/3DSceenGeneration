@@ -44,9 +44,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
@@ -535,6 +532,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const [selectedVersionId, setSelectedVersionId] = useState(versions[0]?.id ?? "");
   const [runLogs, setRunLogs] = useState("");
   const [showAdvancedInspector, setShowAdvancedInspector] = useState(false);
+  const [showToolbarActions, setShowToolbarActions] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedArtifactPreview, setSelectedArtifactPreview] = useState<{ previewUrl: string | null; jsonSnippet: string | null }>({
     previewUrl: null,
@@ -2650,132 +2648,154 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                 <Box className="h-4 w-4" />
               </Link>
             </Button>
+            <div
+              className={`flex items-center gap-1 overflow-hidden transition-[max-width,opacity,margin] duration-200 ${
+                showToolbarActions ? "ml-1 max-w-[120px] opacity-100" : "max-w-0 opacity-0"
+              }`}
+            >
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-9 w-9 rounded-xl border border-sky-400/35 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                    title="Edit workflow"
+                    aria-label="Edit workflow"
+                  >
+                    <FilePenLine className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    disabled={isSaving}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      void saveGraph();
+                    }}
+                  >
+                    {isSaving ? "Saving..." : "Save graph"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!activeRunId}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      cancelRun();
+                    }}
+                  >
+                    Stop active run
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      shareProject();
+                    }}
+                  >
+                    Share project
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    disabled={!hasNodeSelection && !hasEdgeSelection}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                      const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
+                      if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
+                      if (selectedNodeIds.length > 0) {
+                        const nodeSet = new Set(selectedNodeIds);
+                        setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
+                        setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
+                      }
+                      if (selectedEdgeIds.length > 0) {
+                        const edgeSet = new Set(selectedEdgeIds);
+                        setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
+                      }
+                      const parts: string[] = [];
+                      if (selectedNodeIds.length > 0) {
+                        parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
+                      }
+                      if (selectedEdgeIds.length > 0) {
+                        parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
+                      }
+                      toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
+                    }}
+                  >
+                    Delete selected
+                    <span className="ml-auto text-[11px] text-zinc-500">Del</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!hasEdgeSelection}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      deleteSelectedEdges();
+                    }}
+                  >
+                    Disconnect selected edges
+                    <span className="ml-auto text-[11px] text-zinc-500">Ctrl+Shift+X</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!hasNodeSelection}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+                      disconnectEdgesForNodeIds(selectedIds);
+                    }}
+                  >
+                    Disconnect selected nodes
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">View</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      setShowMiniMap((value) => !value);
+                    }}
+                  >
+                    {showMiniMap ? "Hide minimap" : "Show minimap"}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-9 w-9 rounded-xl border border-emerald-400/35 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20"
+                    title="Workflow management"
+                    aria-label="Workflow management"
+                  >
+                    <Workflow className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Presets</DropdownMenuLabel>
+                  {workflowPresets.map((preset) => (
+                    <DropdownMenuItem
+                      key={`workflow-preset-${preset.id}`}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        insertWorkflowPreset(preset.id);
+                      }}
+                    >
+                      {preset.label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             <span className="mx-1 h-6 w-px bg-border/70" />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-9 w-9 rounded-xl" title="More actions" aria-label="More actions">
-                  <EllipsisVertical className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-72 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className="mb-1 rounded-lg border border-sky-400/35 bg-sky-500/10 px-3 py-2 font-medium text-sky-100 focus:bg-sky-500/20 data-[state=open]:bg-sky-500/20">
-                    <FilePenLine className="mr-2 h-4 w-4" />
-                    Edit Workflow
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
-                    <DropdownMenuItem
-                      disabled={isSaving}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        void saveGraph();
-                      }}
-                    >
-                      {isSaving ? "Saving..." : "Save graph"}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      disabled={!activeRunId}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        cancelRun();
-                      }}
-                    >
-                      Stop active run
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        shareProject();
-                      }}
-                    >
-                      Share project
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
-                    <DropdownMenuItem
-                      disabled={!hasNodeSelection && !hasEdgeSelection}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
-                        const selectedEdgeIds = edges.filter((edge) => edge.selected).map((edge) => edge.id);
-                        if (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0) return;
-                        if (selectedNodeIds.length > 0) {
-                          const nodeSet = new Set(selectedNodeIds);
-                          setNodes((prev) => prev.filter((node) => !nodeSet.has(node.id)));
-                          setEdges((prev) => prev.filter((edge) => !nodeSet.has(edge.source) && !nodeSet.has(edge.target)));
-                        }
-                        if (selectedEdgeIds.length > 0) {
-                          const edgeSet = new Set(selectedEdgeIds);
-                          setEdges((prev) => prev.filter((edge) => !edgeSet.has(edge.id)));
-                        }
-                        const parts: string[] = [];
-                        if (selectedNodeIds.length > 0) {
-                          parts.push(selectedNodeIds.length > 1 ? `${selectedNodeIds.length} nodes` : "1 node");
-                        }
-                        if (selectedEdgeIds.length > 0) {
-                          parts.push(selectedEdgeIds.length > 1 ? `${selectedEdgeIds.length} connections` : "1 connection");
-                        }
-                        toast({ title: "Selection deleted", description: `${parts.join(" + ")} removed` });
-                      }}
-                    >
-                      Delete selected
-                      <span className="ml-auto text-[11px] text-zinc-500">Del</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      disabled={!hasEdgeSelection}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        deleteSelectedEdges();
-                      }}
-                    >
-                      Disconnect selected edges
-                      <span className="ml-auto text-[11px] text-zinc-500">Ctrl+Shift+X</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      disabled={!hasNodeSelection}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
-                        disconnectEdgesForNodeIds(selectedIds);
-                      }}
-                    >
-                      Disconnect selected nodes
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">View</DropdownMenuLabel>
-                    <DropdownMenuItem
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        setShowMiniMap((value) => !value);
-                      }}
-                    >
-                      {showMiniMap ? "Hide minimap" : "Show minimap"}
-                    </DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className="rounded-lg border border-emerald-400/35 bg-emerald-500/10 px-3 py-2 font-medium text-emerald-100 focus:bg-emerald-500/20 data-[state=open]:bg-emerald-500/20">
-                    <Workflow className="mr-2 h-4 w-4" />
-                    Workflow Management
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-                    <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Presets</DropdownMenuLabel>
-                    {workflowPresets.map((preset) => (
-                      <DropdownMenuItem
-                        key={`workflow-preset-${preset.id}`}
-                        onSelect={(event) => {
-                          event.preventDefault();
-                          insertWorkflowPreset(preset.id);
-                        }}
-                      >
-                        {preset.label}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button
+              size="icon"
+              variant={showToolbarActions ? "default" : "ghost"}
+              className="h-9 w-9 rounded-xl"
+              title="Expand actions"
+              aria-label="Expand actions"
+              onClick={() => setShowToolbarActions((value) => !value)}
+            >
+              <EllipsisVertical className="h-4 w-4" />
+            </Button>
           </div>
 
           {isStartingRun || activeRunId ? (
