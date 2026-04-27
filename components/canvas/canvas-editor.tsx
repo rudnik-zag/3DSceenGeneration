@@ -206,6 +206,36 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
 };
 
 const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
+const MAX_IMAGE_GENERATION_SEED = 2_147_483_646;
+
+function createRandomImageGenerationSeed() {
+  return Math.floor(Math.random() * (MAX_IMAGE_GENERATION_SEED + 1));
+}
+
+const inputImageGeneratorModelPresets: Record<string, Record<string, string | number | boolean>> = {
+  "Qwen-Distill": {
+    seed: 0,
+    steps: 10,
+    cfg: 1,
+    width: 1328,
+    height: 1328,
+    sampler: "res_multistep",
+    scheduler: "simple",
+    negativePrompt: "",
+    checkpoint: ""
+  },
+  "Z-Image-Turbo": {
+    seed: 0,
+    steps: 4,
+    cfg: 1,
+    width: 1024,
+    height: 1024,
+    sampler: "res_multistep",
+    scheduler: "simple",
+    negativePrompt: "",
+    checkpoint: ""
+  }
+};
 
 function formatMenuCategoryLabel(category: string) {
   const normalized = category.trim();
@@ -478,6 +508,15 @@ async function readApiErrorMessage(response: Response, fallback: string) {
   return fallback;
 }
 
+function dispatchTokenStatus(detail: {
+  message?: string;
+  availableTokens?: number;
+  refresh?: boolean;
+}) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("billing:token-status", { detail }));
+}
+
 function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
@@ -726,13 +765,15 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
-      if (target && paneMenuRef.current?.contains(target)) {
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const pathContains = (element: HTMLElement | null) => Boolean(element && path.includes(element));
+      if ((target && paneMenuRef.current?.contains(target)) || pathContains(paneMenuRef.current)) {
         return;
       }
-      if (target && nodeMenuRef.current?.contains(target)) {
+      if ((target && nodeMenuRef.current?.contains(target)) || pathContains(nodeMenuRef.current)) {
         return;
       }
-      if (target && nodeSearchMenuRef.current?.contains(target)) {
+      if ((target && nodeSearchMenuRef.current?.contains(target)) || pathContains(nodeSearchMenuRef.current)) {
         return;
       }
       setPaneMenu(null);
@@ -1772,6 +1813,23 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
             [key]: value
           } as Record<string, unknown>;
 
+          if (nodeType === "input.image" && key === "generatorModel" && typeof value === "string") {
+            const preset = inputImageGeneratorModelPresets[value];
+            if (preset) {
+              Object.assign(nextParams, {
+                ...preset,
+                seed: createRandomImageGenerationSeed()
+              });
+            }
+          }
+
+          if (nodeType === "input.image" && key === "sourceMode" && value === "generate") {
+            const parsedSeed = Number(nextParams.seed);
+            if (!Number.isInteger(parsedSeed) || parsedSeed < 0 || parsedSeed > MAX_IMAGE_GENERATION_SEED) {
+              nextParams.seed = createRandomImageGenerationSeed();
+            }
+          }
+
           if (nodeType === "model.sam3d_objects") {
             if (key === "configPreset" && typeof value === "string") {
               const applied = applySceneGenerationPreset(nextParams, value as "Default" | "HighQuality" | "FastPreview" | "Custom");
@@ -2343,10 +2401,18 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const availableTokens = Math.max(0, Math.round(Number(estimatePayload?.availableTokens ?? 0)));
       const canAfford = estimatePayload?.canAfford !== false;
       const enforcementEnabled = estimatePayload?.enforcementEnabled !== false;
+      dispatchTokenStatus({
+        availableTokens,
+        message: `Estimate ${estimatedCost} tokens`
+      });
       if (enforcementEnabled && !canAfford) {
         toast({
           title: "Insufficient tokens",
           description: `Estimated ${estimatedCost} tokens, available ${availableTokens}.`
+        });
+        dispatchTokenStatus({
+          availableTokens,
+          message: `Need ${estimatedCost}, available ${availableTokens}`
         });
         return;
       }
@@ -2365,11 +2431,20 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       const data = await res.json();
       setActiveRunId(data.run.id);
       const reservedCost = Math.max(0, Math.round(Number(data?.billing?.estimatedTokenCost ?? estimatedCost)));
+      const availableAfterReserve = Math.max(
+        0,
+        Math.round(Number(data?.billing?.availableTokensAfterReserve ?? availableTokens - reservedCost))
+      );
       const description =
         reservedCost > 0
           ? `Run ${data.run.id.slice(0, 8)} queued • ${reservedCost} tokens reserved`
           : `Run ${data.run.id.slice(0, 8)} queued`;
       toast({ title: "Run started", description });
+      dispatchTokenStatus({
+        availableTokens: availableAfterReserve,
+        message: reservedCost > 0 ? `Reserved ${reservedCost} tokens` : "Run queued",
+        refresh: true
+      });
       pollRun(data.run.id, startNodeId ?? null);
     } catch (error) {
       toast({ title: "Run start failed", description: error instanceof Error ? error.message : "Unknown error" });
@@ -3020,10 +3095,48 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
                               selectedNode.type === "input.image" && selectedNode.data.params?.sourceMode === "generate"
                                 ? "generate"
                                 : "upload";
+                            const inputGeneratorModel =
+                              selectedNode.type === "input.image" && typeof selectedNode.data.params?.generatorModel === "string"
+                                ? selectedNode.data.params.generatorModel === "Qwen-Image-Edit"
+                                  ? "Qwen-Distill"
+                                  : selectedNode.data.params.generatorModel
+                                : "";
+                            const inputGenerateOnlyFields = new Set([
+                              "generatorModel",
+                              "prompt",
+                              "negativePrompt",
+                              "seed",
+                              "steps",
+                              "cfg",
+                              "width",
+                              "height",
+                              "sampler",
+                              "scheduler",
+                              "checkpoint"
+                            ]);
+                            const inputPromptOnlyModelFields = new Set([
+                              "negativePrompt",
+                              "seed",
+                              "steps",
+                              "cfg",
+                              "width",
+                              "height",
+                              "sampler",
+                              "scheduler",
+                              "checkpoint"
+                            ]);
                             if (
                               selectedNode.type === "input.image" &&
                               inputSourceMode === "upload" &&
-                              (field.key === "generatorModel" || field.key === "prompt")
+                              inputGenerateOnlyFields.has(field.key)
+                            ) {
+                              return null;
+                            }
+                            if (
+                              selectedNode.type === "input.image" &&
+                              inputSourceMode === "generate" &&
+                              inputGeneratorModel === "Qwen-Distill" &&
+                              inputPromptOnlyModelFields.has(field.key)
                             ) {
                               return null;
                             }

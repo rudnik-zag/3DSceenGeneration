@@ -89,6 +89,10 @@ S3_FORCE_PATH_STYLE=true
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_SPLAT_RUNTIME=auto
 NEXT_PUBLIC_SPARK_ENABLED=true
+BILLING_PROVIDER=mock
+BILLING_ENFORCEMENT_ENABLED=false
+# Optional: force specific emails to at least Pro entitlements (advanced models enabled)
+BILLING_ADMIN_PRO_EMAILS=
 ```
 
 Splat runtime env flags:
@@ -256,6 +260,139 @@ SAM3D_CONDA_ENV=sam3d-objects
   - GroundingDINO: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/groundingdino/`
   - SAM2: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/sam2/`
   - SceneGeneration: `.local-storage/projects/{projectId}/runs/{runId}/nodes/{nodeId}/scene_generation/`
+
+## ComfyUI Runtime (Z-Image + Qwen Edit)
+ComfyUI is integrated as an internal backend inference service called by worker executors.
+
+Start ComfyUI in the dedicated conda env:
+```bash
+pnpm comfy:start
+```
+
+Optional launcher envs (for the script above):
+```bash
+export COMFYUI_CONDA_ENV=comfyui
+export COMFYUI_APP_DIR=/absolute/path/to/ComfyUI
+export COMFYUI_HOST=127.0.0.1
+export COMFYUI_PORT=8188
+```
+`scripts/comfyui-start.sh` also loads values from project `.env`, so you can set them there instead of exporting each session.
+
+Current real nodes:
+- `input.image` with `sourceMode=generate` and `generatorModel=Qwen-Distill` (default)
+- `input.image` with `sourceMode=generate` and `generatorModel=Z-Image-Turbo`
+- `model.qwen_image_edit`
+
+Required env:
+```env
+COMFYUI_ENABLED=true
+COMFYUI_BASE_URL=http://127.0.0.1:8188
+COMFYUI_MODE=on_demand
+COMFYUI_ON_DEMAND_IDLE_MS=15000
+COMFYUI_START_TIMEOUT_MS=120000
+COMFYUI_AUTH_TOKEN=
+COMFYUI_TIMEOUT_MS=180000
+COMFYUI_ALLOW_MOCK_FALLBACK=true
+```
+
+Z-Image settings:
+```env
+COMFYUI_ZIMAGE_WORKFLOW_PATH=
+COMFYUI_ZIMAGE_OUTPUT_NODE_ID=60
+COMFYUI_ZIMAGE_TIMEOUT_MS=300000
+COMFYUI_ZIMAGE_UNET=z_image_turbo_bf16.safetensors
+COMFYUI_ZIMAGE_VAE=ae.safetensors
+COMFYUI_ZIMAGE_CLIP=qwen_3_4b.safetensors
+COMFYUI_ZIMAGE_CLIP_TYPE=lumina2
+COMFYUI_ZIMAGE_CLIP_DEVICE=default
+COMFYUI_ZIMAGE_UNET_WEIGHT_DTYPE=default
+COMFYUI_ZIMAGE_STEPS=4
+COMFYUI_ZIMAGE_CFG=1
+COMFYUI_ZIMAGE_SAMPLER=res_multistep
+COMFYUI_ZIMAGE_SCHEDULER=simple
+COMFYUI_ZIMAGE_DENOISE=1
+COMFYUI_ZIMAGE_AURAFLOW_SHIFT=3
+COMFYUI_ZIMAGE_NEGATIVE_PROMPT=
+# Backward-compatible alias:
+COMFYUI_ZIMAGE_CHECKPOINT=
+```
+- If `COMFYUI_ZIMAGE_WORKFLOW_PATH` is empty, a built-in Comfy API workflow is used.
+- Built-in defaults are aligned with blueprint `image_z_image_turbo`.
+
+Qwen Edit settings:
+```env
+COMFYUI_QWEN_EDIT_WORKFLOW_PATH=
+COMFYUI_QWEN_EDIT_OUTPUT_NODE_ID=60
+COMFYUI_QWEN_EDIT_TIMEOUT_MS=360000
+COMFYUI_QWEN_EDIT_UNET=qwen_image_edit_2511_bf16.safetensors
+COMFYUI_QWEN_EDIT_VAE=qwen_image_vae.safetensors
+COMFYUI_QWEN_EDIT_CLIP=qwen_2.5_vl_7b_fp8_scaled.safetensors
+COMFYUI_QWEN_EDIT_CLIP_TYPE=qwen_image
+COMFYUI_QWEN_EDIT_CLIP_DEVICE=default
+COMFYUI_QWEN_EDIT_UNET_WEIGHT_DTYPE=default
+COMFYUI_QWEN_EDIT_ENABLE_TURBO_MODE=false
+COMFYUI_QWEN_EDIT_STEPS=40
+COMFYUI_QWEN_EDIT_CFG=4
+COMFYUI_QWEN_EDIT_TURBO_STEPS=4
+COMFYUI_QWEN_EDIT_TURBO_CFG=1
+COMFYUI_QWEN_EDIT_SAMPLER=euler
+COMFYUI_QWEN_EDIT_SCHEDULER=simple
+COMFYUI_QWEN_EDIT_DENOISE=1
+COMFYUI_QWEN_EDIT_AURAFLOW_SHIFT=3.1
+COMFYUI_QWEN_EDIT_REFERENCE_LATENTS_METHOD=index_timestep_zero
+COMFYUI_QWEN_EDIT_NEGATIVE_PROMPT=
+COMFYUI_QWEN_EDIT_LORA=Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+COMFYUI_QWEN_EDIT_LORA_STRENGTH=1
+```
+- If `COMFYUI_QWEN_EDIT_WORKFLOW_PATH` is empty, the app uses built-in API defaults extracted from Comfy blueprint `image_qwen_image_edit_2511`.
+- If you provide a custom path, it must point to ComfyUI `File -> Export (API)` JSON.
+- Template placeholders supported in workflow JSON:
+  - `__PROMPT__`
+  - `__NEGATIVE_PROMPT__`
+  - `__INPUT_IMAGE__`, `__INPUT_IMAGE2__`, `__INPUT_IMAGE3__`
+  - `__FILENAME_PREFIX__`
+  - `__SEED__`
+  - `__STEPS__`, `__CFG__`, `__SAMPLER__`, `__SCHEDULER__`, `__DENOISE__`
+  - `__ENABLE_TURBO_MODE__`, `__BASE_STEPS__`, `__TURBO_STEPS__`, `__BASE_CFG__`, `__TURBO_CFG__`
+  - `__REFERENCE_LATENTS_METHOD__`
+  - `__UNET__`, `__VAE__`, `__CLIP__`, `__CLIP_TYPE__`, `__CLIP_DEVICE__`, `__UNET_WEIGHT_DTYPE__`
+  - `__AURAFLOW_SHIFT__`, `__LORA__`, `__LORA_STRENGTH__`
+
+Qwen Distill preset settings (`input.image` -> `Qwen-Distill`):
+```env
+COMFYUI_QWEN_DISTILL_WORKFLOW_PATH=
+COMFYUI_QWEN_DISTILL_OUTPUT_NODE_ID=60
+COMFYUI_QWEN_DISTILL_TIMEOUT_MS=420000
+COMFYUI_QWEN_DISTILL_UNET=qwen_image_distill_full_fp8_e4m3fn.safetensors
+COMFYUI_QWEN_DISTILL_VAE=qwen_image_vae.safetensors
+COMFYUI_QWEN_DISTILL_CLIP=qwen_2.5_vl_7b_fp8_scaled.safetensors
+COMFYUI_QWEN_DISTILL_CLIP_TYPE=qwen_image
+COMFYUI_QWEN_DISTILL_CLIP_DEVICE=default
+COMFYUI_QWEN_DISTILL_UNET_WEIGHT_DTYPE=default
+COMFYUI_QWEN_DISTILL_STEPS=10
+COMFYUI_QWEN_DISTILL_CFG=1
+COMFYUI_QWEN_DISTILL_SAMPLER=res_multistep
+COMFYUI_QWEN_DISTILL_SCHEDULER=simple
+COMFYUI_QWEN_DISTILL_DENOISE=1
+COMFYUI_QWEN_DISTILL_WIDTH=1328
+COMFYUI_QWEN_DISTILL_HEIGHT=1328
+COMFYUI_QWEN_DISTILL_AURAFLOW_SHIFT=3
+COMFYUI_QWEN_DISTILL_NEGATIVE_PROMPT=
+```
+- If `COMFYUI_QWEN_DISTILL_WORKFLOW_PATH` is empty, the app uses built-in workflow defaults extracted from ComfyUI blueprint `image_qwen_image_distill`.
+- If you provide a custom path, it must be Comfy API JSON (`Workflow -> Export API`), not UI graph JSON.
+
+Node usage rule:
+- `input.image` generation supports `Qwen-Distill` and `Z-Image-Turbo`.
+- `Qwen-Image-Edit` is available as dedicated model node: `model.qwen_image_edit` (requires `image`, supports optional `image2`/`image3` references and turbo mode).
+
+Security recommendation:
+- Keep ComfyUI private/internal only (no public ingress).
+- Browser must never call ComfyUI directly.
+
+Runtime modes:
+- `COMFYUI_MODE=on_demand` (default): worker auto-starts ComfyUI for Comfy nodes and auto-stops it after `COMFYUI_ON_DEMAND_IDLE_MS`.
+- `COMFYUI_MODE=always_on`: keep ComfyUI running as a managed service (`bash scripts/dev-stack.sh start|restart` will start it when `COMFYUI_ENABLED=true`).
 
 ## Common Troubleshooting
 ### `curl: (1) Received HTTP/0.9 when not allowed` on MinIO health URL

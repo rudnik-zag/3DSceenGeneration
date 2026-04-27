@@ -72,7 +72,7 @@ const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "model.sam3d_objects": "CustomSceneGen",
   "pipeline.scene_generation": "SceneGeneration",
   "model.qwen_vl": "Qwen-VL",
-  "model.qwen_image_edit": "Flux 2",
+  "model.qwen_image_edit": "Qwen Image Edit",
   "model.texturing": "Texturing",
   "geo.depth_estimation": "Depth",
   "geo.pointcloud_from_depth": "Points",
@@ -163,6 +163,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
+  const isQwenImageEditNode = nodeType === "model.qwen_image_edit";
   const isSam2Node = nodeType === "model.sam2";
   const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
@@ -175,7 +176,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
   const inputImageModel =
     isInputImageNode && typeof data.params?.generatorModel === "string"
-      ? data.params.generatorModel
+      ? data.params.generatorModel === "Qwen-Image-Edit"
+        ? "Qwen-Distill"
+        : data.params.generatorModel
       : "";
   const inputImagePrompt =
     isInputImageNode && typeof data.params?.prompt === "string"
@@ -240,6 +243,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const tag = modelTagMap[nodeType];
   const dinoPrompt = isGroundingDinoNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
+  const qwenImageEditPrompt =
+    isQwenImageEditNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
   const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
@@ -641,6 +646,18 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         </div>
       ) : null}
 
+      {isQwenImageEditNode ? (
+        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+          <p className="text-[10px] text-zinc-400">Edit prompt</p>
+          <textarea
+            className="nodrag min-h-[68px] w-full resize-y rounded-md border border-[#555] bg-[#1f1f1f] px-2 py-1.5 text-[10px] text-[#d7d7d7] outline-none"
+            value={qwenImageEditPrompt}
+            onChange={(event) => data.onUpdateParam?.(id, "prompt", event.target.value)}
+            placeholder="Describe the edit to apply..."
+          />
+        </div>
+      ) : null}
+
       {isInputImageNode ? (
         <div className="mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-1">
           <div className="mb-1 grid grid-cols-2 gap-1">
@@ -661,7 +678,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               onClick={() => {
                 data.onUpdateParam?.(id, "sourceMode", "generate");
                 if (!inputImageModel) {
-                  data.onUpdateParam?.(id, "generatorModel", "Z-Image-Turbo");
+                  data.onUpdateParam?.(id, "generatorModel", "Qwen-Distill");
                 }
               }}
               className={cn(
@@ -679,9 +696,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             <div className="space-y-1">
               <select
                 className="nodrag h-7 w-full rounded-md border border-white/10 bg-black/35 px-2 text-[10px] text-zinc-100 outline-none"
-                value={inputImageModel || "Z-Image-Turbo"}
+                value={inputImageModel || "Qwen-Distill"}
                 onChange={(event) => data.onUpdateParam?.(id, "generatorModel", event.target.value)}
               >
+                <option value="Qwen-Distill">Qwen-Distill</option>
                 <option value="Z-Image-Turbo">Z-Image-Turbo</option>
               </select>
               <input
@@ -754,7 +772,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 <div className="absolute inset-0 grid place-items-center text-center">
                   <div>
                     <p className="text-[11px] font-medium text-emerald-100">Generating image...</p>
-                    <p className="text-[10px] text-zinc-300">{inputImageModel || "Z-Image-Turbo"}</p>
+                    <p className="text-[10px] text-zinc-300">{inputImageModel || "Qwen-Distill"}</p>
                   </div>
                 </div>
               </div>
@@ -800,7 +818,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           </div>
           <p className="mt-1.5 truncate text-[11px] text-zinc-300">
             {isImageGenerationNode
-              ? `${inputImageModel || "Z-Image-Turbo"}${inputImagePrompt ? ` • ${inputImagePrompt}` : ""}`
+              ? `${inputImageModel || "Qwen-Distill"}${inputImagePrompt ? ` • ${inputImagePrompt}` : ""}`
               : typeof data.params?.filename === "string" && data.params.filename.length > 0
               ? data.params.filename
               : effectiveArtifactKind

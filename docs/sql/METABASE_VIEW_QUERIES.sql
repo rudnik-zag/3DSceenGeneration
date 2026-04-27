@@ -89,3 +89,22 @@ select
 from analytics.v_token_transactions_daily
 group by day, source
 order by day desc, source asc;
+
+-- QV9) Step timeline per run (intuitive step code + label)
+select
+  run_id,
+  run_label,
+  step_sequence,
+  step_code,
+  step_label,
+  node_type,
+  step_status,
+  duration_ms,
+  cache_hit,
+  error_message,
+  created_at
+from analytics.v_run_step_timeline
+where 1 = 1
+  [[and project_id = {{project_id}}]]
+  [[and run_id = {{run_id}}]]
+order by created_at desc, step_sequence asc;

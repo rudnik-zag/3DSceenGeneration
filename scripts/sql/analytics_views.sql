@@ -6,6 +6,7 @@ drop view if exists analytics.v_token_transactions_daily;
 drop view if exists analytics.v_usage_daily;
 drop view if exists analytics.v_node_error_hotspots;
 drop view if exists analytics.v_node_type_daily;
+drop view if exists analytics.v_run_step_timeline;
 drop view if exists analytics.v_run_facts;
 drop view if exists analytics.v_project_overview;
 drop view if exists analytics.v_user_summary;
@@ -152,6 +153,8 @@ select
   r."id" as run_id,
   r."projectId" as project_id,
   p."name" as project_name,
+  r."runNumber" as run_number,
+  concat('run_', lpad(r."runNumber"::text, 4, '0')) as run_label,
   r."graphId" as graph_id,
   r."createdBy" as created_by_user_id,
   coalesce(u."name", u."email", 'unknown') as created_by_user_label,
@@ -168,6 +171,34 @@ select
 from "Run" r
 join "Project" p on p."id" = r."projectId"
 left join "User" u on u."id" = r."createdBy";
+
+create view analytics.v_run_step_timeline as
+select
+  rs."id" as run_step_id,
+  rs."runId" as run_id,
+  r."runNumber" as run_number,
+  concat('run_', lpad(r."runNumber"::text, 4, '0')) as run_label,
+  rs."projectId" as project_id,
+  p."name" as project_name,
+  rs."graphId" as graph_id,
+  rs.sequence as step_sequence,
+  coalesce(nullif(rs."stepCode", ''), upper(replace(replace(rs."nodeType", '.', '_'), '-', '_'))) as step_code,
+  coalesce(nullif(rs."stepLabel", ''), rs."nodeType") as step_label,
+  rs."nodeType" as node_type,
+  rs."nodeId" as node_id,
+  rs.attempt as attempt,
+  rs.status::text as step_status,
+  rs."cacheHit" as cache_hit,
+  rs."durationMs" as duration_ms,
+  rs."inputSummary" as input_summary,
+  rs."outputSummary" as output_summary,
+  rs."errorMessage" as error_message,
+  rs."startedAt" as started_at,
+  rs."finishedAt" as finished_at,
+  rs."createdAt" as created_at
+from "RunStep" rs
+join "Run" r on r."id" = rs."runId"
+join "Project" p on p."id" = rs."projectId";
 
 create view analytics.v_node_type_daily as
 select

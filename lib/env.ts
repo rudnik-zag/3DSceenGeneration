@@ -15,6 +15,19 @@ for (const key of requiredServerVars) {
   }
 }
 
+function parseCsvList(raw: string | undefined) {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+}
+
+function parseBillingProvider(raw: string | undefined) {
+  const normalized = (raw ?? "stripe").trim().toLowerCase();
+  return normalized === "mock" ? "mock" : "stripe";
+}
+
 export const env = {
   DATABASE_URL: process.env.DATABASE_URL ?? "",
   AUTH_SECRET: process.env.AUTH_SECRET ?? "",
@@ -44,7 +57,9 @@ export const env = {
   SIGNED_URL_WINDOW_SEC: Number(process.env.SIGNED_URL_WINDOW_SEC ?? 60),
   SIGNED_URL_TTL_SEC: Number(process.env.SIGNED_URL_TTL_SEC ?? 120),
   SIGNED_URL_MAX_TTL_SEC: Number(process.env.SIGNED_URL_MAX_TTL_SEC ?? 300),
+  BILLING_PROVIDER: parseBillingProvider(process.env.BILLING_PROVIDER),
   BILLING_ENFORCEMENT_ENABLED: process.env.BILLING_ENFORCEMENT_ENABLED !== "false",
+  BILLING_ADMIN_PRO_EMAILS: parseCsvList(process.env.BILLING_ADMIN_PRO_EMAILS),
   BILLING_CHECKOUT_LIMIT: Number(process.env.BILLING_CHECKOUT_LIMIT ?? 20),
   BILLING_CHECKOUT_WINDOW_SEC: Number(process.env.BILLING_CHECKOUT_WINDOW_SEC ?? 60),
   BILLING_WEBHOOK_LIMIT: Number(process.env.BILLING_WEBHOOK_LIMIT ?? 240),

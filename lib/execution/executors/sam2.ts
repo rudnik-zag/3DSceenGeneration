@@ -785,14 +785,18 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
     throw new Error("Requires ObjectDetection descriptor JSON input.");
   }
 
+  const runFolderSegment = ctx.runFolderLabel ?? ctx.runId;
+  const stepFolderSegment = ctx.stepFolderLabel ?? ctx.nodeId;
+  const attemptSegment = `attempt-${String(ctx.attempt ?? 1).padStart(2, "0")}`;
   const nodeOutputRoot = path.join(
     getLocalStorageRoot(),
     "projects",
     ctx.projectSlug || ctx.projectId,
     "runs",
-    ctx.runId,
-    "nodes",
-    ctx.nodeId,
+    runFolderSegment,
+    "steps",
+    stepFolderSegment,
+    attemptSegment,
     "sam2"
   );
   await fs.mkdir(nodeOutputRoot, { recursive: true });

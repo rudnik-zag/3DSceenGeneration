@@ -4,6 +4,7 @@ import path from "path";
 
 import { requireArtifactAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
+import { formatRunFolderLabel } from "@/lib/runs/numbering";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
@@ -33,19 +34,41 @@ function getLocalStorageRoot() {
 
 function buildTransformsFilePath(input: {
   projectSlug: string;
-  runId: string;
-  nodeId: string;
+  runLabel: string;
+  stepLabel: string;
+  attempt: number;
 }) {
+  const attemptSegment = `attempt-${String(Math.max(1, Math.floor(input.attempt))).padStart(2, "0")}`;
   return path.join(
     getLocalStorageRoot(),
     "projects",
     input.projectSlug,
     "runs",
-    input.runId,
-    "nodes",
-    input.nodeId,
+    input.runLabel,
+    "steps",
+    input.stepLabel,
+    attemptSegment,
     "viewer_transforms.json"
   );
+}
+
+function sanitizeStorageSegment(value: string, fallback: string) {
+  const normalized = value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function toStepFolderLabel(input: {
+  sequence: number;
+  stepCode: string;
+}) {
+  const sequence = String(Math.max(1, Math.floor(input.sequence))).padStart(2, "0");
+  const stepCodeSlug = sanitizeStorageSegment(input.stepCode.toLowerCase().replace(/_/g, "-"), "step");
+  return `${sequence}-${stepCodeSlug}`;
 }
 
 function isNumberTuple(value: unknown, length: number) {
@@ -88,7 +111,14 @@ async function resolveContext(artifactId: string) {
       project: {
         select: {
           id: true,
-          name: true
+          name: true,
+          slug: true
+        }
+      },
+      run: {
+        select: {
+          id: true,
+          runNumber: true
         }
       }
     }
@@ -101,8 +131,25 @@ async function resolveContext(artifactId: string) {
   }
 
   const projectSlug = resolveProjectStorageSlug({
+    projectSlug: artifact.project.slug,
     projectName: artifact.project.name,
     projectId: artifact.project.id
+  });
+  const runLabel = formatRunFolderLabel(artifact.run.runNumber);
+  const step = await prisma.runStep.findFirst({
+    where: {
+      runId: artifact.runId,
+      nodeId: artifact.nodeId
+    },
+    orderBy: [{ sequence: "asc" }, { createdAt: "asc" }],
+    select: {
+      sequence: true,
+      stepCode: true
+    }
+  });
+  const stepLabel = toStepFolderLabel({
+    sequence: step?.sequence ?? 1,
+    stepCode: step?.stepCode && step.stepCode.length > 0 ? step.stepCode : artifact.nodeId
   });
 
   return {
@@ -110,8 +157,9 @@ async function resolveContext(artifactId: string) {
     projectSlug,
     transformsPath: buildTransformsFilePath({
       projectSlug,
-      runId: artifact.runId,
-      nodeId: artifact.nodeId
+      runLabel,
+      stepLabel,
+      attempt: 1
     })
   };
 }

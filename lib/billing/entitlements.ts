@@ -1,6 +1,7 @@
 import { SubscriptionPlan, SubscriptionStatus } from "@prisma/client";
 
 import { prisma } from "@/lib/db";
+import { env } from "@/lib/env";
 import { HttpError } from "@/lib/security/errors";
 import { PlanEntitlements, SubscriptionPlanKey, getPlanDefinition, planOrder } from "@/lib/billing/plans";
 
@@ -24,6 +25,19 @@ function effectivePlanFromSubscription(input: {
     return "Free";
   }
   return toPlanKey(input.plan);
+}
+
+function applyAdminPlanOverride(input: {
+  plan: SubscriptionPlanKey;
+  email: string | null;
+}) {
+  const email = input.email?.trim().toLowerCase() ?? "";
+  if (!email) return input.plan;
+  if (!env.BILLING_ADMIN_PRO_EMAILS.includes(email)) return input.plan;
+
+  const currentRank = planOrder.indexOf(input.plan);
+  const proRank = planOrder.indexOf("Pro");
+  return currentRank >= proRank ? input.plan : "Pro";
 }
 
 export interface BillingState {
@@ -150,16 +164,52 @@ async function ensureWalletForUser(input: {
         }
       }
     });
+  } else if (wallet.monthlyAllowance < entitlements.monthlyTokenAllowance) {
+    // Plan-level upgrade inside the same billing period (for example admin override to Pro).
+    // Raise the monthly allowance immediately and top up remaining monthly tokens to the new cap once.
+    const nextAllowance = entitlements.monthlyTokenAllowance;
+    const topUpAmount = Math.max(0, nextAllowance - wallet.monthlyTokensRemaining);
+
+    wallet = await prisma.tokenWallet.update({
+      where: { id: wallet.id },
+      data: {
+        monthlyAllowance: nextAllowance,
+        monthlyTokensRemaining: Math.max(wallet.monthlyTokensRemaining, nextAllowance)
+      }
+    });
+
+    if (topUpAmount > 0) {
+      await prisma.tokenTransaction.create({
+        data: {
+          userId: input.userId,
+          type: "credit",
+          source: "admin",
+          amount: topUpAmount,
+          description: `Allowance top-up (${input.plan})`,
+          metadata: {
+            reason: "plan_upgrade_mid_period",
+            plan: input.plan
+          }
+        }
+      });
+    }
   }
 
   return wallet;
 }
 
 export async function resolveBillingStateForUser(userId: string): Promise<BillingState> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true }
+  });
   const subscription = await ensureSubscriptionForUser(userId);
-  const effectivePlan = effectivePlanFromSubscription({
-    plan: subscription.plan,
-    status: subscription.status
+  const effectivePlan = applyAdminPlanOverride({
+    plan: effectivePlanFromSubscription({
+      plan: subscription.plan,
+      status: subscription.status
+    }),
+    email: user?.email ?? null
   });
   const entitlements = getPlanDefinition(effectivePlan).entitlements;
   const wallet = await ensureWalletForUser({

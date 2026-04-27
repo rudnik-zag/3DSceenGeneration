@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut } from "next-auth/react";
 
+import { TokenStatusChip } from "@/components/billing/token-status-chip";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,8 @@ export function AppShell({
               </span>
             </Link>
           </div>
+
+          <TokenStatusChip />
 
           <div className="flex items-center gap-2">
             <span className="hidden text-xs text-zinc-400 md:inline">{currentUserLabel}</span>

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuthUser } from "@/lib/auth/session";
 import { getTokenPackByKey } from "@/lib/billing/plans";
 import { createStripeCheckoutSession, getAppBaseUrl, isStripeConfigured } from "@/lib/billing/stripe";
+import { creditTokenPack } from "@/lib/billing/usage";
 import { env } from "@/lib/env";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { HttpError, toApiErrorResponse } from "@/lib/security/errors";
@@ -31,6 +32,30 @@ export async function POST(req: NextRequest) {
     const pack = getTokenPackByKey(parsed.data.packKey);
     if (!pack) {
       throw new HttpError(404, "Token pack not found.", "token_pack_not_found");
+    }
+    const isMockBilling = env.BILLING_PROVIDER === "mock";
+    if (isMockBilling && process.env.NODE_ENV === "production") {
+      throw new HttpError(403, "Mock billing provider is disabled in production.", "billing_provider_forbidden");
+    }
+    if (isMockBilling) {
+      await creditTokenPack({
+        userId: user.id,
+        tokenAmount: pack.tokens,
+        description: `Mock token pack purchase (${pack.title})`,
+        metadata: {
+          packKey: pack.key,
+          mock: true
+        }
+      });
+      await logAuditEventFromRequest(req, {
+        action: "token_pack_credit_mock",
+        resourceType: "token_pack",
+        resourceId: pack.key,
+        userId: user.id
+      });
+      return NextResponse.json({
+        url: `/billing?checkout=success&type=token_pack&pack=${encodeURIComponent(pack.key)}`
+      });
     }
     if (!pack.stripePriceId) {
       throw new HttpError(
@@ -76,4 +101,3 @@ export async function POST(req: NextRequest) {
     return toApiErrorResponse(error, "Failed to create token pack checkout");
   }
 }
-
