@@ -26,7 +26,7 @@ export function ProjectLayoutShell({ projectName, counts, nav, children }: Proje
     return (
       <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden">
         <div className="border-b border-border/70 panel-blur px-3 py-2 md:px-4">
-          <div className="flex items-center justify-between gap-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <Link
                 href="/app"
@@ -39,20 +39,9 @@ export function ProjectLayoutShell({ projectName, counts, nav, children }: Proje
                 <h1 className="truncate text-sm font-semibold text-white md:text-base">{projectName}</h1>
               </div>
             </div>
-
-            <div className="hidden items-center gap-2 sm:flex">
-              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
-                {counts.graphs} graphs
-              </Badge>
-              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
-                {counts.runs} runs
-              </Badge>
-              <Badge variant="secondary" className="rounded-full studio-chip text-[11px]">
-                {counts.artifacts} artifacts
-              </Badge>
-            </div>
+            <ProjectNav items={nav} variant="underline" className="shrink-0 justify-self-center" />
+            <div />
           </div>
-          <ProjectNav items={nav} variant="underline" className="mt-1.5" />
         </div>
 
         <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
