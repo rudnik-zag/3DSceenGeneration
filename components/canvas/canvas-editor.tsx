@@ -23,12 +23,8 @@ import {
   Map as MapIcon,
   Minus,
   Play,
-  Save,
-  Share2,
   SlidersHorizontal,
-  Square,
   WandSparkles,
-  Zap,
   ZoomIn
 } from "lucide-react";
 
@@ -87,7 +83,6 @@ interface NodeArtifact {
 
 interface CanvasEditorProps {
   projectId: string;
-  projectName: string;
   initialGraph: GraphDocument;
   versions: GraphVersion[];
   nodeArtifacts: NodeArtifact[];
@@ -517,7 +512,7 @@ function dispatchTokenStatus(detail: {
   window.dispatchEvent(new CustomEvent("billing:token-status", { detail }));
 }
 
-function GraphCanvasInner({ projectId, projectName, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
+function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
   const wrappedNodes = migratedInitialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
@@ -2624,57 +2619,19 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
       <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
         <div className="pointer-events-none absolute left-3 right-3 top-3 z-30">
           <div className="pointer-events-auto flex items-center gap-2 overflow-x-auto rounded-2xl studio-toolbar p-2">
-          <div className="inline-flex shrink-0 items-center rounded-xl border border-border/70 bg-background/40 p-1 text-xs">
-            <Link
-              href={`/app/p/${projectId}/canvas`}
-              className="rounded-lg bg-primary/15 px-2.5 py-1 text-primary"
-            >
-              Canvas
-            </Link>
-            <Link
-              href={`/app/p/${projectId}/runs`}
-              className="rounded-lg px-2.5 py-1 text-zinc-300 motion-fast hover:bg-white/10 hover:text-white"
-            >
-              Runs
-            </Link>
-            <Link
-              href={`/app/p/${projectId}/viewer`}
-              className="rounded-lg px-2.5 py-1 text-zinc-300 motion-fast hover:bg-white/10 hover:text-white"
-            >
-              Viewer
-            </Link>
-          </div>
-          <Badge className="shrink-0 rounded-full studio-chip text-[11px]" variant="secondary">
-            {projectName}
-          </Badge>
-          <Button size="sm" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => startRun()} disabled={isStartingRun}>
-            <Play className="mr-1 h-4 w-4" /> Run workflow
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs lg:inline-flex"
-            onClick={() => startRun(selectedNode?.id)}
-            disabled={isStartingRun || !selectedNode || !canNodeRun(selectedNode)}
-          >
-            <Zap className="mr-1 h-4 w-4" /> Run from selection
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={cancelRun} disabled={!activeRunId}>
-            <Square className="mr-1 h-4 w-4" /> Stop
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => void saveGraph()} disabled={isSaving}>
-            <Save className="mr-1 h-4 w-4" /> {isSaving ? "Saving..." : "Save"}
-          </Button>
-          {isStartingRun || activeRunId ? (
-            <Badge
-              className={`shrink-0 rounded-full border border-emerald-400/35 bg-emerald-500/10 text-[11px] text-emerald-200 ${
-                activeRunId ? "running-pulse" : ""
-              }`}
-              variant="secondary"
-            >
-              {isStartingRun ? "Starting run..." : "Run active"}
-            </Badge>
-          ) : null}
+            <Button size="sm" className="h-8 shrink-0 rounded-lg px-2.5 text-xs" onClick={() => startRun()} disabled={isStartingRun}>
+              <Play className="mr-1 h-4 w-4" /> Run workflow
+            </Button>
+            {isStartingRun || activeRunId ? (
+              <Badge
+                className={`shrink-0 rounded-full border border-emerald-400/35 bg-emerald-500/10 text-[11px] text-emerald-200 ${
+                  activeRunId ? "running-pulse" : ""
+                }`}
+                variant="secondary"
+              >
+                {isStartingRun ? "Starting run..." : "Run active"}
+              </Badge>
+            ) : null}
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -2683,6 +2640,34 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+              <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
+              <DropdownMenuItem
+                disabled={isSaving}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  void saveGraph();
+                }}
+              >
+                {isSaving ? "Saving..." : "Save graph"}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!activeRunId}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  cancelRun();
+                }}
+              >
+                Stop active run
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  shareProject();
+                }}
+              >
+                Share project
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Selection</DropdownMenuLabel>
               <DropdownMenuItem
                 disabled={!hasNodeSelection && !hasEdgeSelection}
@@ -2745,9 +2730,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button size="sm" variant="outline" className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs xl:inline-flex" onClick={shareProject}>
-            <Share2 className="mr-1 h-4 w-4" /> Share
-          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button size="sm" variant="outline" className="hidden h-8 shrink-0 rounded-lg px-2.5 text-xs xl:inline-flex">
@@ -2835,11 +2817,6 @@ function GraphCanvasInner({ projectId, projectName, initialGraph, versions: init
         </div>
 
         <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
-          <div className="pointer-events-none absolute left-3 top-[84px] z-20 rounded-md border border-[#4b4b4b] bg-[#2a2a2a]/95 px-3 py-2">
-            <p className="text-[11px] font-medium text-zinc-200">{projectName}</p>
-            <p className="text-[10px] text-zinc-500">Workspace canvas</p>
-          </div>
-
           <div
             data-no-connect-menu="true"
             className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-xl border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2 shadow-[0_12px_35px_rgba(0,0,0,0.45)]"

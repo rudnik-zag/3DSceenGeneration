@@ -12,8 +12,7 @@ export default async function CanvasPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const access = await requirePageProjectAccess(projectId, "viewer");
-  const project = access.project;
+  await requirePageProjectAccess(projectId, "viewer");
 
   const versions = await prisma.graph.findMany({
     where: { projectId },
@@ -76,7 +75,6 @@ export default async function CanvasPage({
   return (
     <CanvasEditor
       projectId={projectId}
-      projectName={project.name}
       initialGraph={latest.graphJson as unknown as GraphDocument}
       versions={versions.map((v) => ({
         id: v.id,
