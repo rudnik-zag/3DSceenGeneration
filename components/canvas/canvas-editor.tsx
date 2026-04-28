@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import {
   addEdge,
   Background,
@@ -13,6 +21,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useViewport,
   useEdgesState,
   useNodesState
 } from "reactflow";
@@ -44,6 +53,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
@@ -119,6 +131,63 @@ interface NodeSearchMenuState {
   flowY: number;
   query: string;
   highlighted: number;
+}
+
+interface WorkflowTemplateNode {
+  id: string;
+  type: WorkflowNodeType;
+  position: { x: number; y: number };
+  data: {
+    label: string;
+    params: Record<string, unknown>;
+    uiScale?: NodeUiScale;
+  };
+}
+
+interface WorkflowTemplateEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string;
+  targetHandle?: string;
+}
+
+interface WorkflowTemplate {
+  id: string;
+  name: string;
+  nodes: WorkflowTemplateNode[];
+  edges: WorkflowTemplateEdge[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface WorkflowGroupInstance {
+  id: string;
+  templateId: string;
+  name: string;
+  nodeIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface WorkflowLibraryPayload {
+  templates: WorkflowTemplate[];
+  groups: WorkflowGroupInstance[];
+}
+
+interface WorkflowFrameDragState {
+  groupId: string;
+  startClientX: number;
+  startClientY: number;
+  moved: boolean;
+  initialNodePositions: Map<string, { x: number; y: number }>;
+}
+
+interface WorkflowFrameMenuState {
+  x: number;
+  y: number;
+  frameId: string;
+  templateId: string;
 }
 
 interface ClipboardSnapshotNode {
@@ -313,6 +382,123 @@ function resolveSelectedOutputArtifacts(
       : entries[0];
   }
   return selected;
+}
+
+function createWorkflowId(prefix: string) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function parseWorkflowLibraryPayload(graph: unknown): WorkflowLibraryPayload {
+  const candidate = graph as { workflowLibrary?: unknown } | null;
+  const raw = candidate?.workflowLibrary as { templates?: unknown; groups?: unknown } | undefined;
+  const rawTemplates = Array.isArray(raw?.templates) ? raw.templates : [];
+  const rawGroups = Array.isArray(raw?.groups) ? raw.groups : [];
+
+  const templates: WorkflowTemplate[] = rawTemplates
+    .map((item) => {
+      const value = item as Partial<WorkflowTemplate> | null;
+      if (!value || typeof value !== "object") return null;
+      if (typeof value.id !== "string" || typeof value.name !== "string") return null;
+      if (!Array.isArray(value.nodes) || !Array.isArray(value.edges)) return null;
+      const nodes = value.nodes
+        .filter((node): node is WorkflowTemplateNode => {
+          return Boolean(
+            node &&
+              typeof node.id === "string" &&
+              typeof node.type === "string" &&
+              node.position &&
+              typeof node.position.x === "number" &&
+              typeof node.position.y === "number" &&
+              node.data &&
+              typeof node.data.label === "string" &&
+              node.data.params &&
+              typeof node.data.params === "object"
+          );
+        })
+        .map((node) => ({
+          id: node.id,
+          type: node.type,
+          position: { x: node.position.x, y: node.position.y },
+          data: {
+            label: node.data.label,
+            params: node.data.params,
+            uiScale: node.data.uiScale
+          }
+        })) as WorkflowTemplateNode[];
+      const edges = value.edges
+        .filter((edge): edge is WorkflowTemplateEdge => {
+          return Boolean(
+            edge &&
+              typeof edge.id === "string" &&
+              typeof edge.source === "string" &&
+              typeof edge.target === "string"
+          );
+        })
+        .map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle
+        })) as WorkflowTemplateEdge[];
+      return {
+        id: value.id,
+        name: value.name,
+        nodes,
+        edges,
+        createdAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
+        updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString()
+      } satisfies WorkflowTemplate;
+    })
+    .filter((template): template is WorkflowTemplate => Boolean(template));
+
+  const groups: WorkflowGroupInstance[] = rawGroups
+    .map((item) => {
+      const value = item as Partial<WorkflowGroupInstance> | null;
+      if (!value || typeof value !== "object") return null;
+      if (typeof value.id !== "string" || typeof value.name !== "string" || typeof value.templateId !== "string") return null;
+      if (!Array.isArray(value.nodeIds)) return null;
+      const nodeIds = value.nodeIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+      return {
+        id: value.id,
+        templateId: value.templateId,
+        name: value.name,
+        nodeIds,
+        createdAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
+        updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString()
+      } satisfies WorkflowGroupInstance;
+    })
+    .filter((group): group is WorkflowGroupInstance => Boolean(group));
+
+  return { templates, groups };
+}
+
+function areSelectedNodesConnected(nodeIds: string[], edges: Edge[]) {
+  if (nodeIds.length <= 1) return true;
+  const nodeSet = new Set(nodeIds);
+  const adjacency = new Map<string, Set<string>>();
+  for (const id of nodeIds) {
+    adjacency.set(id, new Set());
+  }
+  for (const edge of edges) {
+    if (!nodeSet.has(edge.source) || !nodeSet.has(edge.target)) continue;
+    adjacency.get(edge.source)?.add(edge.target);
+    adjacency.get(edge.target)?.add(edge.source);
+  }
+  const visited = new Set<string>();
+  const stack = [nodeIds[0]];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+    const neighbors = adjacency.get(current) ?? new Set<string>();
+    for (const neighbor of neighbors) {
+      if (!visited.has(neighbor)) {
+        stack.push(neighbor);
+      }
+    }
+  }
+  return visited.size === nodeIds.length;
 }
 
 function mergeOutputArtifactHistory(
@@ -517,7 +703,9 @@ function dispatchTokenStatus(detail: {
 
 function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
   const reactFlow = useReactFlow();
+  const viewport = useViewport();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
+  const initialWorkflowLibrary = useMemo(() => parseWorkflowLibraryPayload(initialGraph), [initialGraph]);
   const wrappedNodes = migratedInitialGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts));
   const wrappedEdges = migratedInitialGraph.edges.map((edge) => withStyledEdge(edge as Edge));
 
@@ -533,6 +721,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const [runLogs, setRunLogs] = useState("");
   const [showAdvancedInspector, setShowAdvancedInspector] = useState(false);
   const [showToolbarActions, setShowToolbarActions] = useState(false);
+  const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>(initialWorkflowLibrary.templates);
+  const [workflowGroups, setWorkflowGroups] = useState<WorkflowGroupInstance[]>(initialWorkflowLibrary.groups);
+  const [activeWorkflowTemplateId, setActiveWorkflowTemplateId] = useState<string | null>(
+    initialWorkflowLibrary.templates[0]?.id ?? null
+  );
+  const [activeWorkflowGroupId, setActiveWorkflowGroupId] = useState<string | null>(
+    initialWorkflowLibrary.groups[0]?.id ?? null
+  );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedArtifactPreview, setSelectedArtifactPreview] = useState<{ previewUrl: string | null; jsonSnippet: string | null }>({
     previewUrl: null,
@@ -545,9 +741,11 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const [paneMenu, setPaneMenu] = useState<PaneContextMenuState | null>(null);
   const [nodeMenu, setNodeMenu] = useState<NodeContextMenuState | null>(null);
   const [nodeSearchMenu, setNodeSearchMenu] = useState<NodeSearchMenuState | null>(null);
+  const [frameMenu, setFrameMenu] = useState<WorkflowFrameMenuState | null>(null);
   const [pendingConnect, setPendingConnect] = useState<PendingConnectState | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
   const [showMiniMap, setShowMiniMap] = useState(true);
+  const [editingWorkflowGroupId, setEditingWorkflowGroupId] = useState<string | null>(null);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runNodeRef = useRef<(nodeId: string) => void>(() => {});
   const uploadNodeRef = useRef<(nodeId: string, file: File) => void>(() => {});
@@ -557,11 +755,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const paneMenuRef = useRef<HTMLDivElement>(null);
   const nodeMenuRef = useRef<HTMLDivElement>(null);
   const nodeSearchMenuRef = useRef<HTMLDivElement>(null);
+  const frameMenuRef = useRef<HTMLDivElement>(null);
   const nodeSearchInputRef = useRef<HTMLInputElement | null>(null);
   const clipboardRef = useRef<ClipboardSnapshot | null>(null);
   const pasteSerialRef = useRef(0);
   const lastPointerRef = useRef<{ clientX: number; clientY: number; flowX: number; flowY: number } | null>(null);
   const suppressNextPaneClickRef = useRef(false);
+  const workflowFrameDragRef = useRef<WorkflowFrameDragState | null>(null);
+  const workflowFrameDragCleanupRef = useRef<(() => void) | null>(null);
   const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didHydrateDraftRef = useRef(false);
   const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
@@ -569,6 +770,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
   const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
+  const selectedNodeIds = useMemo(() => nodes.filter((node) => node.selected).map((node) => node.id), [nodes]);
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const activeWorkflowTemplate = useMemo(
+    () => workflowTemplates.find((template) => template.id === activeWorkflowTemplateId) ?? null,
+    [activeWorkflowTemplateId, workflowTemplates]
+  );
+  const activeWorkflowGroup = useMemo(
+    () => workflowGroups.find((group) => group.id === activeWorkflowGroupId) ?? null,
+    [activeWorkflowGroupId, workflowGroups]
+  );
   const orderedCategories = useMemo(() => {
     const known = new Set<string>(preferredCategoryOrder);
     const dynamicCategories = Object.keys(nodeGroups).filter((category) => !known.has(category));
@@ -760,7 +971,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   }, []);
 
   useEffect(() => {
-    if (!paneMenu && !nodeMenu && !nodeSearchMenu) return;
+    if (!paneMenu && !nodeMenu && !nodeSearchMenu && !frameMenu) return;
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as globalThis.Node | null;
@@ -775,9 +986,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       if ((target && nodeSearchMenuRef.current?.contains(target)) || pathContains(nodeSearchMenuRef.current)) {
         return;
       }
+      if ((target && frameMenuRef.current?.contains(target)) || pathContains(frameMenuRef.current)) {
+        return;
+      }
       setPaneMenu(null);
       setNodeMenu(null);
       setNodeSearchMenu(null);
+      setFrameMenu(null);
     };
 
     const onEscape = (event: KeyboardEvent) => {
@@ -785,6 +1000,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         setPaneMenu(null);
         setNodeMenu(null);
         setNodeSearchMenu(null);
+        setFrameMenu(null);
       }
     };
 
@@ -794,7 +1010,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onEscape);
     };
-  }, [nodeMenu, nodeSearchMenu, paneMenu]);
+  }, [frameMenu, nodeMenu, nodeSearchMenu, paneMenu]);
 
   useEffect(() => {
     if (!paneMenu) {
@@ -842,6 +1058,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       const graph = parsed?.graph;
       if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
       const migratedGraph = migrateGraphDocument(graph);
+      const restoredWorkflowLibrary = parseWorkflowLibraryPayload(graph);
 
       const restoredNodes = migratedGraph.nodes.map((node) => {
         // Always use fresh artifact-backed URLs. Signed preview URLs from local draft can be stale after restart.
@@ -851,6 +1068,11 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
       setNodes(restoredNodes);
       setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
+      setWorkflowTemplates(restoredWorkflowLibrary.templates);
+      setWorkflowGroups(restoredWorkflowLibrary.groups);
+      setActiveWorkflowTemplateId(restoredWorkflowLibrary.templates[0]?.id ?? null);
+      setActiveWorkflowGroupId(restoredWorkflowLibrary.groups[0]?.id ?? null);
+      setEditingWorkflowGroupId(null);
       const restoredPreset = restoredNodes[0]?.data.uiScale;
       if (restoredPreset === "compact" || restoredPreset === "balanced" || restoredPreset === "cinematic") {
         setNodeScalePreset(restoredPreset);
@@ -864,6 +1086,43 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   useEffect(() => {
     setShowAdvancedInspector(false);
   }, [selectedNode?.id]);
+
+  useEffect(() => {
+    setWorkflowGroups((prev) =>
+      prev
+        .map((group) => ({
+          ...group,
+          nodeIds: group.nodeIds.filter((nodeId) => nodeById.has(nodeId))
+        }))
+        .filter((group) => group.nodeIds.length > 0)
+    );
+  }, [nodeById]);
+
+  useEffect(() => {
+    if (activeWorkflowTemplateId && !workflowTemplates.some((template) => template.id === activeWorkflowTemplateId)) {
+      setActiveWorkflowTemplateId(workflowTemplates[0]?.id ?? null);
+    }
+  }, [activeWorkflowTemplateId, workflowTemplates]);
+
+  useEffect(() => {
+    if (activeWorkflowGroupId && !workflowGroups.some((group) => group.id === activeWorkflowGroupId)) {
+      setActiveWorkflowGroupId(workflowGroups[0]?.id ?? null);
+    }
+  }, [activeWorkflowGroupId, workflowGroups]);
+
+  useEffect(() => {
+    if (editingWorkflowGroupId && !workflowGroups.some((group) => group.id === editingWorkflowGroupId)) {
+      setEditingWorkflowGroupId(null);
+    }
+  }, [editingWorkflowGroupId, workflowGroups]);
+
+  useEffect(() => {
+    if (!activeWorkflowTemplateId) return;
+    const matchingGroup = workflowGroups.find((group) => group.templateId === activeWorkflowTemplateId);
+    if (matchingGroup) {
+      setActiveWorkflowGroupId(matchingGroup.id);
+    }
+  }, [activeWorkflowTemplateId, workflowGroups]);
 
   useEffect(() => {
     setInspectedJsonArtifactId(null);
@@ -1065,9 +1324,36 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       const id = `${nodeType}-${Date.now().toString(36)}`;
       const newNode = makeCanvasNode(nodeType, id, { x, y });
       setNodes((prev) => [...prev, newNode]);
+      if (editingWorkflowGroupId) {
+        const now = new Date().toISOString();
+        setWorkflowGroups((prev) =>
+          prev.map((group) => {
+            if (group.id !== editingWorkflowGroupId) return group;
+            if (group.nodeIds.includes(id)) return group;
+            const groupNodes = nodes.filter((node) => group.nodeIds.includes(node.id));
+            if (groupNodes.length === 0) return group;
+            const minX = Math.min(...groupNodes.map((node) => node.position.x));
+            const minY = Math.min(...groupNodes.map((node) => node.position.y));
+            const maxX = Math.max(...groupNodes.map((node) => node.position.x + (node.width ?? 260)));
+            const maxY = Math.max(...groupNodes.map((node) => node.position.y + (node.height ?? 160)));
+            const padding = 28;
+            const insideFrame =
+              x >= minX - padding &&
+              x <= maxX + padding &&
+              y >= minY - padding &&
+              y <= maxY + padding;
+            if (!insideFrame) return group;
+            return {
+              ...group,
+              nodeIds: [...group.nodeIds, id],
+              updatedAt: now
+            };
+          })
+        );
+      }
       return id;
     },
-    [makeCanvasNode, setNodes]
+    [editingWorkflowGroupId, makeCanvasNode, nodes, setNodes]
   );
 
   const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1244,6 +1530,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   const openPaneMenuAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
+      setFrameMenu(null);
       const rect = canvasPanelRef.current?.getBoundingClientRect();
       const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
 
@@ -1264,6 +1551,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   const openNodeSearchAtScreenPoint = useCallback(
     (clientX: number, clientY: number, flowOverride?: { x: number; y: number }) => {
+      setFrameMenu(null);
       const rect = canvasPanelRef.current?.getBoundingClientRect();
       const flow = flowOverride ?? reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
       if (!rect) {
@@ -1290,6 +1578,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       event.preventDefault();
       setNodeMenu(null);
       setNodeSearchMenu(null);
+      setFrameMenu(null);
       setPendingConnect(null);
       const flow = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
       lastPointerRef.current = { clientX: event.clientX, clientY: event.clientY, flowX: flow.x, flowY: flow.y };
@@ -1311,6 +1600,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         setNodeMenu(null);
         setNodeSearchMenu(null);
         setPendingConnect(null);
+        setFrameMenu(null);
         openPaneMenuAtScreenPoint(event.clientX, event.clientY);
         return;
       }
@@ -1318,6 +1608,10 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setNodeMenu(null);
       setNodeSearchMenu(null);
       setPendingConnect(null);
+      setFrameMenu(null);
+      setActiveWorkflowGroupId(null);
+      setActiveWorkflowTemplateId(null);
+      setEditingWorkflowGroupId(null);
     },
     [openPaneMenuAtScreenPoint]
   );
@@ -1329,6 +1623,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       if (target.closest(".react-flow__node")) return;
       setNodeMenu(null);
       setNodeSearchMenu(null);
+      setFrameMenu(null);
       openPaneMenuAtScreenPoint(event.clientX, event.clientY);
     },
     [openPaneMenuAtScreenPoint]
@@ -1347,6 +1642,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       event.preventDefault();
       setPaneMenu(null);
       setNodeSearchMenu(null);
+      setFrameMenu(null);
       setPendingConnect(null);
       setNodes((prev) =>
         prev.map((entry) => ({
@@ -1475,6 +1771,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         setPaneMenu(null);
         setNodeMenu(null);
         setNodeSearchMenu(null);
+        setFrameMenu(null);
         setPendingConnect(null);
         setNodes((prev) => {
           if (!prev.some((node) => node.selected)) return prev;
@@ -1594,6 +1891,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     nodes,
     openNodeSearchAtScreenPoint,
     paneMenu,
+    frameMenu,
     pasteClipboardAt,
     reactFlow,
     setEdges,
@@ -1693,6 +1991,315 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       toast({ title: "Workflow inserted", description: `${preset.label} starter added to canvas.` });
     },
     [nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes]
+  );
+
+  const buildWorkflowTemplateFromSelection = useCallback(
+    (templateName: string, nodeIds: string[]) => {
+      const selectedNodes = nodes.filter((node) => nodeIds.includes(node.id));
+      if (selectedNodes.length === 0) return null;
+
+      const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+      const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+      const templateNodeBySourceId = new Map<string, string>();
+      const templateNodes: WorkflowTemplateNode[] = selectedNodes.map((node, index) => {
+        const templateNodeId = `tn-${(index + 1).toString(36)}-${node.id.slice(0, 6)}`;
+        templateNodeBySourceId.set(node.id, templateNodeId);
+        return {
+          id: templateNodeId,
+          type: node.type as WorkflowNodeType,
+          position: {
+            x: node.position.x - minX,
+            y: node.position.y - minY
+          },
+          data: {
+            label: node.data.label,
+            params: node.data.params,
+            uiScale: node.data.uiScale ?? nodeScalePreset
+          }
+        };
+      });
+
+      const selectedNodeSet = new Set(nodeIds);
+      const templateEdges: WorkflowTemplateEdge[] = edges
+        .filter((edge) => selectedNodeSet.has(edge.source) && selectedNodeSet.has(edge.target))
+        .reduce<WorkflowTemplateEdge[]>((acc, edge, index) => {
+          const source = templateNodeBySourceId.get(edge.source);
+          const target = templateNodeBySourceId.get(edge.target);
+          if (!source || !target) return acc;
+          acc.push({
+            id: `te-${(index + 1).toString(36)}-${edge.id.slice(0, 6)}`,
+            source,
+            target,
+            sourceHandle: edge.sourceHandle ?? undefined,
+            targetHandle: edge.targetHandle ?? undefined
+          });
+          return acc;
+        }, []);
+
+      const now = new Date().toISOString();
+      return {
+        template: {
+          id: createWorkflowId("wf"),
+          name: templateName,
+          nodes: templateNodes,
+          edges: templateEdges,
+          createdAt: now,
+          updatedAt: now
+        } satisfies WorkflowTemplate
+      };
+    },
+    [edges, nodeScalePreset, nodes]
+  );
+
+  const createWorkflowGroupFromSelection = useCallback(
+    (templateId: string, name: string, nodeIds: string[]) => {
+      const now = new Date().toISOString();
+      return {
+        id: createWorkflowId("wfg"),
+        templateId,
+        name,
+        nodeIds,
+        createdAt: now,
+        updatedAt: now
+      } satisfies WorkflowGroupInstance;
+    },
+    []
+  );
+
+  const createWorkflowFromSelection = useCallback(() => {
+    if (selectedNodeIds.length === 0) {
+      toast({ title: "No nodes selected", description: "Select one or more connected nodes first." });
+      return;
+    }
+    if (!areSelectedNodesConnected(selectedNodeIds, edges)) {
+      toast({ title: "Selection must be connected", description: "Select only nodes that are connected to each other." });
+      return;
+    }
+    const suggestedName = `Workflow ${workflowTemplates.length + 1}`;
+    const rawName = window.prompt("Workflow name", suggestedName);
+    if (rawName === null) return;
+    const name = rawName.trim();
+    if (!name) {
+      toast({ title: "Name required", description: "Workflow name cannot be empty." });
+      return;
+    }
+    const built = buildWorkflowTemplateFromSelection(name, selectedNodeIds);
+    if (!built) return;
+    setWorkflowTemplates((prev) => [...prev, built.template]);
+    const group = createWorkflowGroupFromSelection(built.template.id, name, selectedNodeIds);
+    setWorkflowGroups((prev) => [...prev, group]);
+    setActiveWorkflowTemplateId(built.template.id);
+    setActiveWorkflowGroupId(group.id);
+    toast({ title: "Workflow created", description: `${name} saved and grouped on canvas.` });
+  }, [
+    buildWorkflowTemplateFromSelection,
+    createWorkflowGroupFromSelection,
+    edges,
+    selectedNodeIds,
+    workflowTemplates.length
+  ]);
+
+  const editActiveWorkflowFromSelection = useCallback(() => {
+    if (!activeWorkflowTemplate) {
+      toast({ title: "No workflow selected", description: "Choose a workflow first." });
+      return;
+    }
+    if (selectedNodeIds.length === 0) {
+      toast({ title: "No nodes selected", description: "Select connected nodes to update this workflow." });
+      return;
+    }
+    if (!areSelectedNodesConnected(selectedNodeIds, edges)) {
+      toast({ title: "Selection must be connected", description: "Selected nodes must be connected to each other." });
+      return;
+    }
+    const built = buildWorkflowTemplateFromSelection(activeWorkflowTemplate.name, selectedNodeIds);
+    if (!built) return;
+    const now = new Date().toISOString();
+    setWorkflowTemplates((prev) =>
+      prev.map((template) =>
+        template.id === activeWorkflowTemplate.id
+          ? {
+              ...template,
+              nodes: built.template.nodes,
+              edges: built.template.edges,
+              updatedAt: now
+            }
+          : template
+      )
+    );
+    if (activeWorkflowGroup) {
+      setWorkflowGroups((prev) =>
+        prev.map((group) =>
+          group.id === activeWorkflowGroup.id
+            ? {
+                ...group,
+                nodeIds: selectedNodeIds,
+                updatedAt: now
+              }
+            : group
+        )
+      );
+    }
+    toast({ title: "Workflow updated", description: `${activeWorkflowTemplate.name} now matches selected nodes.` });
+  }, [activeWorkflowGroup, activeWorkflowTemplate, buildWorkflowTemplateFromSelection, edges, selectedNodeIds]);
+
+  const renameActiveWorkflow = useCallback((templateId?: string) => {
+    const targetTemplate =
+      templateId != null
+        ? workflowTemplates.find((template) => template.id === templateId) ?? null
+        : activeWorkflowTemplate;
+    if (!targetTemplate) {
+      toast({ title: "No workflow selected", description: "Choose a workflow first." });
+      return;
+    }
+    const rawName = window.prompt("Rename workflow", targetTemplate.name);
+    if (rawName === null) return;
+    const name = rawName.trim();
+    if (!name) {
+      toast({ title: "Name required", description: "Workflow name cannot be empty." });
+      return;
+    }
+    const now = new Date().toISOString();
+    setWorkflowTemplates((prev) =>
+      prev.map((template) =>
+        template.id === targetTemplate.id
+          ? {
+              ...template,
+              name,
+              updatedAt: now
+            }
+          : template
+      )
+    );
+    setWorkflowGroups((prev) =>
+      prev.map((group) =>
+        group.templateId === targetTemplate.id
+          ? {
+              ...group,
+              name,
+              updatedAt: now
+            }
+          : group
+      )
+    );
+    toast({ title: "Workflow renamed", description: name });
+  }, [activeWorkflowTemplate, workflowTemplates]);
+
+  useEffect(() => {
+    const onRenameShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable;
+      if (isTyping) return;
+      if (event.key !== "F2") return;
+      if (!activeWorkflowTemplateId && !activeWorkflowGroupId) return;
+      event.preventDefault();
+      renameActiveWorkflow();
+    };
+
+    window.addEventListener("keydown", onRenameShortcut);
+    return () => window.removeEventListener("keydown", onRenameShortcut);
+  }, [activeWorkflowGroupId, activeWorkflowTemplateId, renameActiveWorkflow]);
+
+  const deleteActiveWorkflow = useCallback(() => {
+    if (!activeWorkflowTemplate) {
+      toast({ title: "No workflow selected", description: "Choose a workflow first." });
+      return;
+    }
+    const confirmed = window.confirm(`Delete workflow "${activeWorkflowTemplate.name}"?`);
+    if (!confirmed) return;
+    const templateGroupNodeIds = new Set(
+      workflowGroups
+        .filter((group) => group.templateId === activeWorkflowTemplate.id)
+        .flatMap((group) => group.nodeIds)
+    );
+    if (templateGroupNodeIds.size > 0) {
+      setNodes((prev) => prev.filter((node) => !templateGroupNodeIds.has(node.id)));
+      setEdges((prev) => prev.filter((edge) => !templateGroupNodeIds.has(edge.source) && !templateGroupNodeIds.has(edge.target)));
+    }
+    setWorkflowTemplates((prev) => prev.filter((template) => template.id !== activeWorkflowTemplate.id));
+    setWorkflowGroups((prev) => prev.filter((group) => group.templateId !== activeWorkflowTemplate.id));
+    setActiveWorkflowTemplateId(null);
+    setActiveWorkflowGroupId(null);
+    setEditingWorkflowGroupId(null);
+    toast({ title: "Workflow deleted", description: activeWorkflowTemplate.name });
+  }, [activeWorkflowTemplate, workflowGroups]);
+
+  const instantiateWorkflowTemplate = useCallback(
+    (templateId: string) => {
+      const template = workflowTemplates.find((entry) => entry.id === templateId);
+      if (!template) return;
+      if (template.nodes.length === 0) {
+        toast({ title: "Workflow is empty", description: "This workflow does not contain nodes to place." });
+        return;
+      }
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      const viewportCenter = rect
+        ? reactFlow.screenToFlowPosition({
+            x: rect.left + rect.width * 0.5,
+            y: rect.top + rect.height * 0.5
+          })
+        : { x: 120, y: 120 };
+      const anchor = resolvePresetAnchor(viewportCenter);
+
+      const nodeIdByTemplateNodeId = new Map<string, string>();
+      const stamp = Date.now();
+      let serial = 0;
+      const createNodeId = (nodeType: WorkflowNodeType) => {
+        serial += 1;
+        return `${nodeType}-${(stamp + serial).toString(36)}`;
+      };
+
+      const insertedNodes: Node<GraphNodeData>[] = template.nodes.map((templateNode) => {
+        const nodeId = createNodeId(templateNode.type);
+        nodeIdByTemplateNodeId.set(templateNode.id, nodeId);
+        return {
+          id: nodeId,
+          type: templateNode.type,
+          position: {
+            x: anchor.x + templateNode.position.x,
+            y: anchor.y + templateNode.position.y
+          },
+          data: {
+            label: templateNode.data.label,
+            params: templateNode.data.params,
+            uiScale: templateNode.data.uiScale ?? nodeScalePreset
+          }
+        } as Node<GraphNodeData>;
+      });
+
+      const insertedEdges: Edge[] = template.edges
+        .map((templateEdge) => {
+          const source = nodeIdByTemplateNodeId.get(templateEdge.source);
+          const target = nodeIdByTemplateNodeId.get(templateEdge.target);
+          if (!source || !target) return null;
+          return withStyledEdge({
+            id: `e-${source}-${target}-${Math.random().toString(36).slice(2, 7)}`,
+            source,
+            target,
+            sourceHandle: templateEdge.sourceHandle,
+            targetHandle: templateEdge.targetHandle
+          } as Edge);
+        })
+        .filter((edge): edge is Edge => Boolean(edge));
+
+      setNodes((prev) => [...prev, ...insertedNodes]);
+      setEdges((prev) => [...prev, ...insertedEdges]);
+
+      const group = createWorkflowGroupFromSelection(
+        template.id,
+        template.name,
+        insertedNodes.map((node) => node.id)
+      );
+      setWorkflowGroups((prev) => [...prev, group]);
+      setActiveWorkflowTemplateId(template.id);
+      setActiveWorkflowGroupId(group.id);
+      toast({ title: "Workflow placed", description: `${template.name} added to canvas.` });
+    },
+    [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, workflowTemplates]
   );
 
   const addNodeMenuItems = useMemo<CascadingMenuEntry[]>(() => {
@@ -1798,6 +2405,39 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       }
     ];
   }, [addNodeMenuItems, insertWorkflowPreset, paneMenu, pasteClipboardAt]);
+
+  const frameContextMenuItems = useMemo<CascadingMenuEntry[]>(() => {
+    if (!frameMenu) return [];
+    const isEditingFrame = editingWorkflowGroupId === frameMenu.frameId;
+    return [
+      {
+        id: "frame-edit",
+        kind: "action",
+        label: isEditingFrame ? "Finish frame editing" : "Edit frame",
+        onSelect: () => {
+          setActiveWorkflowGroupId(frameMenu.frameId);
+          setActiveWorkflowTemplateId(frameMenu.templateId);
+          setEditingWorkflowGroupId((current) => (current === frameMenu.frameId ? null : frameMenu.frameId));
+          toast({
+            title: isEditingFrame ? "Frame edit mode disabled" : "Frame edit mode enabled",
+            description: isEditingFrame
+              ? "New nodes will no longer attach to this workflow frame."
+              : "Create nodes inside this frame to attach them to the workflow."
+          });
+        }
+      },
+      {
+        id: "frame-rename",
+        kind: "action",
+        label: "Rename",
+        onSelect: () => {
+          setActiveWorkflowGroupId(frameMenu.frameId);
+          setActiveWorkflowTemplateId(frameMenu.templateId);
+          renameActiveWorkflow(frameMenu.templateId);
+        }
+      }
+    ];
+  }, [editingWorkflowGroupId, frameMenu, renameActiveWorkflow]);
 
   const updateNodeParamById = useCallback(
     (nodeId: string, key: string, value: string | number | boolean) => {
@@ -2026,50 +2666,59 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     [createNodePreviewUrl, projectId, setNodes]
   );
 
-  const currentGraph = (): GraphDocument => ({
-    nodes: nodes.map((n) => ({
-      id: n.id,
-      type: n.type as WorkflowNodeType,
-      position: n.position,
-      data: {
-        label: n.data.label,
-        params: n.data.params,
-        status: n.data.status,
-        uiScale: n.data.uiScale ?? nodeScalePreset
-      }
-    })),
-    edges: edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle ?? undefined,
-      targetHandle: e.targetHandle ?? undefined
-    })),
-    viewport: { x: 0, y: 0, zoom: 1 }
+  const workflowLibraryPayload = (): WorkflowLibraryPayload => ({
+    templates: workflowTemplates,
+    groups: workflowGroups
   });
 
-  const currentDraftGraph = (): GraphDocument => ({
-    nodes: nodes.map((n) => ({
-      id: n.id,
-      type: n.type as WorkflowNodeType,
-      position: n.position,
-      data: {
-        label: n.data.label,
-        params: n.data.params,
-        status: n.data.status,
-        uiScale: n.data.uiScale ?? nodeScalePreset,
-        previewUrl: n.data.previewUrl ?? null
-      }
-    })),
-    edges: edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle ?? undefined,
-      targetHandle: e.targetHandle ?? undefined
-    })),
-    viewport: { x: 0, y: 0, zoom: 1 }
-  });
+  const currentGraph = (): GraphDocument =>
+    ({
+      nodes: nodes.map((n) => ({
+        id: n.id,
+        type: n.type as WorkflowNodeType,
+        position: n.position,
+        data: {
+          label: n.data.label,
+          params: n.data.params,
+          status: n.data.status,
+          uiScale: n.data.uiScale ?? nodeScalePreset
+        }
+      })),
+      edges: edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle ?? undefined,
+        targetHandle: e.targetHandle ?? undefined
+      })),
+      viewport: { x: 0, y: 0, zoom: 1 },
+      workflowLibrary: workflowLibraryPayload()
+    } as GraphDocument);
+
+  const currentDraftGraph = (): GraphDocument =>
+    ({
+      nodes: nodes.map((n) => ({
+        id: n.id,
+        type: n.type as WorkflowNodeType,
+        position: n.position,
+        data: {
+          label: n.data.label,
+          params: n.data.params,
+          status: n.data.status,
+          uiScale: n.data.uiScale ?? nodeScalePreset,
+          previewUrl: n.data.previewUrl ?? null
+        }
+      })),
+      edges: edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle ?? undefined,
+        targetHandle: e.targetHandle ?? undefined
+      })),
+      viewport: { x: 0, y: 0, zoom: 1 },
+      workflowLibrary: workflowLibraryPayload()
+    } as GraphDocument);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2096,7 +2745,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         clearTimeout(draftSaveTimeoutRef.current);
       }
     };
-  }, [draftStorageKey, edges, nodeScalePreset, nodes]);
+  }, [draftStorageKey, edges, nodeScalePreset, nodes, workflowGroups, workflowTemplates]);
 
   const saveGraph = async ({ silent }: { silent?: boolean } = {}) => {
     setIsSaving(true);
@@ -2618,6 +3267,164 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     void inspectArtifactJson(groundingDinoJsonArtifact.id);
   }, [groundingDinoJsonArtifact?.id, inspectArtifactJson, inspectedJsonArtifactId]);
 
+  const workflowGroupFrames = useMemo(() => {
+    return workflowGroups
+      .map((group) => {
+        const groupNodes = group.nodeIds.map((id) => nodeById.get(id)).filter((node): node is Node<GraphNodeData> => Boolean(node));
+        if (groupNodes.length === 0) return null;
+
+        const minX = Math.min(...groupNodes.map((node) => node.position.x));
+        const minY = Math.min(...groupNodes.map((node) => node.position.y));
+        const maxX = Math.max(
+          ...groupNodes.map((node) => node.position.x + (node.width ?? 260))
+        );
+        const maxY = Math.max(
+          ...groupNodes.map((node) => node.position.y + (node.height ?? 160))
+        );
+        const padding = 28;
+
+        const flowX = minX - padding;
+        const flowY = minY - padding;
+        const flowWidth = Math.max(220, maxX - minX + padding * 2);
+        const flowHeight = Math.max(140, maxY - minY + padding * 2);
+
+        return {
+          id: group.id,
+          name: group.name,
+          templateId: group.templateId,
+          left: flowX * viewport.zoom + viewport.x,
+          top: flowY * viewport.zoom + viewport.y,
+          width: flowWidth * viewport.zoom,
+          height: flowHeight * viewport.zoom
+        };
+      })
+      .filter(
+        (
+          frame
+        ): frame is {
+          id: string;
+          name: string;
+          templateId: string;
+          left: number;
+          top: number;
+          width: number;
+          height: number;
+        } => Boolean(frame)
+      );
+  }, [nodeById, viewport.x, viewport.y, viewport.zoom, workflowGroups]);
+
+  const openWorkflowFrameMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>, frameId: string, templateId: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPaneMenu(null);
+      setNodeMenu(null);
+      setNodeSearchMenu(null);
+      setPendingConnect(null);
+      setActiveWorkflowGroupId(frameId);
+      setActiveWorkflowTemplateId(templateId);
+      const rect = canvasPanelRef.current?.getBoundingClientRect();
+      if (!rect) {
+        setFrameMenu({ x: event.clientX, y: event.clientY, frameId, templateId });
+        return;
+      }
+      const menuWidth = 220;
+      const menuHeight = 100;
+      const rawX = event.clientX - rect.left;
+      const rawY = event.clientY - rect.top;
+      const x = Math.max(8, Math.min(rawX, rect.width - menuWidth - 8));
+      const y = Math.max(8, Math.min(rawY, rect.height - menuHeight - 8));
+      setFrameMenu({ x, y, frameId, templateId });
+    },
+    []
+  );
+
+  const beginWorkflowFrameDrag = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>, frameId: string, templateId: string) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      setPaneMenu(null);
+      setNodeMenu(null);
+      setNodeSearchMenu(null);
+      setFrameMenu(null);
+      setActiveWorkflowGroupId(frameId);
+      setActiveWorkflowTemplateId(templateId);
+
+      const group = workflowGroups.find((entry) => entry.id === frameId);
+      if (!group) return;
+      const groupNodeIds = new Set(group.nodeIds);
+      const initialNodePositions = new Map<string, { x: number; y: number }>();
+      for (const node of nodes) {
+        if (!groupNodeIds.has(node.id)) continue;
+        initialNodePositions.set(node.id, { x: node.position.x, y: node.position.y });
+      }
+      if (initialNodePositions.size === 0) return;
+
+      workflowFrameDragRef.current = {
+        groupId: frameId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        moved: false,
+        initialNodePositions
+      };
+      workflowFrameDragCleanupRef.current?.();
+      workflowFrameDragCleanupRef.current = null;
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const dragState = workflowFrameDragRef.current;
+        if (!dragState || dragState.groupId !== frameId) return;
+        const zoom = Math.max(viewport.zoom, 0.0001);
+        const deltaX = (moveEvent.clientX - dragState.startClientX) / zoom;
+        const deltaY = (moveEvent.clientY - dragState.startClientY) / zoom;
+        if (!dragState.moved && (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1)) {
+          dragState.moved = true;
+        }
+        setNodes((prev) =>
+          prev.map((node) => {
+            const base = dragState.initialNodePositions.get(node.id);
+            if (!base) return node;
+            return {
+              ...node,
+              position: {
+                x: base.x + deltaX,
+                y: base.y + deltaY
+              }
+            };
+          })
+        );
+      };
+
+      const stopDragging = () => {
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+      };
+
+      const onPointerUp = () => {
+        stopDragging();
+        workflowFrameDragRef.current = null;
+        workflowFrameDragCleanupRef.current = null;
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerUp);
+      workflowFrameDragCleanupRef.current = stopDragging;
+    },
+    [nodes, setNodes, viewport.zoom, workflowGroups]
+  );
+
+  useEffect(
+    () => () => {
+      workflowFrameDragCleanupRef.current?.();
+      workflowFrameDragCleanupRef.current = null;
+      workflowFrameDragRef.current = null;
+    },
+    []
+  );
+
   return (
     <div className="h-full">
       <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
@@ -2770,18 +3577,68 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
-                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Presets</DropdownMenuLabel>
-                  {workflowPresets.map((preset) => (
-                    <DropdownMenuItem
-                      key={`workflow-preset-${preset.id}`}
-                      onSelect={(event) => {
-                        event.preventDefault();
-                        insertWorkflowPreset(preset.id);
-                      }}
-                    >
-                      {preset.label}
-                    </DropdownMenuItem>
-                  ))}
+                  <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Management</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      createWorkflowFromSelection();
+                    }}
+                  >
+                    Create new workflow
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!activeWorkflowTemplate}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      editActiveWorkflowFromSelection();
+                    }}
+                  >
+                    Edit
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!activeWorkflowTemplate}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      renameActiveWorkflow();
+                    }}
+                  >
+                    Rename
+                  </DropdownMenuItem>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger disabled={workflowTemplates.length === 0}>
+                      Choose existing workflow
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-72 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                      {workflowTemplates.length === 0 ? (
+                        <DropdownMenuItem disabled onSelect={(event) => event.preventDefault()}>
+                          No workflows saved yet
+                        </DropdownMenuItem>
+                      ) : (
+                        workflowTemplates.map((template) => (
+                          <DropdownMenuItem
+                            key={`workflow-existing-${template.id}`}
+                            onSelect={(event) => {
+                              event.preventDefault();
+                              setActiveWorkflowTemplateId(template.id);
+                              instantiateWorkflowTemplate(template.id);
+                            }}
+                          >
+                            {activeWorkflowTemplateId === template.id ? "• " : ""}{template.name}
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={!activeWorkflowTemplate}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      deleteActiveWorkflow();
+                    }}
+                  >
+                    Delete workflow
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
@@ -2861,9 +3718,15 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       const version = versions.find((v) => v.id === value);
                       if (!version) return;
                       const migratedGraph = migrateGraphDocument(version.graphJson);
+                      const loadedWorkflowLibrary = parseWorkflowLibraryPayload(version.graphJson);
                       const loadedNodes = migratedGraph.nodes.map((n) => buildNodeData(n as Node<GraphNodeData>, nodeArtifacts)) as Node<GraphNodeData>[];
                       setNodes(loadedNodes);
                       setEdges(migratedGraph.edges.map((edge) => withStyledEdge(edge as Edge)));
+                      setWorkflowTemplates(loadedWorkflowLibrary.templates);
+                      setWorkflowGroups(loadedWorkflowLibrary.groups);
+                      setActiveWorkflowTemplateId(loadedWorkflowLibrary.templates[0]?.id ?? null);
+                      setActiveWorkflowGroupId(loadedWorkflowLibrary.groups[0]?.id ?? null);
+                      setEditingWorkflowGroupId(null);
                       const loadedPreset = loadedNodes[0]?.data.uiScale;
                       if (loadedPreset === "compact" || loadedPreset === "balanced" || loadedPreset === "cinematic") {
                         setNodeScalePreset(loadedPreset);
@@ -2889,6 +3752,57 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         </div>
 
         <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
+          <div className="pointer-events-none absolute inset-0 z-[9]">
+            {workflowGroupFrames.map((frame) => {
+              const isActiveGroup = frame.id === activeWorkflowGroupId;
+              const isActiveTemplate = frame.templateId === activeWorkflowTemplateId;
+              const isSelectedFrame = isActiveGroup || isActiveTemplate;
+              const isEditingFrame = editingWorkflowGroupId === frame.id;
+              return (
+                <div
+                  key={frame.id}
+                  className={`pointer-events-none absolute rounded-2xl border transition-[border-color,box-shadow,background-color] ${
+                    isSelectedFrame
+                      ? "border-sky-300/90 bg-sky-400/[0.06] shadow-[0_0_0_2px_rgba(125,211,252,0.55),0_0_30px_rgba(56,189,248,0.25)]"
+                      : "border-sky-500/35 bg-transparent"
+                  }`}
+                  style={{
+                    left: frame.left,
+                    top: frame.top,
+                    width: frame.width,
+                    height: frame.height
+                  }}
+                >
+                  <div
+                    className={`pointer-events-auto absolute left-0 top-0 flex h-10 w-full cursor-move items-start rounded-t-2xl px-3 pt-2 ${
+                      isEditingFrame ? "bg-emerald-400/15" : isSelectedFrame ? "bg-sky-400/15" : "bg-sky-500/[0.05]"
+                    }`}
+                    onPointerDown={(event) => beginWorkflowFrameDrag(event, frame.id, frame.templateId)}
+                    onContextMenu={(event) => openWorkflowFrameMenu(event, frame.id, frame.templateId)}
+                    title="Drag to move workflow group"
+                  >
+                    <span
+                      className={`rounded-lg px-2 py-1 text-[11px] font-medium ${
+                        isEditingFrame
+                          ? "bg-emerald-300/30 text-emerald-50"
+                          : isSelectedFrame
+                            ? "bg-sky-300/30 text-sky-50"
+                            : "bg-sky-500/14 text-sky-200"
+                      }`}
+                    >
+                      {frame.name}
+                    </span>
+                    {isEditingFrame ? (
+                      <span className="ml-2 rounded-md border border-emerald-300/40 bg-emerald-300/20 px-1.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-emerald-100">
+                        Editing
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
           <div
             data-no-connect-menu="true"
             className="absolute left-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1 rounded-xl border border-[#4b4b4b] bg-[#2a2a2a]/95 p-2 shadow-[0_12px_35px_rgba(0,0,0,0.45)]"
@@ -2957,6 +3871,17 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                 y={paneMenu.y}
                 items={rightClickMenuItems}
                 onClose={() => setPaneMenu(null)}
+              />
+            </div>
+          ) : null}
+
+          {frameMenu ? (
+            <div ref={frameMenuRef} data-no-connect-menu="true">
+              <RightClickMenu
+                x={frameMenu.x}
+                y={frameMenu.y}
+                items={frameContextMenuItems}
+                onClose={() => setFrameMenu(null)}
               />
             </div>
           ) : null}
