@@ -382,8 +382,23 @@ function resolveComfyEnabled() {
 
 function resolveMockFallbackAllowed() {
   const raw = process.env.COMFYUI_ALLOW_MOCK_FALLBACK;
-  if (raw === undefined) return true;
+  if (raw === undefined) return false;
   return isTruthy(raw);
+}
+
+function toErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildComfyQwenEditError(reason: string) {
+  const baseUrl = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
+  const mode = process.env.COMFYUI_MODE?.trim() || "on_demand";
+  return [
+    `Qwen Image Edit failed: ${reason}`,
+    `Comfy endpoint: ${baseUrl} (mode=${mode}).`,
+    "Ensure ComfyUI is running and reachable at /system_stats.",
+    "Set COMFYUI_ALLOW_MOCK_FALLBACK=true only if you explicitly want mock output."
+  ].join(" ");
 }
 
 function resolveComfyClient() {
@@ -890,6 +905,9 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
   const workflowTemplateSource = loaded ? (qwenWorkflowPath as string) : "builtin:qwen-image-edit:2511";
 
   if (!resolveComfyEnabled()) {
+    if (!resolveMockFallbackAllowed()) {
+      throw new Error(buildComfyQwenEditError("COMFYUI_ENABLED=false"));
+    }
     return resultWithWarning(buildMockEditImage(ctx, prompt), "COMFYUI_ENABLED=false");
   }
 
@@ -1009,9 +1027,11 @@ export async function executeComfyQwenImageEditNode(ctx: NodeExecutionContext): 
     };
     return result.executed;
   } catch (error) {
-    if (!resolveMockFallbackAllowed()) throw error;
+    if (!resolveMockFallbackAllowed()) {
+      throw new Error(buildComfyQwenEditError(toErrorMessage(error)));
+    }
     const fallback = buildMockEditImage(ctx, prompt);
-    return resultWithWarning(fallback, `Comfy Qwen edit failed: ${error instanceof Error ? error.message : String(error)}`);
+    return resultWithWarning(fallback, `Comfy Qwen edit failed: ${toErrorMessage(error)}`);
   }
 }
 
