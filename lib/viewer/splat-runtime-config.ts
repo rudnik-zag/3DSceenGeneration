@@ -5,7 +5,7 @@ function normalizeRuntimePreference(rawValue: string | undefined): SplatRuntimeP
   if (value === "spark" || value === "legacy" || value === "auto") {
     return value;
   }
-  return "auto";
+  return "spark";
 }
 
 export function getSplatRuntimePreference(rawValue = process.env.NEXT_PUBLIC_SPLAT_RUNTIME): SplatRuntimePreference {
