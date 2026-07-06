@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult } from "@/lib/execution/contracts";
+import { NodeExecutionContext, NodeExecutionResult } from "@/lib/execution/contracts";
 import { ComfyClient } from "@/lib/comfy/client";
 import { withComfyRuntime } from "@/lib/comfy/runtime";
 import { ONE_PIXEL_PNG } from "@/lib/execution/mock-assets";
@@ -697,7 +697,8 @@ async function executeComfyWorkflowAndExtractImage(params: {
   const queued = await comfy.queuePrompt(payload, params.extraData);
   const history = await comfy.waitForPromptCompletion({
     promptId: queued.promptId,
-    maxWaitMs: params.timeoutMs
+    maxWaitMs: params.timeoutMs,
+    isCancellationRequested: params.ctx.isCancellationRequested
   });
   const imageRef = ComfyClient.pickFirstImageFromHistory(history, params.preferredOutputNodeId ?? null);
   if (!imageRef) {

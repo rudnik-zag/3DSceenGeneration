@@ -7,6 +7,7 @@ import { ViewerLoader } from "@/components/viewer/viewer-loader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requirePageProjectAccess } from "@/lib/auth/access";
 import { prisma } from "@/lib/db";
+import { storageKeyBelongsToProject } from "@/lib/storage/access";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { safeGetSignedDownloadUrl, storageObjectExists } from "@/lib/storage/s3";
 import { isRenderableInViewer, selectViewerRenderer } from "@/lib/viewer/renderer-switch";
@@ -253,7 +254,10 @@ async function resolveAdditionalSceneUrlsFromManifest(input: {
       if (storageKeys.length === 0) continue;
 
       const urls = (
-        await Promise.all(storageKeys.map((storageKey) => safeGetSignedDownloadUrl(storageKey)))
+        await Promise.all(storageKeys.map(async (storageKey) => {
+          if (!(await storageKeyBelongsToProject(input.projectId, storageKey))) return null;
+          return safeGetSignedDownloadUrl(storageKey);
+        }))
       ).filter((value): value is string => typeof value === "string" && value.length > 0);
 
       if (urls.length > 0) {
@@ -509,7 +513,10 @@ export default async function ViewerPage({
           })
         : [];
     const metadataAdditionalSceneUrls = (
-      await Promise.all(metadataAdditionalSceneKeys.map(async (key) => safeGetSignedDownloadUrl(key)))
+      await Promise.all(metadataAdditionalSceneKeys.map(async (key) => {
+        if (!(await storageKeyBelongsToProject(project.id, key))) return null;
+        return safeGetSignedDownloadUrl(key);
+      }))
     ).filter((value): value is string => typeof value === "string" && value.length > 0);
     const additionalSceneUrls = toUniqueSignedUrlsByAssetPath(
       manifestAdditionalSceneUrls.length > 0 ? manifestAdditionalSceneUrls : metadataAdditionalSceneUrls

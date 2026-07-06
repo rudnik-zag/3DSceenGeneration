@@ -273,10 +273,11 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
 };
 
 const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
-const MAX_IMAGE_GENERATION_SEED = 2_147_483_646;
+const MAX_RANDOM_IMAGE_GENERATION_SEED = 2_147_483_646;
+const MAX_IMAGE_GENERATION_SEED = Number.MAX_SAFE_INTEGER;
 
 function createRandomImageGenerationSeed() {
-  return Math.floor(Math.random() * (MAX_IMAGE_GENERATION_SEED + 1));
+  return Math.floor(Math.random() * (MAX_RANDOM_IMAGE_GENERATION_SEED + 1));
 }
 
 const inputImageGeneratorModelPresets: Record<string, Record<string, string | number | boolean>> = {
@@ -1020,14 +1021,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     }
   }, [paneMenu]);
 
+  const nodeSearchMenuX = nodeSearchMenu?.x;
+  const nodeSearchMenuY = nodeSearchMenu?.y;
   useEffect(() => {
-    if (!nodeSearchMenu) return;
+    if (nodeSearchMenuX === undefined || nodeSearchMenuY === undefined) return;
     const handle = window.setTimeout(() => {
       nodeSearchInputRef.current?.focus();
       nodeSearchInputRef.current?.select();
     }, 0);
     return () => window.clearTimeout(handle);
-  }, [nodeSearchMenu?.x, nodeSearchMenu?.y]);
+  }, [nodeSearchMenuX, nodeSearchMenuY]);
 
   useEffect(() => {
     if (!nodeSearchMenu) return;
@@ -2226,7 +2229,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     setActiveWorkflowGroupId(null);
     setEditingWorkflowGroupId(null);
     toast({ title: "Workflow deleted", description: activeWorkflowTemplate.name });
-  }, [activeWorkflowTemplate, workflowGroups]);
+  }, [activeWorkflowTemplate, setEdges, setNodes, workflowGroups]);
 
   const instantiateWorkflowTemplate = useCallback(
     (templateId: string) => {
@@ -2299,7 +2302,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setActiveWorkflowGroupId(group.id);
       toast({ title: "Workflow placed", description: `${template.name} added to canvas.` });
     },
-    [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, workflowTemplates]
+    [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes, workflowTemplates]
   );
 
   const addNodeMenuItems = useMemo<CascadingMenuEntry[]>(() => {
@@ -2594,6 +2597,21 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const uploadImageForNode = useCallback(
     async (nodeId: string, file: File) => {
       if (!nodeId) return;
+      const extension = file.name.toLowerCase().split(".").pop();
+      const inferredContentType = extension === "png"
+        ? "image/png"
+        : extension === "jpg" || extension === "jpeg"
+          ? "image/jpeg"
+          : extension === "webp"
+            ? "image/webp"
+            : "";
+      const contentType = ["image/png", "image/jpeg", "image/webp"].includes(file.type)
+        ? file.type
+        : inferredContentType;
+      if (!contentType) {
+        toast({ title: "Unsupported image", description: "Use PNG, JPEG, or WebP." });
+        return;
+      }
       const localPreviewUrl = await createNodePreviewUrl(file);
       setNodes((prev) =>
         prev.map((node) => {
@@ -2620,7 +2638,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
             projectId,
             nodeId,
             filename: file.name,
-            contentType: file.type || "application/octet-stream",
+            contentType,
             byteSize: file.size
           })
         });
@@ -2635,7 +2653,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         }
         const uploadRes = await fetch(uploadTarget, {
           method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
+          headers: { "Content-Type": contentType },
           body: file
         });
         if (!uploadRes.ok) {
@@ -2666,12 +2684,12 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     [createNodePreviewUrl, projectId, setNodes]
   );
 
-  const workflowLibraryPayload = (): WorkflowLibraryPayload => ({
+  const workflowLibraryPayload = useCallback((): WorkflowLibraryPayload => ({
     templates: workflowTemplates,
     groups: workflowGroups
-  });
+  }), [workflowGroups, workflowTemplates]);
 
-  const currentGraph = (): GraphDocument =>
+  const currentGraph = useCallback((): GraphDocument =>
     ({
       nodes: nodes.map((n) => ({
         id: n.id,
@@ -2693,9 +2711,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       })),
       viewport: { x: 0, y: 0, zoom: 1 },
       workflowLibrary: workflowLibraryPayload()
-    } as GraphDocument);
+    } as GraphDocument), [edges, nodeScalePreset, nodes, workflowLibraryPayload]);
 
-  const currentDraftGraph = (): GraphDocument =>
+  const currentDraftGraph = useCallback((): GraphDocument =>
     ({
       nodes: nodes.map((n) => ({
         id: n.id,
@@ -2718,7 +2736,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       })),
       viewport: { x: 0, y: 0, zoom: 1 },
       workflowLibrary: workflowLibraryPayload()
-    } as GraphDocument);
+    } as GraphDocument), [edges, nodeScalePreset, nodes, workflowLibraryPayload]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2745,7 +2763,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         clearTimeout(draftSaveTimeoutRef.current);
       }
     };
-  }, [draftStorageKey, edges, nodeScalePreset, nodes, workflowGroups, workflowTemplates]);
+  }, [currentDraftGraph, draftStorageKey]);
 
   const saveGraph = async ({ silent }: { silent?: boolean } = {}) => {
     setIsSaving(true);

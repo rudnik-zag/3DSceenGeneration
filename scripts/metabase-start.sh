@@ -35,7 +35,7 @@ else
   docker run -d \
     --name "${MB_CONTAINER_NAME}" \
     --add-host=host.docker.internal:host-gateway \
-    -p "${MB_PORT}:3000" \
+    -p "127.0.0.1:${MB_PORT}:3000" \
     -v "${MB_VOLUME_NAME}:/metabase-data" \
     -e MB_DB_FILE=/metabase-data/metabase.db \
     "${MB_IMAGE}" >/dev/null
@@ -48,6 +48,8 @@ When connecting PostgreSQL from Metabase (container):
   Host: host.docker.internal
   Port: 5432
   DB: tribalai3d
-  User: postgres
-  Password: postgres
+  User: analytics_reader
+  Password: the password you assigned to the read-only role
+
+Create the role first with scripts/sql/analytics_reader.sql, then assign its password.
 EOF

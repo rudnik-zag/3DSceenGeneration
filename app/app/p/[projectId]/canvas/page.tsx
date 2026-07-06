@@ -35,6 +35,7 @@ export default async function CanvasPage({
   const artifacts = await prisma.artifact.findMany({
     where: { projectId },
     orderBy: { createdAt: "desc" },
+    take: 500,
     select: {
       id: true,
       nodeId: true,

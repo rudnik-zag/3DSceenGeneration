@@ -161,16 +161,32 @@ export class ComfyClient {
     return payload as ComfyHistoryEntry;
   }
 
+  async cancelPrompt(promptId: string) {
+    const response = await this.fetchWithTimeout(this.buildUrl("/queue"), {
+      method: "POST",
+      headers: this.buildHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ delete: [promptId] })
+    });
+    if (!response.ok) {
+      throw new Error(`Comfy queue cancellation failed (${response.status})`);
+    }
+  }
+
   async waitForPromptCompletion(params: {
     promptId: string;
     pollIntervalMs?: number;
     maxWaitMs?: number;
+    isCancellationRequested?: () => Promise<boolean>;
   }): Promise<ComfyHistoryEntry> {
     const pollIntervalMs = Number.isFinite(params.pollIntervalMs) ? Math.max(200, Number(params.pollIntervalMs)) : 1200;
     const maxWaitMs = Number.isFinite(params.maxWaitMs) ? Math.max(1000, Number(params.maxWaitMs)) : 600_000;
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < maxWaitMs) {
+      if (await params.isCancellationRequested?.()) {
+        await this.cancelPrompt(params.promptId).catch(() => undefined);
+        throw new Error(`Comfy prompt canceled by user (prompt_id=${params.promptId}).`);
+      }
       const entry = await this.getHistory(params.promptId);
       if (entry) {
         const status = entry.status?.status_str?.toLowerCase() ?? "";

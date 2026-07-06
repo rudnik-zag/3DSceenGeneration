@@ -4062,12 +4062,12 @@ export function UnifiedWorldViewer({
       object: DropInViewerObject;
       sceneFormatEnum: Record<string, number>;
     }> => {
-      const module = (await getGaussianSplatsModule()) as Record<string, unknown>;
-      const DropInViewerCtor = module.DropInViewer as (new (options: Record<string, unknown>) => DropInViewerObject) | undefined;
+      const splatModule = (await getGaussianSplatsModule()) as Record<string, unknown>;
+      const DropInViewerCtor = splatModule.DropInViewer as (new (options: Record<string, unknown>) => DropInViewerObject) | undefined;
       if (!DropInViewerCtor) {
         throw new Error("Gaussian splat renderer module does not expose DropInViewer.");
       }
-      const sceneFormatEnum = (module.SceneFormat ?? {}) as Record<string, number>;
+      const sceneFormatEnum = (splatModule.SceneFormat ?? {}) as Record<string, number>;
       const sharedMemoryAllowed = typeof window !== "undefined" && window.crossOriginIsolated === true;
       const object = new DropInViewerCtor({
         selfDrivenMode: false,
@@ -4131,8 +4131,8 @@ export function UnifiedWorldViewer({
 
     const ensureSparkRendererBridge = async (): Promise<SparkRendererObject | null> => {
       if (sparkRendererBridge) return sparkRendererBridge;
-      const module = await getSparkModule();
-      const SparkRendererCtor = module.SparkRenderer as (new (...args: unknown[]) => SparkRendererObject) | undefined;
+      const sparkModule = await getSparkModule();
+      const SparkRendererCtor = sparkModule.SparkRenderer as (new (...args: unknown[]) => SparkRendererObject) | undefined;
       if (!SparkRendererCtor) return null;
       const constructorCandidates: Array<unknown[]> = [[{ renderer }]];
       for (const args of constructorCandidates) {
@@ -4199,8 +4199,8 @@ export function UnifiedWorldViewer({
       formatHint?: "ply" | "splat" | "ksplat" | "spz" | null,
       idSource?: string
     ): Promise<SplatHandle> => {
-      const module = await getSparkModule();
-      const SplatMeshCtor = (module.SplatMesh ?? module.GaussianSplatMesh) as
+      const sparkModule = await getSparkModule();
+      const SplatMeshCtor = (sparkModule.SplatMesh ?? sparkModule.GaussianSplatMesh) as
         | (new (...args: unknown[]) => Record<string, unknown>)
         | undefined;
       if (!SplatMeshCtor) {
@@ -4761,6 +4761,10 @@ export function UnifiedWorldViewer({
 
     requestRef.current = requestAnimationFrame(animate);
 
+    const loadedExternalAdditionIds = loadedExternalAdditionIdsRef.current;
+    const splatHandles = splatHandlesRef.current;
+    const splatSupportSampleCache = splatSupportSampleCacheRef.current;
+
     return () => {
       disposed = true;
       cancelled = true;
@@ -4794,7 +4798,7 @@ export function UnifiedWorldViewer({
       activeGroupRef.current = null;
       setActiveGroupMeta(null);
       objectListSelectionAnchorRef.current = null;
-      loadedExternalAdditionIdsRef.current.clear();
+      loadedExternalAdditionIds.clear();
       setGroupSelectionKeys([]);
       setDragSelectionRect(null);
       setSelectedObject(null);
@@ -4811,7 +4815,7 @@ export function UnifiedWorldViewer({
       draco.dispose();
       ktx2.dispose();
 
-      for (const handle of splatHandlesRef.current) {
+      for (const handle of splatHandles) {
         handle.dispose?.();
       }
       if (sparkRendererBridge && (sparkRendererBridge as unknown as THREE.Object3D).parent) {
@@ -4819,14 +4823,14 @@ export function UnifiedWorldViewer({
       }
       sparkRendererBridge?.dispose?.();
       sparkRendererBridge = null;
-      splatHandlesRef.current.clear();
+      splatHandles.clear();
       refreshSplatItems();
       updateHudFromHandles();
       for (const blobUrl of tempBlobUrlsRef.current) {
         URL.revokeObjectURL(blobUrl);
       }
       tempBlobUrlsRef.current = [];
-      splatSupportSampleCacheRef.current.clear();
+      splatSupportSampleCache.clear();
       environmentApplyTokenRef.current += 1;
       disposeActiveHdriResources();
       pmremGeneratorRef.current?.dispose();
@@ -4871,6 +4875,7 @@ export function UnifiedWorldViewer({
     clearSelectedHelper,
     setSelectedGroup,
     setSelectedObject,
+    syncTransformDraftForCurrentSelection,
     preferredRuntimeOrder,
     pushShortcutHint,
     queueAutoAlignScene,
@@ -5077,8 +5082,8 @@ export function UnifiedWorldViewer({
     };
 
     const loadExternalSplat = async (addition: ExternalSceneAddition) => {
-      const module = (await getGaussianSplatsModule()) as Record<string, unknown>;
-      const DropInViewerCtor = module.DropInViewer as
+      const splatModule = (await getGaussianSplatsModule()) as Record<string, unknown>;
+      const DropInViewerCtor = splatModule.DropInViewer as
         | (new (options: Record<string, unknown>) => {
             addSplatScene?: (path: string, options?: Record<string, unknown>) => Promise<void>;
             addSplatScenes?: (entries: Array<Record<string, unknown>>) => Promise<void>;
@@ -5089,7 +5094,7 @@ export function UnifiedWorldViewer({
       if (!DropInViewerCtor) {
         throw new Error("Gaussian splat renderer is unavailable.");
       }
-      const sceneFormatEnum = (module.SceneFormat ?? {}) as Record<string, number>;
+      const sceneFormatEnum = (splatModule.SceneFormat ?? {}) as Record<string, number>;
       const sharedMemoryAllowed = typeof window !== "undefined" && window.crossOriginIsolated === true;
       const object = new DropInViewerCtor({
         selfDrivenMode: false,

@@ -7,6 +7,7 @@ import { prisma } from "@/lib/db";
 import { formatRunFolderLabel } from "@/lib/runs/numbering";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
+import { readJsonRequest } from "@/lib/security/request";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { worldTransformsGetQuerySchema, worldTransformsPostBodySchema } from "@/lib/validation/schemas";
 
@@ -231,7 +232,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 2 * 1024 * 1024);
     const parsedBody = worldTransformsPostBodySchema.safeParse(body);
     if (!parsedBody.success) {
       return NextResponse.json(

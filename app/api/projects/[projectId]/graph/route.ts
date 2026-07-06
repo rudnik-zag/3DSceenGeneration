@@ -6,19 +6,23 @@ import { prisma } from "@/lib/db";
 import { parseGraphDocument } from "@/lib/graph/plan";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
+import { readJsonRequest } from "@/lib/security/request";
 import { graphSavePayloadSchema } from "@/lib/validation/schemas";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
     const { projectId } = await params;
     await requireProjectAccess(projectId, "viewer");
+    const requestedLimit = Number(req.nextUrl.searchParams.get("limit") ?? 50);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50));
 
     const versions = await prisma.graph.findMany({
       where: { projectId },
       orderBy: { version: "desc" },
+      take: limit,
       select: {
         id: true,
         name: true,
@@ -44,7 +48,7 @@ export async function POST(
   try {
     const { projectId } = await params;
     const access = await requireProjectAccess(projectId, "editor");
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 2 * 1024 * 1024);
     const parsed = graphSavePayloadSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(

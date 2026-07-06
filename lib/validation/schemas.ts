@@ -20,9 +20,9 @@ export const createProjectPayloadSchema = z.object({
 export const graphSavePayloadSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   graphJson: z.object({
-    nodes: z.array(z.unknown()),
-    edges: z.array(z.unknown()),
-    viewport: z.unknown().optional()
+    nodes: z.array(z.unknown()).max(250),
+    edges: z.array(z.unknown()).max(1000),
+    viewport: z.unknown()
   })
 });
 

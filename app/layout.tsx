@@ -1,14 +1,7 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 
 import "@/app/globals.css";
 import { Toaster } from "@/components/ui/toaster";
-
-const inter = Inter({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-  variable: "--font-sans"
-});
 
 export const metadata: Metadata = {
   title: "TribalAI Workflow Studio",
@@ -22,7 +15,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} font-[var(--font-sans)]`}>
+      <body className="font-sans">
         {children}
         <Toaster />
       </body>

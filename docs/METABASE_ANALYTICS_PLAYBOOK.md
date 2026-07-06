@@ -29,6 +29,15 @@ Opens Metabase on `http://localhost:3000` by default.
 
 ## 2) Connect your PostgreSQL database
 
+Create a least-privilege analytics role as a database administrator:
+
+```bash
+psql "$DATABASE_URL" -f scripts/sql/analytics_reader.sql
+psql "$DATABASE_URL" -c "ALTER ROLE analytics_reader LOGIN PASSWORD 'replace-with-a-strong-password';"
+```
+
+Do not use the application owner or PostgreSQL superuser from Metabase.
+
 Use these credentials in Metabase:
 
 - Database type: `PostgreSQL`
@@ -37,8 +46,8 @@ Use these credentials in Metabase:
   - `localhost` if Metabase runs from JAR on host
 - Port: `5432`
 - Database name: `tribalai3d`
-- Username: `postgres`
-- Password: `postgres`
+- Username: `analytics_reader`
+- Password: the strong password assigned above
 
 ## 3) Load saved SQL queries
 

@@ -804,7 +804,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 <span>Replace</span>
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp"
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -834,7 +834,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 <span>Upload / Drop Image</span>
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp"
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];

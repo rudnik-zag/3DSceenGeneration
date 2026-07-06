@@ -18,6 +18,7 @@ export default async function DashboardPage() {
       ]
     },
     orderBy: { updatedAt: "desc" },
+    take: 100,
     include: {
       _count: {
         select: {

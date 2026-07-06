@@ -2,4 +2,7 @@ node_modules
 .next
 .git
 .env
-pnpm-lock.yaml
+.local-storage
+.run
+.pnpm-store
+test_data

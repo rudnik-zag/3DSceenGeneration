@@ -21,10 +21,12 @@ export async function enforceRateLimit(input: {
   const key = `rate:${normalizeIdentifier(input.bucket)}:${normalizeIdentifier(input.identifier)}:${windowBucket(safeWindow)}`;
 
   try {
-    const count = await redisConnection.incr(key);
-    if (count === 1) {
-      await redisConnection.expire(key, safeWindow);
-    }
+    const count = Number(await redisConnection.eval(
+      "local count = redis.call('INCR', KEYS[1]); if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return count",
+      1,
+      key,
+      safeWindow
+    ));
     if (count > safeLimit) {
       throw new HttpError(429, input.message ?? "Too many requests", "rate_limited");
     }
@@ -32,8 +34,9 @@ export async function enforceRateLimit(input: {
     if (error instanceof HttpError) {
       throw error;
     }
-    // Fail-open when Redis is unavailable to avoid hard downtime.
-    console.warn("[rate-limit] Redis unavailable, skipping limit enforcement.");
+    if (process.env.NODE_ENV === "production") {
+      throw new HttpError(503, "Rate limiting is temporarily unavailable", "rate_limit_unavailable");
+    }
+    console.warn("[rate-limit] Redis unavailable, skipping limit enforcement outside production.");
   }
 }
-

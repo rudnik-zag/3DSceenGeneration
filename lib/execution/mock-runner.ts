@@ -19,7 +19,6 @@ import {
   ONE_PIXEL_PNG
 } from "@/lib/execution/mock-assets";
 import { getObjectBuffer } from "@/lib/storage/s3";
-import { WorkflowNodeType } from "@/types/workflow";
 
 function hashBuffer(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");

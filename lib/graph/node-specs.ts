@@ -8,30 +8,32 @@ import {
 } from "@/lib/graph/scene-generation-presets";
 import { NodeSpecRegistry, WorkflowNodeType } from "@/types/workflow";
 
-const textInput = z.object({ value: z.string().default("") });
+const MAX_COMFY_SEED = Number.MAX_SAFE_INTEGER;
+
+const textInput = z.object({ value: z.string().max(16_000).default("") });
 const imageInput = z.object({
   sourceMode: z.enum(["upload", "generate"]).default("upload"),
-  generatorModel: z.string().default(""),
-  prompt: z.string().default(""),
-  negativePrompt: z.string().default(""),
-  seed: z.number().int().min(-1).max(2147483647).default(-1),
+  generatorModel: z.string().max(120).default(""),
+  prompt: z.string().max(16_000).default(""),
+  negativePrompt: z.string().max(16_000).default(""),
+  seed: z.number().int().min(-1).max(MAX_COMFY_SEED).default(-1),
   steps: z.number().int().min(1).max(150).default(20),
   cfg: z.number().min(1).max(30).default(8),
   width: z.number().int().min(256).max(2048).default(1024),
   height: z.number().int().min(256).max(2048).default(1024),
-  sampler: z.string().default("euler"),
-  scheduler: z.string().default("normal"),
-  checkpoint: z.string().default(""),
-  storageKey: z.string().optional(),
-  filename: z.string().default("image.png")
+  sampler: z.string().max(120).default("euler"),
+  scheduler: z.string().max(120).default("normal"),
+  checkpoint: z.string().max(512).default(""),
+  storageKey: z.string().max(1024).optional(),
+  filename: z.string().max(260).default("image.png")
 });
-const cameraPathInput = z.object({ json: z.string().default("[]") });
+const cameraPathInput = z.object({ json: z.string().max(256_000).default("[]") });
 const viewerEnvironmentParams = z.object({
   enabled: z.boolean().default(true),
-  hdriUrl: z.string().default(""),
-  hdriStorageKey: z.string().default(""),
+  hdriUrl: z.string().max(2048).default(""),
+  hdriStorageKey: z.string().max(1024).default(""),
   backgroundMode: z.enum(["solid", "hdri", "transparent"]).default("solid"),
-  backgroundColor: z.string().default("#05070e"),
+  backgroundColor: z.string().max(32).default("#05070e"),
   toneMapping: z.enum(["ACESFilmic", "Neutral", "Reinhard", "None"]).default("ACESFilmic"),
   exposure: z.number().min(0).max(6).default(1),
   envIntensity: z.number().min(0).max(8).default(1),
@@ -39,16 +41,18 @@ const viewerEnvironmentParams = z.object({
   hdriBlur: z.number().min(0).max(1).default(0),
   ambientIntensity: z.number().min(0).max(8).default(1.1),
   sunIntensity: z.number().min(0).max(8).default(1.2),
-  sunColor: z.string().default("#ffffff"),
-  groundColor: z.string().default("#101828")
+  sunColor: z.string().max(32).default("#ffffff"),
+  groundColor: z.string().max(32).default("#101828")
 });
 const groundingDinoParams = z.object({
-  prompt: z.string().default(""),
-  threshold: z.number().min(0).max(1).default(0.35)
+  prompt: z.string().max(4000).default(""),
+  threshold: z.number().min(0).max(1).default(0.35),
+  textThreshold: z.number().min(0).max(1).default(0.25),
+  tokenSpans: z.string().max(4000).default("")
 });
 const sam2Params = z.object({
   mode: z.enum(["auto", "guided", "full"]).default("auto"),
-  sam2Cfg: z.string().default("sam2.1_hiera_l.yaml"),
+  sam2Cfg: z.string().max(512).default("sam2.1_hiera_l.yaml"),
   pointsPerSide: z.number().int().min(4).max(256).default(64),
   predIouThresh: z.number().min(0).max(1).default(0.7),
   stabilityScoreThresh: z.number().min(0).max(1).default(0.9),
@@ -58,7 +62,7 @@ const sam2Params = z.object({
 const sceneGenerationParams = z.object({
   configPreset: z.enum(["Default", "HighQuality", "FastPreview", "Custom"]).default("Default"),
   format: z.enum(["mesh_glb", "point_ply"]).default("mesh_glb"),
-  config: z.string().default("hf"),
+  config: z.string().max(512).default("hf"),
   runAllMasksInOneProcess: z.boolean().default(true),
   maxObjects: z.number().int().min(0).max(128).default(0),
   enableMesh: z.boolean().default(true),
@@ -76,28 +80,28 @@ const sceneGenerationParams = z.object({
   storeOnCpu: z.boolean().default(true)
 });
 const sceneGenerationTemplateParams = z.object({
-  objectPrompt: z.string().default(""),
+  objectPrompt: z.string().max(4000).default(""),
   SceneDetailedOption: z.enum(["Default", "HighQuality", "FastPreview", "Custom"]).default("Default"),
   SceneOutputFormat: z.enum(["mesh_glb", "point_ply"]).default("mesh_glb"),
   SceneMaskExecution: z.enum(["all_masks", "per_mask"]).default("all_masks"),
   ScenePreviewStage: z.enum(["final", "detection", "segmentation"]).default("final")
 });
-const modelPrompt = z.object({ prompt: z.string().default("") });
+const modelPrompt = z.object({ prompt: z.string().max(16_000).default("") });
 const qwenImageEditParams = z.object({
-  prompt: z.string().default(""),
-  negativePrompt: z.string().default(""),
+  prompt: z.string().max(16_000).default(""),
+  negativePrompt: z.string().max(16_000).default(""),
   enableTurboMode: z.boolean().default(false),
   referenceLatentsMethod: z.enum(["offset", "index", "uxo/uno", "index_timestep_zero"]).default("index_timestep_zero"),
-  seed: z.number().int().min(-1).max(2147483647).default(-1),
+  seed: z.number().int().min(-1).max(MAX_COMFY_SEED).default(-1),
   steps: z.number().int().min(1).max(150).default(40),
   cfg: z.number().min(0.1).max(30).default(4),
-  sampler: z.string().default("euler"),
-  scheduler: z.string().default("simple"),
+  sampler: z.string().max(120).default("euler"),
+  scheduler: z.string().max(120).default("simple"),
   denoise: z.number().min(0).max(1).default(1)
 });
-const depthParams = z.object({ model: z.string().default("fast-depth") });
+const depthParams = z.object({ model: z.string().max(120).default("fast-depth") });
 const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
-const meshReconstructionParams = z.object({ quality: z.string().default("balanced") });
+const meshReconstructionParams = z.object({ quality: z.string().max(120).default("balanced") });
 const uvParams = z.object({ padding: z.number().min(1).max(32).default(8) });
 const bakeParams = z.object({ resolution: z.number().min(256).max(4096).default(1024) });
 const exportParams = z.object({ format: z.enum(["mesh_glb", "point_ply", "splat_ksplat"]).default("mesh_glb") });
@@ -126,7 +130,7 @@ export const nodeSpecEntries = [
       },
       { key: "prompt", label: "Generate Prompt", input: "textarea", placeholder: "Describe the target image..." },
       { key: "negativePrompt", label: "Negative Prompt", input: "textarea", placeholder: "blurry, low quality, artifacts" },
-      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: 2147483647, step: 1 },
+      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: MAX_COMFY_SEED, step: 1 },
       { key: "steps", label: "Steps", input: "number", min: 1, max: 150, step: 1 },
       { key: "cfg", label: "CFG", input: "number", min: 1, max: 30, step: 0.5 },
       { key: "width", label: "Width", input: "number", min: 256, max: 2048, step: 64 },
@@ -428,7 +432,7 @@ export const nodeSpecEntries = [
         input: "select",
         options: ["index_timestep_zero", "offset", "index", "uxo/uno"]
       },
-      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: 2147483647, step: 1 },
+      { key: "seed", label: "Seed (-1 random)", input: "number", min: -1, max: MAX_COMFY_SEED, step: 1 },
       { key: "steps", label: "Steps", input: "number", min: 1, max: 150, step: 1 },
       { key: "cfg", label: "CFG", input: "number", min: 0.1, max: 30, step: 0.1 },
       {
@@ -490,7 +494,7 @@ export const nodeSpecEntries = [
       { id: "text", label: "Style", artifactType: "JsonData" }
     ],
     outputPorts: [{ id: "textures", label: "Texture Set", artifactType: "TextureSet" }],
-    paramSchema: z.object({ style: z.string().default("photoreal") }),
+    paramSchema: z.object({ style: z.string().max(4000).default("photoreal") }),
     paramFields: [{ key: "style", label: "Style", input: "text" }],
     defaultParams: { style: "photoreal" }
   }),
@@ -616,10 +620,23 @@ export function mergeNodeParamsWithDefaults(nodeType: WorkflowNodeType, rawParam
     ? (rawParams as Record<string, unknown>)
     : {};
 
-  const merged = {
+  const mergedCandidate = {
     ...spec.defaultParams,
     ...paramsRecord
   } as Record<string, unknown>;
+  const parsed = spec.paramSchema.safeParse(mergedCandidate);
+  if (!parsed.success) {
+    throw new Error(`Invalid parameters for ${nodeType}: ${parsed.error.issues[0]?.message ?? "validation failed"}`);
+  }
+  const selectedArtifactParams = Object.fromEntries(
+    Object.entries(paramsRecord).filter(
+      ([key, value]) => key.startsWith("__selectedArtifact__") && typeof value === "string" && value.length <= 180
+    )
+  );
+  const merged = {
+    ...(parsed.data as Record<string, unknown>),
+    ...selectedArtifactParams
+  };
 
   if (nodeType === "model.sam3d_objects") {
     const normalizedScene = mergeSceneGenerationParams(merged);

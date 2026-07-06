@@ -10,6 +10,7 @@ import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getObjectBuffer } from "@/lib/storage/s3";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
+import { assertProjectStorageKeyAccess } from "@/lib/storage/access";
 import { worldManifestQuerySchema } from "@/lib/validation/schemas";
 
 type BundleMode = "same_node" | "project_fallback";
@@ -370,6 +371,7 @@ export async function GET(req: NextRequest) {
 
       let extraCount = 0;
       for (const storageKey of extraStorageKeys) {
+        await assertProjectStorageKeyAccess(selectedArtifact.projectId, storageKey);
         const extraRawUrl = await safeGetSignedDownloadUrl(storageKey);
         const extraUrl = toAbsoluteUrlMaybe(extraRawUrl, req);
         if (!extraUrl) continue;
@@ -514,6 +516,7 @@ export async function GET(req: NextRequest) {
             : null;
         let hdriUrlFromStorage: string | null = null;
         if (hdriStorageKey) {
+          await assertProjectStorageKeyAccess(selectedArtifact.projectId, hdriStorageKey);
           const rawUrl = await safeGetSignedDownloadUrl(hdriStorageKey);
           hdriUrlFromStorage = toAbsoluteUrlMaybe(rawUrl, req);
         }

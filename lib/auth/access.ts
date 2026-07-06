@@ -42,34 +42,6 @@ async function resolveProjectRoleForUser(input: {
   return { project, role };
 }
 
-function extractProjectIdFromUploadStorageKey(storageKey: string) {
-  const match = storageKey.match(/^projects\/[^/]+\/uploads\/([^/]+)\//);
-  const candidate = match?.[1]?.trim();
-  return candidate && candidate.length > 0 ? candidate : null;
-}
-
-function extractRunLabelFromRunsStorageKey(storageKey: string) {
-  const match = storageKey.match(/^projects\/([^/]+)\/runs\/([^/]+)\//);
-  const projectSlug = match?.[1]?.trim();
-  const runLabel = match?.[2]?.trim();
-  if (!projectSlug || !runLabel) return null;
-  return { projectSlug, runLabel };
-}
-
-function parseRunNumberFromRunLabel(runLabel: string) {
-  const match = runLabel.match(/^run[-_]?(\d+)$/i);
-  if (!match?.[1]) return null;
-  const value = Number(match[1]);
-  if (!Number.isInteger(value) || value <= 0) return null;
-  return value;
-}
-
-function extractLegacyProjectSegment(storageKey: string) {
-  const match = storageKey.match(/^projects\/([^/]+)\//);
-  const candidate = match?.[1]?.trim();
-  return candidate && candidate.length > 0 ? candidate : null;
-}
-
 export async function requireProjectAccess(projectId: string, minimumRole: ProjectRole) {
   const user = await requireAuthUser();
   const resolved = await resolveProjectRoleForUser({
@@ -157,37 +129,7 @@ export async function requireStorageObjectAccess(storageKey: string, minimumRole
         }
       });
 
-  const parsedProjectId = extractProjectIdFromUploadStorageKey(key);
-  const parsedRunLabel = extractRunLabelFromRunsStorageKey(key);
-  const parsedLegacySegment = extractLegacyProjectSegment(key);
-
-  const parsedRunNumber = parsedRunLabel ? parseRunNumberFromRunLabel(parsedRunLabel.runLabel) : null;
-  const runProjectId =
-    !artifact && !uploadAsset && parsedRunLabel && parsedRunNumber
-      ? (
-          await prisma.run.findFirst({
-            where: {
-              runNumber: parsedRunNumber,
-              project: {
-                slug: parsedRunLabel.projectSlug
-              }
-            },
-            select: { projectId: true }
-          })
-        )?.projectId ?? null
-      : null;
-
-  const legacyProjectId =
-    !artifact && !uploadAsset && !runProjectId && parsedLegacySegment
-      ? (
-          await prisma.project.findUnique({
-            where: { id: parsedLegacySegment },
-            select: { id: true }
-          })
-        )?.id ?? null
-      : null;
-
-  const projectId = artifact?.projectId ?? uploadAsset?.projectId ?? parsedProjectId ?? runProjectId ?? legacyProjectId;
+  const projectId = artifact?.projectId ?? uploadAsset?.projectId;
   if (!projectId) {
     throw new HttpError(404, "Storage object not found", "storage_object_not_found");
   }
@@ -206,6 +148,40 @@ export async function requireStorageObjectAccess(storageKey: string, minimumRole
     role: resolved.role as ProjectRole,
     artifactId: artifact?.id ?? null,
     uploadAssetId: uploadAsset?.id ?? null
+  };
+}
+
+export async function requireUploadStorageObjectAccess(storageKey: string, minimumRole: ProjectRole) {
+  const user = await requireAuthUser();
+  const key = storageKey.trim();
+  if (!key) {
+    throw new HttpError(400, "Storage key is required", "validation_error");
+  }
+  const uploadAsset = await prisma.uploadAsset.findUnique({
+    where: { storageKey: key },
+    select: {
+      id: true,
+      projectId: true,
+      mimeType: true,
+      byteSize: true,
+      fileName: true
+    }
+  });
+  if (!uploadAsset) {
+    throw new HttpError(404, "Upload not found", "upload_not_found");
+  }
+  const resolved = await resolveProjectRoleForUser({
+    projectId: uploadAsset.projectId,
+    userId: user.id
+  });
+  if (!resolved || !hasRole(resolved.role, minimumRole)) {
+    throw new HttpError(403, "Access denied", "forbidden");
+  }
+  return {
+    user,
+    project: resolved.project,
+    role: resolved.role as ProjectRole,
+    uploadAsset
   };
 }
 

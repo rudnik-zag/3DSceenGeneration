@@ -4,11 +4,16 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
-COPY package.json ./
-RUN pnpm install --no-frozen-lockfile
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm db:generate
+RUN pnpm build
+
+RUN mkdir -p /app/.local-storage /app/.run && chown -R node:node /app/.local-storage /app/.run /app/.next
 
 EXPOSE 3000
-CMD ["pnpm", "dev"]
+USER node
+ENV NODE_ENV=production
+CMD ["pnpm", "start"]

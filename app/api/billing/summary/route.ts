@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 import { resolveBillingStateForUser } from "@/lib/billing/entitlements";
 import { allPlanDefinitions } from "@/lib/billing/entitlements";
@@ -9,7 +9,7 @@ import { env } from "@/lib/env";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
     const user = await requireAuthUser();
     await enforceRateLimit({
@@ -45,4 +45,3 @@ export async function GET(req: NextRequest) {
     return toApiErrorResponse(error, "Failed to load billing summary");
   }
 }
-

@@ -39,6 +39,7 @@ export const env = {
   S3_REGION: process.env.S3_REGION ?? "us-east-1",
   S3_FORCE_PATH_STYLE: process.env.S3_FORCE_PATH_STYLE === "true",
   NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+  TRUST_PROXY_HEADERS: process.env.TRUST_PROXY_HEADERS === "true",
   SAM2_REPO_ROOT: process.env.SAM2_REPO_ROOT ?? "",
   SAM2_CHECKPOINT: process.env.SAM2_CHECKPOINT ?? "",
   SAM2_TOOLS_DIR: process.env.SAM2_TOOLS_DIR ?? "",

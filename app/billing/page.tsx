@@ -92,7 +92,7 @@ export default async function BillingPage() {
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
             {transactions.length === 0 ? <p className="text-zinc-400">No transactions yet.</p> : null}
-            {transactions.map((txn: any) => (
+            {transactions.map((txn) => (
               <div key={txn.id} className="rounded-lg border border-white/10 bg-black/20 p-2 text-zinc-200">
                 <p className="font-medium">
                   {txn.type} {txn.amount > 0 ? "+" : ""}
@@ -113,7 +113,7 @@ export default async function BillingPage() {
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
             {usageEvents.length === 0 ? <p className="text-zinc-400">No usage events yet.</p> : null}
-            {usageEvents.map((usage: any) => (
+            {usageEvents.map((usage) => (
               <div key={usage.id} className="rounded-lg border border-white/10 bg-black/20 p-2 text-zinc-200">
                 <p className="font-medium">{usage.featureKey}</p>
                 <p className="text-xs text-zinc-400">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
@@ -291,7 +291,12 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     [artifact.additionalSceneUrls]
   );
 
-  const updateCameraClipping = () => {
+  const gizmoModeRef = useRef(gizmoMode);
+  const pointSizeRef = useRef(pointSize);
+  gizmoModeRef.current = gizmoMode;
+  pointSizeRef.current = pointSize;
+
+  const updateCameraClipping = useCallback(() => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
@@ -305,9 +310,9 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
       camera.far = far;
       camera.updateProjectionMatrix();
     }
-  };
+  }, []);
 
-  const requestRender = () => {
+  const requestRender = useCallback(() => {
     if (requestRef.current) return;
     requestRef.current = requestAnimationFrame(() => {
       requestRef.current = null;
@@ -354,7 +359,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
         textures: textures.size
       });
     });
-  };
+  }, [updateCameraClipping]);
 
   const updateTree = () => {
     const root = rootObjectRef.current;
@@ -379,7 +384,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     setTree(flat);
   };
 
-  const fitObject = (target?: THREE.Object3D | null) => {
+  const fitObject = useCallback((target?: THREE.Object3D | null) => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     const scene = sceneRef.current;
@@ -405,7 +410,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     controls.target.copy(center);
     controls.update();
     requestRender();
-  };
+  }, [requestRender]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -451,7 +456,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
 
     const transform = new TransformControls(camera, renderer.domElement);
     transform.setSpace("world");
-    transform.setMode(gizmoMode);
+    transform.setMode(gizmoModeRef.current);
     transform.addEventListener("change", requestRender);
     transform.addEventListener("dragging-changed", (event: { value?: boolean }) => {
       controls.enabled = !(event.value ?? false);
@@ -586,7 +591,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
 
           const hasColor = Boolean(geometry.getAttribute("color"));
           const material = new THREE.PointsMaterial({
-            size: pointSize[0],
+            size: pointSizeRef.current[0],
             vertexColors: hasColor,
             color: hasColor ? undefined : new THREE.Color("#4ade80")
           });
@@ -650,14 +655,14 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
         }
       }
     };
-  }, [additionalSceneUrls, artifact.id, artifact.kind, artifact.url]);
+  }, [additionalSceneUrls, artifact.id, artifact.kind, artifact.url, fitObject, requestRender, updateCameraClipping]);
 
   useEffect(() => {
     const transform = transformRef.current;
     if (!transform) return;
     transform.setMode(gizmoMode);
     requestRender();
-  }, [gizmoMode]);
+  }, [gizmoMode, requestRender]);
 
   useEffect(() => {
     if (artifact.kind !== "point_ply") return;
@@ -673,7 +678,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     });
 
     requestRender();
-  }, [artifact.kind, pointSize]);
+  }, [artifact.kind, pointSize, requestRender]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -697,7 +702,7 @@ export function ViewerCanvas({ artifact }: { artifact: ViewerArtifact }) {
     selectionHelperRef.current = helper;
     scene.add(helper);
     requestRender();
-  }, [selectedNode]);
+  }, [requestRender, selectedNode]);
 
   const toggleVisibility = (node: TreeNode) => {
     node.object.visible = !node.object.visible;

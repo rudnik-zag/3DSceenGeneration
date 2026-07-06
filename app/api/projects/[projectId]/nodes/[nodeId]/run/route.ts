@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireProjectAccess } from "@/lib/auth/access";
-import { createRunWithTokenReservation } from "@/lib/billing/usage";
+import { createRunWithTokenReservation, finalizeRunUsage } from "@/lib/billing/usage";
 import { prisma } from "@/lib/db";
 import { env } from "@/lib/env";
 import { recordRunEvent } from "@/lib/execution/telemetry";
@@ -10,6 +10,7 @@ import { reserveNextRunNumber } from "@/lib/runs/numbering";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { nodeRunPayloadSchema } from "@/lib/validation/schemas";
 
 export async function POST(
@@ -27,7 +28,7 @@ export async function POST(
       message: "Run creation rate limit exceeded"
     });
 
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 64 * 1024);
     const parsed = nodeRunPayloadSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
@@ -98,19 +99,35 @@ export async function POST(
       queueOptions.priority = reservation.queuePriority;
     }
 
-    await runWorkflowQueue.add(
-      "run",
-      {
-        projectId,
-        graphId: graph.id,
-        runId: run.id,
-        startNodeId: nodeId,
-        forceNodeIds: forceNodeCacheBypass ? [nodeId] : []
-      },
-      {
-        ...queueOptions
+    try {
+      await runWorkflowQueue.add(
+        "run",
+        {
+          projectId,
+          graphId: graph.id,
+          runId: run.id,
+          startNodeId: nodeId,
+          forceNodeIds: forceNodeCacheBypass ? [nodeId] : []
+        },
+        {
+          ...queueOptions
+        }
+      );
+    } catch (queueError) {
+      const message = queueError instanceof Error ? queueError.message : "Queue unavailable";
+      await prisma.run.update({
+        where: { id: run.id },
+        data: {
+          status: "error",
+          finishedAt: new Date(),
+          logs: `${run.logs}\n[${new Date().toISOString()}] Queue failed: ${message}`
+        }
+      });
+      if (reservation) {
+        await finalizeRunUsage({ runId: run.id, status: "error" });
       }
-    );
+      throw queueError;
+    }
 
     await recordRunEvent({
       runId: run.id,

@@ -4,7 +4,7 @@
 This document describes the production security upgrade implemented for the workflow platform:
 
 1. Authentication (Auth.js + credentials + Argon2id)
-2. Session management (database sessions + secure cookies)
+2. Session management (signed JWT sessions + secure cookies)
 3. Project-based authorization (owner/editor/viewer)
 4. Private storage access (server-authorized signed URLs / protected object route)
 5. Input validation (Zod)
@@ -23,7 +23,7 @@ The implementation follows the original prompt, with these practical refinements
 1. Security controls are centralized in reusable helpers to avoid route-by-route drift.
 2. Authorization checks are enforced before storage URL generation or object streaming.
 3. Audit logging is write-fail-safe (never breaks user flow if audit insert fails).
-4. Storage key authorization includes artifact/upload DB checks and path-based fallback parsing for legacy keys.
+4. Storage key authorization requires exact project-scoped artifact/upload database references; path shape alone never grants access.
 5. Migration is incremental and backward-compatible where possible (`ownerId` mapped to existing `Project.userId` column).
 
 ## Architecture Summary
@@ -32,7 +32,7 @@ The implementation follows the original prompt, with these practical refinements
 - Auth.js with Prisma adapter and credentials provider.
 - Registration endpoint hashes passwords with Argon2id.
 - Login uses credentials provider + rate limiting.
-- Session strategy: database.
+- Session strategy: signed JWT.
 - Auth pages:
   - `/login`
   - `/register`
@@ -58,6 +58,7 @@ The implementation follows the original prompt, with these practical refinements
   - logs secure access attempts
 - Signed URLs are short-lived (TTL clamped by env).
 - Frontend never needs raw private bucket URLs.
+- Uploads are proxied through the protected object route and require an exact initialized byte count, allowed image MIME type, and matching file signature.
 
 ## Key Code Changes
 
@@ -147,6 +148,12 @@ Compatibility approach:
 - upload initialization
 - signed-url heavy routes
 - protected storage reads/writes
+- Production requests fail closed with `503` if Redis cannot enforce a limit.
+
+### Browser request integrity
+- Unsafe `/api/*` browser requests reject cross-site `Origin`/`Sec-Fetch-Site` metadata.
+- Stripe webhooks are exempt from origin checks and authenticated with the Stripe signature.
+- Forwarded client-IP headers are ignored unless `TRUST_PROXY_HEADERS=true`; the trusted reverse proxy must overwrite them.
 
 ## Audit Logging Coverage
 Implemented events include:
@@ -180,8 +187,11 @@ pnpm install
 pnpm db:generate
 pnpm db:migrate
 pnpm db:seed
+pnpm check
 pnpm dev
 ```
+
+For production, use `pnpm db:deploy` instead of the development migration command.
 
 ## Security Validation Checklist
 
@@ -195,12 +205,11 @@ pnpm dev
 - [ ] Audit log rows are created for sensitive actions
 - [ ] Signed URL access remains short-lived
 
-## Known Environment Note
-In this sandbox, `prisma generate` command reports schema load but does not emit updated client artifacts reliably.  
-If you observe stale Prisma types/client locally, run:
+## Dependency Audit Requirement
+Run the audit after every dependency update and before deployment:
 
 ```bash
-pnpm rebuild @prisma/client
+pnpm audit --prod --audit-level high
 ```
 
-Then rerun `pnpm db:generate`.
+Do not deploy a Next.js version below the minimum patched version reported by the audit. As of this documentation update, upgrade from `15.5.16` to at least `15.5.18` once registry access is available, then regenerate `pnpm-lock.yaml` with `pnpm install`.

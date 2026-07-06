@@ -342,7 +342,7 @@ model Artifact {
 model CacheEntry {
   id         String   @id @default(cuid())
   projectId  String
-  cacheKey   String   @unique
+  cacheKey   String
   artifactId String
   createdAt  DateTime @default(now())
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -350,6 +350,7 @@ model CacheEntry {
 
   @@index([projectId])
   @@index([artifactId])
+  @@unique([projectId, cacheKey])
 }
 
 model AuditLog {
@@ -411,6 +412,7 @@ model TokenTransaction {
   amount      Int
   description String
   metadata    Json?
+  idempotencyKey String?                @unique
   createdAt   DateTime               @default(now())
   user        User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   project     Project?               @relation(fields: [projectId], references: [id], onDelete: SetNull)
@@ -447,6 +449,9 @@ model StripeWebhookEvent {
   eventId   String   @unique
   eventType String
   processed Boolean  @default(false)
+  status    String   @default("pending")
+  attempts  Int      @default(0)
+  lastError String?
   payload   Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -328,6 +328,6 @@ Include and maintain:
 
 ## Notes for Investor Use
 
-- This document is aligned to current product capabilities in the repository as of April 5, 2026.
+- This document is aligned to current product capabilities in the repository as of July 5, 2026.
 - Replace draft market-size placeholders with externally sourced, citation-backed numbers before formal fundraising.
 - Keep the CSV model as the single source of truth for scenario planning and update this memo from that model monthly.

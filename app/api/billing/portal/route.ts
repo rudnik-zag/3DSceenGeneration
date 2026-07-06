@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 import { requireAuthUser } from "@/lib/auth/session";
 import { createStripeBillingPortalSession, getAppBaseUrl, isStripeConfigured } from "@/lib/billing/stripe";
@@ -7,7 +7,7 @@ import { env } from "@/lib/env";
 import { HttpError, toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 
-export async function POST(req: NextRequest) {
+export async function POST() {
   try {
     const user = await requireAuthUser();
     await enforceRateLimit({
@@ -44,4 +44,3 @@ export async function POST(req: NextRequest) {
     return toApiErrorResponse(error, "Failed to open billing portal");
   }
 }
-

@@ -87,6 +87,8 @@ Role model (`ProjectRole`): `viewer < editor < owner`.
   - upload init
   - signed URL/storage read/write
 - Audit trail table (`AuditLog`) written via `lib/security/audit.ts`
+- Unsafe browser API requests are checked for same-origin metadata in `middleware.ts` (Stripe webhook excluded because it uses signature verification).
+- Production rate limiting fails closed if Redis is unavailable; development remains fail-open for local usability.
 
 ### 4.3 Important API Groups
 
@@ -110,7 +112,7 @@ Runs and execution:
 Artifacts and storage:
 
 - `GET/DELETE /api/artifacts/:artifactId`
-- `POST /api/uploads` (signed upload init)
+- `POST /api/uploads` (authorized image upload initialization)
 - `GET/PUT /api/storage/object?key=...`
 
 Viewer and splats:
@@ -309,8 +311,9 @@ Implementation: `lib/storage/s3.ts`.
 
 ### 9.1 Primary and Fallback
 
-- Primary: S3/MinIO signed URL and object operations
-- Fallback: local filesystem (`.local-storage`) when S3 endpoint is unavailable
+- Primary: S3/MinIO object operations and short-lived signed downloads
+- Upload writes: protected application route with exact initialized size, MIME, and magic-byte checks
+- Fallback: local filesystem (`LOCAL_STORAGE_ROOT`) only for S3 network/transport outages
 - Temporary S3-disable window avoids repeated hard failures
 
 ### 9.2 Object Key Patterns
@@ -338,9 +341,7 @@ Project delete removes DB rows and related storage prefixes (`/api/projects/:pro
 
 - validates artifact access
 - resolves mesh/splat bundles
-- supports bundle mode:
-  - `same_node`
-  - `project_fallback`
+- enforces `same_node` bundle mode; legacy `project_fallback` requests are normalized and returned with a warning
 - resolves tileset JSON for splat sources
 - resolves viewer environment from `viewer.environment` node graph params + latest node artifact
 

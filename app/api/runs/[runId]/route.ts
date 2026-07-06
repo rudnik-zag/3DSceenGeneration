@@ -10,6 +10,7 @@ import { runWorkflowQueue } from "@/lib/queue/queues";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
 import { runActionSchema } from "@/lib/validation/schemas";
 
@@ -103,7 +104,7 @@ export async function PATCH(
   try {
     const { runId } = await params;
     const access = await requireRunAccess(runId, "editor");
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 16 * 1024);
     const parsed = runActionSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
@@ -117,14 +118,19 @@ export async function PATCH(
       return NextResponse.json({ run: current });
     }
 
-    const run = await prisma.run.update({
-      where: { id: runId },
+    const canceled = await prisma.run.updateMany({
+      where: { id: runId, status: { in: ["queued", "running"] } },
       data: {
         status: "canceled",
         finishedAt: new Date(),
         logs: `${current.logs}\n[${new Date().toISOString()}] Cancel requested`
       }
     });
+    if (canceled.count === 0) {
+      const latest = await prisma.run.findUnique({ where: { id: runId } });
+      return NextResponse.json({ run: latest });
+    }
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: runId } });
     const queuedJob = await runWorkflowQueue.getJob(runId);
     if (queuedJob) {
       try {

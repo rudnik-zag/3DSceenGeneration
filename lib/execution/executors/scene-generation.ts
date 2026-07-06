@@ -1,4 +1,3 @@
-import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
@@ -6,6 +5,7 @@ import path from "path";
 
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { createJsonBuffer, createMinimalGlbBuffer, createPointCloudPlyBuffer } from "@/lib/execution/mock-assets";
+import { runManagedProcess } from "@/lib/execution/process";
 import { getDefaultSam3dConfig, resolveSam3dConfigName } from "@/lib/sam3d/configs";
 import { putObjectToStorage } from "@/lib/storage/s3";
 
@@ -263,37 +263,24 @@ function resolveSceneSettings(ctx: NodeExecutionContext) {
   };
 }
 
-async function runProcess(command: string, args: string[], cwd: string) {
-  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const env = { ...process.env };
-    if (!env.PYTORCH_CUDA_ALLOC_CONF) {
-      env.PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True";
-    }
-    const child = spawn(command, args, { cwd, env });
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(
-          new Error(
-            `SceneGeneration process failed (exit=${code})\n` +
-              `cmd: ${command} ${args.join(" ")}\n` +
-              `stderr: ${stderr.slice(-10000)}`
-          )
-        );
-      }
-    });
+async function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  isCancellationRequested?: () => Promise<boolean>
+) {
+  const processEnv = { ...process.env };
+  if (!processEnv.PYTORCH_CUDA_ALLOC_CONF) {
+    processEnv.PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True";
+  }
+  return runManagedProcess({
+    command,
+    args,
+    cwd,
+    env: processEnv,
+    label: "SceneGeneration process",
+    timeoutMs: Number(process.env.SAM3D_TIMEOUT_MS ?? 1_800_000),
+    isCancellationRequested
   });
 }
 
@@ -830,7 +817,12 @@ async function executePerMaskReal(params: {
       );
 
       try {
-        const processResult = await runProcess(command.command, command.args, command.cwd);
+        const processResult = await runProcess(
+          command.command,
+          command.args,
+          command.cwd,
+          params.ctx.isCancellationRequested
+        );
         aggregateStdout.push(
           `[per-mask ${index}] ${processResult.stdout.trim()}`.trim()
         );
@@ -1136,7 +1128,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
           `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process cmd=${commandLine}`
         );
         try {
-          processResult = await runProcess(command.command, command.args, command.cwd);
+          processResult = await runProcess(command.command, command.args, command.cwd, ctx.isCancellationRequested);
         } catch (error) {
           if (mode !== "mesh" || !isCudaOomError(error)) {
             throw error;
