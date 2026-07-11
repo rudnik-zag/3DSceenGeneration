@@ -328,9 +328,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                           <img
                             src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
                             alt={`${project.name} preview`}
-                            className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
-                              loadedPreviewIds[project.id] ? "opacity-100" : "opacity-0"
-                            }`}
+                            className="relative z-[1] h-full w-full object-cover motion-panel group-hover:scale-[1.03]"
                             loading="lazy"
                             onLoad={() =>
                               setLoadedPreviewIds((prev) =>
