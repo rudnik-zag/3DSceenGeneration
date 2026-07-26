@@ -85,6 +85,7 @@ export interface GraphNodeData {
   label: string;
   params: Record<string, unknown>;
   status?: NodeRuntimeStatus;
+  isLockedByRun?: boolean;
   latestArtifactId?: string;
   latestArtifactKind?: string;
   uiScale?: NodeUiScale;

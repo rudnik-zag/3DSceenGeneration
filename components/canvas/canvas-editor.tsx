@@ -96,6 +96,42 @@ interface NodeArtifact {
   createdAt?: string;
 }
 
+interface RunArtifactPayload {
+  nodeId: string;
+  id: string;
+  kind: string;
+  outputKey?: string;
+  hidden?: boolean;
+  previewUrl?: string | null;
+  url?: string | null;
+  createdAt?: string;
+  meta?: Record<string, unknown> | null;
+}
+
+interface RunStepPayload {
+  nodeId?: string | null;
+  status?: string | null;
+  sequence?: number | null;
+}
+
+interface RunEventPayload {
+  eventType?: string | null;
+  nodeId?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+interface RunPayload {
+  id: string;
+  status: string;
+  progress?: number | null;
+  logs?: string | null;
+  artifacts?: RunArtifactPayload[];
+  steps?: RunStepPayload[];
+  events?: RunEventPayload[];
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
+
 interface CanvasEditorProps {
   projectId: string;
   initialGraph: GraphDocument;
@@ -645,7 +681,9 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       ...base.data,
       label: typeof base.data.label === "string" && base.data.label.trim().length > 0 ? base.data.label : spec.title,
       params: mergedParams,
-      status: base.data.status ?? "idle",
+      status: "idle",
+      isLockedByRun: false,
+      runProgress: 0,
       latestArtifactId: resolvedPreviewArtifact?.id,
       latestArtifactKind: resolvedPreviewArtifact?.kind,
       previewUrl:
@@ -675,6 +713,67 @@ function withStyledEdge(edge: Edge): Edge {
       ...(edge.style ?? {})
     }
   };
+}
+
+function normalizeRuntimeNodeId(raw: unknown) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const [topLevelNodeId] = trimmed.split("::");
+  return topLevelNodeId?.trim() || null;
+}
+
+function readQueuedStartNodeId(run: RunPayload) {
+  const events = Array.isArray(run.events) ? run.events : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const metadata = event?.metadata;
+    const metadataStartNodeId =
+      metadata && typeof metadata.startNodeId === "string" ? normalizeRuntimeNodeId(metadata.startNodeId) : null;
+    if (metadataStartNodeId) return metadataStartNodeId;
+    const eventNodeId = normalizeRuntimeNodeId(event?.nodeId);
+    if (eventNodeId) return eventNodeId;
+  }
+  return null;
+}
+
+function deriveRunTargetNodeId(run: RunPayload) {
+  const steps = Array.isArray(run.steps) ? [...run.steps] : [];
+  const runningStepNodeId =
+    steps
+      .filter((step) => step?.status === "running" || step?.status === "queued")
+      .sort((left, right) => Number(right?.sequence ?? 0) - Number(left?.sequence ?? 0))
+      .map((step) => normalizeRuntimeNodeId(step?.nodeId))
+      .find(Boolean) ?? null;
+  if (runningStepNodeId) return runningStepNodeId;
+
+  const latestStepNodeId =
+    steps
+      .sort((left, right) => Number(right?.sequence ?? 0) - Number(left?.sequence ?? 0))
+      .map((step) => normalizeRuntimeNodeId(step?.nodeId))
+      .find(Boolean) ?? null;
+  if (latestStepNodeId) return latestStepNodeId;
+
+  return readQueuedStartNodeId(run);
+}
+
+function deriveLockedNodeIdsFromRun(run: RunPayload, fallbackTargetNodeId: string | null) {
+  const activeNodeIds = new Set<string>();
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+
+  for (const step of steps) {
+    if (step?.status !== "running" && step?.status !== "queued") continue;
+    const nodeId = normalizeRuntimeNodeId(step.nodeId);
+    if (nodeId) activeNodeIds.add(nodeId);
+  }
+
+  if (activeNodeIds.size > 0) return activeNodeIds;
+
+  if (ACTIVE_RUN_STATUSES.has(run.status) && fallbackTargetNodeId) {
+    activeNodeIds.add(fallbackTargetNodeId);
+  }
+
+  return activeNodeIds;
 }
 
 async function readApiErrorMessage(response: Response, fallback: string) {
@@ -748,6 +847,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const [showMiniMap, setShowMiniMap] = useState(true);
   const [editingWorkflowGroupId, setEditingWorkflowGroupId] = useState<string | null>(null);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const restoredActiveRunRef = useRef(false);
   const runNodeRef = useRef<(nodeId: string) => void>(() => {});
   const uploadNodeRef = useRef<(nodeId: string, file: File) => void>(() => {});
   const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
@@ -769,6 +870,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
 
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
+  const selectedNodeLocked = Boolean(selectedNode?.data.isLockedByRun || selectedNode?.data.status === "running");
   const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
   const selectedNodeIds = useMemo(() => nodes.filter((node) => node.selected).map((node) => node.id), [nodes]);
@@ -813,6 +915,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     if (!query) return flatNodeSpecs;
     return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
   }, [flatNodeSpecs, nodeSearchMenu?.query]);
+  useEffect(() => {
+    activeRunIdRef.current = activeRunId;
+  }, [activeRunId]);
   const canNodeRun = useCallback((node: Node<GraphNodeData> | undefined) => {
     if (!node) return false;
     const nodeType = node.type as WorkflowNodeType;
@@ -1310,6 +1415,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           label: options?.label?.trim() || spec.title,
           params: options?.params ? mergeNodeParamsWithDefaults(nodeType, options.params) : { ...spec.defaultParams },
           status: "idle",
+          isLockedByRun: false,
           uiScale: options?.uiScale ?? nodeScalePreset,
           onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
           onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
@@ -2448,6 +2554,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setNodes((prev) =>
         prev.map((node) => {
           if (node.id !== nodeId) return node;
+          if (node.data.isLockedByRun || node.data.status === "running") return node;
           const nodeType = node.type as WorkflowNodeType;
           const spec = nodeSpecRegistry[nodeType];
           const nextParams = {
@@ -2597,6 +2704,11 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const uploadImageForNode = useCallback(
     async (nodeId: string, file: File) => {
       if (!nodeId) return;
+      const targetNode = nodeById.get(nodeId);
+      if (targetNode?.data.isLockedByRun || targetNode?.data.status === "running") {
+        toast({ title: "Node is busy", description: "Cannot replace inputs while this node is still running." });
+        return;
+      }
       const extension = file.name.toLowerCase().split(".").pop();
       const inferredContentType = extension === "png"
         ? "image/png"
@@ -2681,7 +2793,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         toast({ title: "Upload failed", description: error instanceof Error ? error.message : "Unknown error" });
       }
     },
-    [createNodePreviewUrl, projectId, setNodes]
+    [createNodePreviewUrl, nodeById, projectId, setNodes]
   );
 
   const workflowLibraryPayload = useCallback((): WorkflowLibraryPayload => ({
@@ -2698,7 +2810,6 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         data: {
           label: n.data.label,
           params: n.data.params,
-          status: n.data.status,
           uiScale: n.data.uiScale ?? nodeScalePreset
         }
       })),
@@ -2722,7 +2833,6 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         data: {
           label: n.data.label,
           params: n.data.params,
-          status: n.data.status,
           uiScale: n.data.uiScale ?? nodeScalePreset,
           previewUrl: n.data.previewUrl ?? null
         }
@@ -2814,7 +2924,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       url?: string | null;
       createdAt?: string;
       meta?: Record<string, unknown> | null;
-    }>
+    }>,
+    lockedNodeIds: Set<string> = new Set<string>()
   ) => {
     const lines = logs.split("\n");
     const executed = new Set<string>();
@@ -2841,12 +2952,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     });
 
     setNodes((prev) => {
-      const hasRunningOrQueued = status === "running" || status === "queued";
+      const hasRunningOrQueued = ACTIVE_RUN_STATUSES.has(status);
       return prev.map((node) => {
-        if (targetNodeId && node.id !== targetNodeId) {
-          return node;
-        }
-
         const nodeType = node.type as WorkflowNodeType;
         const spec = nodeSpecRegistry[nodeType];
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
@@ -2889,17 +2996,23 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               : node.data.runtimeWarning;
 
         let runtimeStatus = node.data.status ?? "idle";
+        const isLockedByRun = hasRunningOrQueued && lockedNodeIds.has(node.id);
 
         if (errored.has(node.id)) runtimeStatus = "error";
         else if (cached.has(node.id)) runtimeStatus = "cache-hit";
         else if (sourceResolved.has(node.id)) runtimeStatus = "success";
         else if (executed.has(node.id)) runtimeStatus = "success";
-        else if (hasRunningOrQueued && node.data.status === "running") runtimeStatus = "running";
+        else if (isLockedByRun) runtimeStatus = "running";
+        else if (hasRunningOrQueued && targetNodeId && node.id === targetNodeId) runtimeStatus = "running";
+        else if (!hasRunningOrQueued && targetNodeId && node.id === targetNodeId && status === "success") runtimeStatus = "success";
+        else if (!hasRunningOrQueued && targetNodeId && node.id === targetNodeId && status === "error") runtimeStatus = "error";
+        else if (!hasRunningOrQueued && node.data.isLockedByRun && node.data.status === "running") runtimeStatus = "idle";
 
         return {
           ...node,
           data: {
             ...node.data,
+            isLockedByRun,
             status: runtimeStatus,
             runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
             latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
@@ -2925,60 +3038,74 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     });
   };
 
-  const pollRun = (runId: string, targetNodeId: string | null) => {
-    if (runPollRef.current) {
-      clearInterval(runPollRef.current);
-    }
+  const stopRunPolling = useCallback(() => {
+    if (!runPollRef.current) return;
+    clearInterval(runPollRef.current);
+    runPollRef.current = null;
+  }, []);
 
-    runPollRef.current = setInterval(async () => {
+  const refreshRunState = useCallback(
+    async (runId: string, preferredTargetNodeId: string | null = null) => {
       const res = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) return null;
 
-      const data = await res.json();
-      setRunLogs(data.run.logs ?? "");
+      const data = (await res.json()) as { run: RunPayload };
+      const run = data.run;
+      const derivedTargetNodeId = deriveRunTargetNodeId(run) ?? preferredTargetNodeId;
+      const lockedNodeIds = deriveLockedNodeIdsFromRun(run, derivedTargetNodeId);
+
+      setRunLogs(run.logs ?? "");
       applyRunNodeState(
-        data.run.logs ?? "",
-        data.run.status,
-        Number(data.run.progress ?? 0),
-        targetNodeId,
-        (data.run.artifacts ?? []).map(
-          (a: {
-            nodeId: string;
-            id: string;
-            kind: string;
-            outputKey?: string;
-            hidden?: boolean;
-            previewUrl?: string | null;
-            url?: string | null;
-            createdAt?: string;
-            meta?: Record<string, unknown> | null;
-          }) => ({
-            nodeId: a.nodeId,
-            id: a.id,
-            kind: a.kind,
-            outputKey: a.outputKey,
-            hidden: a.hidden,
-            previewUrl: a.previewUrl ?? null,
-            url: a.url ?? null,
-            createdAt: a.createdAt,
-            meta: a.meta ?? null
-          })
-        )
+        run.logs ?? "",
+        run.status,
+        Number(run.progress ?? 0),
+        derivedTargetNodeId,
+        (run.artifacts ?? []).map((artifact) => ({
+          nodeId: artifact.nodeId,
+          id: artifact.id,
+          kind: artifact.kind,
+          outputKey: artifact.outputKey,
+          hidden: artifact.hidden,
+          previewUrl: artifact.previewUrl ?? null,
+          url: artifact.url ?? null,
+          createdAt: artifact.createdAt,
+          meta: artifact.meta ?? null
+        })),
+        lockedNodeIds
       );
 
-      if (["success", "error", "canceled"].includes(data.run.status)) {
-        setActiveRunId(null);
-        clearInterval(runPollRef.current!);
-        runPollRef.current = null;
-        const title = data.run.status === "success" ? "Run finished" : data.run.status === "canceled" ? "Run canceled" : "Run failed";
-        const logLines = String(data.run.logs ?? "")
+      return {
+        run,
+        targetNodeId: derivedTargetNodeId
+      };
+    },
+    [applyRunNodeState]
+  );
+
+  const pollRun = useCallback((runId: string, targetNodeId: string | null) => {
+    stopRunPolling();
+    let resolvedTargetNodeId = targetNodeId;
+
+    runPollRef.current = setInterval(async () => {
+      const snapshot = await refreshRunState(runId, resolvedTargetNodeId);
+      if (!snapshot) return;
+
+      resolvedTargetNodeId = snapshot.targetNodeId;
+      if (["success", "error", "canceled"].includes(snapshot.run.status)) {
+        if (activeRunIdRef.current === runId) {
+          setActiveRunId(null);
+        }
+        stopRunPolling();
+        const title =
+          snapshot.run.status === "success" ? "Run finished" : snapshot.run.status === "canceled" ? "Run canceled" : "Run failed";
+        const logLines = String(snapshot.run.logs ?? "")
           .split("\n")
           .map((line: string) => line.trim())
           .filter(Boolean);
         const descriptionBase = `Run ${runId.slice(0, 8)}`;
         let description = descriptionBase;
 
-        if (data.run.status === "success") {
+        if (snapshot.run.status === "success") {
           const executedLine = [...logLines].reverse().find((line) => line.includes(" executed "));
           if (executedLine) {
             const nodeMatch = executedLine.match(/\]\s+([^\s]+)\s+executed/);
@@ -2991,7 +3118,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               description = `${description} | ${warningsMatch[1]}`;
             }
           }
-        } else if (data.run.status === "error") {
+        } else if (snapshot.run.status === "error") {
           const errorLine = [...logLines].reverse().find((line) => line.includes("ERROR:"));
           const errorLineIndex = errorLine ? logLines.lastIndexOf(errorLine) : -1;
           const detailsAfterError = errorLineIndex >= 0 ? logLines.slice(errorLineIndex + 1) : [];
@@ -3011,7 +3138,48 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         toast({ title, description });
       }
     }, 1600);
-  };
+  }, [refreshRunState, stopRunPolling]);
+
+  useEffect(() => {
+    return () => {
+      stopRunPolling();
+    };
+  }, [stopRunPolling]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreActiveRun = async () => {
+      if (restoredActiveRunRef.current || activeRunIdRef.current) return;
+      restoredActiveRunRef.current = true;
+
+      const res = await fetch(`/api/projects/${projectId}/runs?limit=20`, { cache: "no-store" });
+      if (!res.ok || cancelled) return;
+
+      const data = (await res.json()) as {
+        runs?: Array<{
+          id: string;
+          status: string;
+        }>;
+      };
+      const activeRun = (data.runs ?? []).find((run) => ACTIVE_RUN_STATUSES.has(run.status));
+      if (!activeRun || cancelled) return;
+
+      const snapshot = await refreshRunState(activeRun.id);
+      if (!snapshot || cancelled) return;
+
+      if (ACTIVE_RUN_STATUSES.has(snapshot.run.status)) {
+        setActiveRunId(activeRun.id);
+        pollRun(activeRun.id, snapshot.targetNodeId);
+      }
+    };
+
+    void restoreActiveRun();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pollRun, projectId, refreshRunState]);
 
   const markNodesPreparingRun = useCallback(
     (startNodeId?: string) => {
@@ -3021,6 +3189,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
             ...node,
             data: {
               ...node.data,
+              isLockedByRun: true,
               status: "running",
               runProgress: 0,
               runtimeWarning: null
@@ -3035,9 +3204,10 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           ...node,
           data: {
             ...node.data,
-            status: node.id === startNodeId && node.type !== "input.image" ? "running" : node.data.status,
-            runProgress: node.id === startNodeId && node.type !== "input.image" ? 0 : node.data.runProgress ?? 0,
-            runtimeWarning: node.id === startNodeId && node.type !== "input.image" ? null : node.data.runtimeWarning
+            isLockedByRun: node.id === startNodeId,
+            status: node.id === startNodeId ? "running" : node.data.status,
+            runProgress: node.id === startNodeId ? 0 : node.data.runProgress ?? 0,
+            runtimeWarning: node.id === startNodeId ? null : node.data.runtimeWarning
           }
         }))
       );
@@ -3047,6 +3217,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   const startRun = async (startNodeId?: string) => {
     if (isStartingRun) return;
+    if (startNodeId) {
+      const targetNode = nodeById.get(startNodeId);
+      if (targetNode?.data.isLockedByRun || targetNode?.data.status === "running") {
+        toast({ title: "Node is busy", description: "This node is still running and cannot be edited or rerun yet." });
+        return;
+      }
+    }
     setIsStartingRun(true);
     try {
       const latestGraphId = await saveGraph({ silent: true });
@@ -4069,12 +4246,21 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                     </div>
                     <Separator className="mb-3" />
                     {canNodeRun(selectedNode) ? (
-                      <Button className="mb-3 w-full rounded-xl" disabled={isStartingRun} onClick={() => startRun(selectedNode.id)}>
+                      <Button
+                        className="mb-3 w-full rounded-xl"
+                        disabled={isStartingRun || selectedNodeLocked}
+                        onClick={() => startRun(selectedNode.id)}
+                      >
                         <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
                       </Button>
                     ) : selectedNode.type === "input.image" ? (
                       <div className="mb-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
                         Run is available only when source mode is <span className="text-zinc-200">generate</span>.
+                      </div>
+                    ) : null}
+                    {selectedNodeLocked ? (
+                      <div className="mb-3 rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                        This node is locked while its run is active.
                       </div>
                     ) : null}
                     <ScrollArea className="h-[calc(100vh-260px)] max-h-[46vh] pr-2">
@@ -4151,13 +4337,18 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                                 <Label>{field.label}</Label>
                                 {field.input === "textarea" || field.input === "json" ? (
                                   <Textarea
+                                    disabled={selectedNodeLocked}
                                     value={String(value ?? "")}
                                     onChange={(e) => updateSelectedNodeParam(field.key, e.target.value)}
                                     rows={field.input === "json" ? 5 : 3}
                                     className="rounded-xl"
                                   />
                                 ) : field.input === "select" ? (
-                                  <Select value={String(value ?? field.options?.[0] ?? "")} onValueChange={(v) => updateSelectedNodeParam(field.key, v)}>
+                                  <Select
+                                    disabled={selectedNodeLocked}
+                                    value={String(value ?? field.options?.[0] ?? "")}
+                                    onValueChange={(v) => updateSelectedNodeParam(field.key, v)}
+                                  >
                                     <SelectTrigger className="rounded-xl">
                                       <SelectValue />
                                     </SelectTrigger>
@@ -4174,12 +4365,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                                     type="button"
                                     variant={boolValue ? "default" : "outline"}
                                     className="h-9 w-full justify-start rounded-xl"
+                                    disabled={selectedNodeLocked}
                                     onClick={() => updateSelectedNodeParam(field.key, !boolValue)}
                                   >
                                     {boolValue ? "Enabled" : "Disabled"}
                                   </Button>
                                 ) : (
                                   <Input
+                                    disabled={selectedNodeLocked}
                                     type={field.input === "number" ? "number" : "text"}
                                     value={String(value ?? "")}
                                     min={field.input === "number" ? field.min : undefined}

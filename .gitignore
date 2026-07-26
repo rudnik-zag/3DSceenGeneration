@@ -28,6 +28,7 @@ tsconfig.tsbuildinfo
 dist/
 downloads/
 test_data/
+python_script/
 eggs/
 .eggs/
 lib64/

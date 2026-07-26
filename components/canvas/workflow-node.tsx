@@ -323,6 +323,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   const nodeStatus = data.status ?? "idle";
+  const isRuntimeLocked = Boolean(data.isLockedByRun || nodeStatus === "running");
   const statusFxClass =
     nodeStatus === "success"
       ? "node-success-glow"
@@ -373,7 +374,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       )}
     >
       <NodeResizer
-        isVisible={selected}
+        isVisible={selected && !isRuntimeLocked}
         minWidth={minNodeWidth}
         minHeight={minNodeHeight}
         maxWidth={720}
@@ -444,7 +445,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isSam2Node ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Mode</p>
             <select
@@ -485,7 +486,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isCustomSceneGenNode ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Config Preset</p>
             <select
@@ -560,7 +561,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           ) : null}
         </div>
       ) : isSceneGenerationPipelineNode ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">objectPrompt</p>
             <input
@@ -632,7 +633,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isGroundingDinoNode ? (
-        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] text-zinc-400">Classes to detect</p>
           <input
             className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
@@ -647,7 +648,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isQwenImageEditNode ? (
-        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] text-zinc-400">Edit prompt</p>
           <textarea
             className="nodrag min-h-[68px] w-full resize-y rounded-md border border-[#555] bg-[#1f1f1f] px-2 py-1.5 text-[10px] text-[#d7d7d7] outline-none"
@@ -659,7 +660,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isInputImageNode ? (
-        <div className="mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-1">
+        <div className={cn("mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-1", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="mb-1 grid grid-cols-2 gap-1">
             <button
               type="button"
@@ -745,7 +746,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
           )}
           onDragOver={
-            isInputImageNode
+            isInputImageNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -753,7 +754,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               : undefined
           }
           onDrop={
-            isInputImageNode && !isImageGenerationNode
+            isInputImageNode && !isImageGenerationNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -799,12 +800,18 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               </div>
             )}
             {isInputImageNode && hasImagePreview && !isImageGenerationNode ? (
-              <label className="nodrag absolute bottom-2 right-2 inline-flex cursor-pointer items-center gap-1 rounded-full border border-white/25 bg-black/70 px-2 py-1 text-[10px] text-zinc-100 transition hover:border-white/40 hover:bg-black/85">
+              <label
+                className={cn(
+                  "nodrag absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full border border-white/25 bg-black/70 px-2 py-1 text-[10px] text-zinc-100 transition hover:border-white/40 hover:bg-black/85",
+                  isRuntimeLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                )}
+              >
                 <UploadCloud className="h-3.5 w-3.5" />
                 <span>Replace</span>
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
+                  disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -827,14 +834,15 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           </p>
           {isInputImageNode && !hasImagePreview && !isImageGenerationNode ? (
             <div
-              className="nodrag mt-2 rounded-lg border border-dashed border-white/20 bg-black/20 p-2 text-center"
+              className={cn("nodrag mt-2 rounded-lg border border-dashed border-white/20 bg-black/20 p-2 text-center", isRuntimeLocked && "opacity-60")}
             >
-              <label className="nodrag inline-flex cursor-pointer items-center gap-1 text-[11px] text-zinc-200">
+              <label className={cn("nodrag inline-flex items-center gap-1 text-[11px] text-zinc-200", isRuntimeLocked ? "cursor-not-allowed" : "cursor-pointer")}>
                 <UploadCloud className="h-3.5 w-3.5" />
                 <span>Upload / Drop Image</span>
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
+                  disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -889,7 +897,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       )}
 
       {outputVersionChoices.length > 0 ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] uppercase tracking-[0.08em] text-zinc-400">Output Version</p>
           {outputVersionChoices.map((choice) => (
             <div key={`${id}-${choice.portId}`} className="space-y-1">
@@ -915,6 +923,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <button
           type="button"
           onClick={() => data.onRunNode?.(id)}
+          disabled={isRuntimeLocked}
           className="mb-2 inline-flex h-7 items-center gap-1 rounded-md border border-[#5f6f53] bg-[#2d3a2a] px-2 text-[10px] font-medium text-[#cfe3c1] transition hover:bg-[#34452f]"
         >
           <Play className="h-3 w-3" />
