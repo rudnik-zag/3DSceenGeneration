@@ -17,7 +17,8 @@ function sanitizeFilename(filename: string) {
 const UPLOAD_EXTENSIONS = new Map([
   ["image/png", "png"],
   ["image/jpeg", "jpg"],
-  ["image/webp", "webp"]
+  ["image/webp", "webp"],
+  ["video/mp4", "mp4"]
 ]);
 
 const MAX_UPLOAD_BYTE_SIZE = 1024 * 1024 * 100;
@@ -47,6 +48,13 @@ export async function POST(req: NextRequest) {
     const contentType = data.contentType.trim().toLowerCase();
     const byteSize = Math.max(1, Math.round(data.byteSize));
     const extension = UPLOAD_EXTENSIONS.get(contentType);
+    const category =
+      typeof data.category === "string" && data.category.trim().length > 0
+        ? data.category.trim()
+        : contentType.startsWith("video/")
+          ? "input.video"
+          : "input.image";
+    const mediaFolder = contentType.startsWith("video/") ? "videos" : "images";
     if (!extension) {
       return NextResponse.json({ error: "unsupported_file_type", message: "Unsupported content type." }, { status: 400 });
     }
@@ -67,7 +75,7 @@ export async function POST(req: NextRequest) {
       projectName: access.project.name,
       projectId: access.project.id
     });
-    const key = `${buildProjectUploadsPrefix({ projectSlug })}/${access.project.id}/images/${Date.now()}_${safeFilename}`;
+    const key = `${buildProjectUploadsPrefix({ projectSlug })}/${access.project.id}/${mediaFolder}/${Date.now()}_${safeFilename}`;
     const uploadUrl = null;
     const directUploadUrl = `/api/storage/object?key=${encodeURIComponent(key)}`;
 
@@ -75,7 +83,7 @@ export async function POST(req: NextRequest) {
       data: {
         projectId: access.project.id,
         nodeId: data.nodeId ?? null,
-        category: "input.image",
+        category,
         fileName: filename,
         mimeType: contentType,
         byteSize,

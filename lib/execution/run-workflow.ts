@@ -47,6 +47,12 @@ function inferImageMimeTypeFromPath(value: string) {
   return "image/jpeg";
 }
 
+function inferMimeTypeFromPath(value: string) {
+  const lowered = value.toLowerCase();
+  if (lowered.endsWith(".mp4")) return "video/mp4";
+  return inferImageMimeTypeFromPath(value);
+}
+
 function inferArtifactKindFromMime(mimeType: string): ArtifactKind {
   if (mimeType.includes("png") || mimeType.includes("jpeg") || mimeType.includes("jpg") || mimeType.includes("webp") || mimeType.includes("svg")) {
     return "image";
@@ -60,6 +66,7 @@ function appendLog(prev: string, line: string) {
 
 const STEP_CODE_MAP: Partial<Record<WorkflowNodeType, string>> = {
   "input.image": "INPUT_IMAGE",
+  "input.video": "INPUT_VIDEO",
   "input.text": "INPUT_TEXT",
   "input.cameraPath": "INPUT_CAMERA_PATH",
   "viewer.environment": "VIEWER_ENVIRONMENT",
@@ -339,9 +346,9 @@ async function createRuntimeArtifactFromLocalPath(params: {
 }) {
   const buffer = await fs.readFile(params.filePath);
   const hash = stableHashForOutput(buffer);
-  const mimeType = inferImageMimeTypeFromPath(params.filePath);
+  const mimeType = inferMimeTypeFromPath(params.filePath);
   const kind = inferArtifactKindFromMime(mimeType);
-  const artifactType: ArtifactType = kind === "image" ? "Image" : "JsonData";
+  const artifactType: ArtifactType = mimeType === "video/mp4" ? "Video" : kind === "image" ? "Image" : "JsonData";
   return {
     artifactId: `${params.fallbackArtifactIdPrefix}-${hash.slice(0, 10)}`,
     nodeId: params.nodeId,
@@ -367,6 +374,53 @@ async function createRuntimeArtifactFromLocalPath(params: {
         outputKey: params.outputId,
         artifactType,
         sourcePath: params.filePath
+      },
+      producerNodeId: params.nodeId,
+      createdAt: new Date().toISOString()
+    },
+    createdAt: new Date(),
+    previewStorageKey: null
+  } as RuntimeArtifactRef;
+}
+
+function buildSourceRuntimeArtifact(params: {
+  nodeId: string;
+  outputId: string;
+  storageKey: string;
+  buffer: Buffer;
+  artifactType: ArtifactType;
+  mimeType: string;
+  filename: string;
+}) {
+  const hash = stableHashForOutput(params.buffer);
+  const kind = params.artifactType === "Image" ? "image" : inferArtifactKindFromMime(params.mimeType);
+  return {
+    artifactId: `source-${params.nodeId}-${hash.slice(0, 10)}`,
+    nodeId: params.nodeId,
+    outputId: params.outputId,
+    kind,
+    artifactType: params.artifactType,
+    hash,
+    mimeType: params.mimeType,
+    storageKey: params.storageKey,
+    byteSize: params.buffer.length,
+    meta: {
+      outputKey: params.outputId,
+      artifactType: params.artifactType,
+      filename: params.filename,
+      sourceStorageKey: params.storageKey
+    },
+    ref: {
+      id: `source-${params.nodeId}-${hash.slice(0, 10)}`,
+      type: params.artifactType,
+      name: params.outputId,
+      mimeType: params.mimeType,
+      storageKey: params.storageKey,
+      metadata: {
+        outputKey: params.outputId,
+        artifactType: params.artifactType,
+        filename: params.filename,
+        sourceStorageKey: params.storageKey
       },
       producerNodeId: params.nodeId,
       createdAt: new Date().toISOString()
@@ -603,56 +657,34 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         }
 
         if (!resolved) {
+          const isInputSourceNode = sourceNode?.type === "input.image" || sourceNode?.type === "input.video";
           const sourceStorageKey =
-            sourceNode?.type === "input.image" &&
+            isInputSourceNode &&
             sourceNode?.data?.params &&
             typeof sourceNode.data.params.storageKey === "string"
               ? sourceNode.data.params.storageKey
               : "";
 
-          if (sourceNode?.type === "input.image" && binding.sourceOutputId === "image" && sourceStorageKey) {
+          const expectsImageSource = sourceNode?.type === "input.image" && binding.sourceOutputId === "image";
+          const expectsVideoSource = sourceNode?.type === "input.video" && binding.sourceOutputId === "video";
+
+          if ((expectsImageSource || expectsVideoSource) && sourceStorageKey) {
             await assertProjectStorageKeyAccess(input.projectId, sourceStorageKey);
             const sourceBuffer = await getObjectBuffer(sourceStorageKey);
-            const sourceHash = stableHashForOutput(sourceBuffer);
             const filename =
-              typeof sourceNode.data?.params?.filename === "string" && sourceNode.data.params.filename.length > 0
+              typeof sourceNode?.data?.params?.filename === "string" && sourceNode.data.params.filename.length > 0
                 ? sourceNode.data.params.filename
-                : sourceStorageKey.split("/").pop() ?? "image.jpg";
-            resolved = {
-              artifactId: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
+                : sourceStorageKey.split("/").pop() ?? (expectsVideoSource ? "input.mp4" : "image.jpg");
+            resolved = buildSourceRuntimeArtifact({
               nodeId: binding.sourceNodeId,
-              outputId: "image",
-              kind: "image",
-              artifactType: "Image",
-              hash: sourceHash,
-              mimeType: inferImageMimeTypeFromPath(filename),
+              outputId: expectsVideoSource ? "video" : "image",
               storageKey: sourceStorageKey,
-              byteSize: sourceBuffer.length,
-              meta: {
-                outputKey: "image",
-                artifactType: "Image",
-                filename,
-                sourceStorageKey
-              },
-              ref: {
-                id: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
-                type: "Image",
-                name: "image",
-                mimeType: inferImageMimeTypeFromPath(filename),
-                storageKey: sourceStorageKey,
-                metadata: {
-                  outputKey: "image",
-                  artifactType: "Image",
-                  filename,
-                  sourceStorageKey
-                },
-                producerNodeId: binding.sourceNodeId,
-                createdAt: new Date().toISOString()
-              },
-              createdAt: new Date(),
-              previewStorageKey: null
-            };
-            producedByOutput.set(mapKey(binding.sourceNodeId, "image"), resolved);
+              buffer: sourceBuffer,
+              artifactType: expectsVideoSource ? "Video" : "Image",
+              mimeType: expectsVideoSource ? inferMimeTypeFromPath(filename) : inferImageMimeTypeFromPath(filename),
+              filename
+            });
+            producedByOutput.set(mapKey(binding.sourceNodeId, expectsVideoSource ? "video" : "image"), resolved);
             producedByArtifactId.set(resolved.artifactId, resolved);
           }
         }
@@ -840,54 +872,30 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         } as Prisma.InputJsonValue
       });
 
-      if (task.nodeType === "input.image") {
+      if (task.nodeType === "input.image" || task.nodeType === "input.video") {
         const storageKey = typeof resolvedParams.storageKey === "string" ? resolvedParams.storageKey : "";
         if (storageKey) {
           await assertProjectStorageKeyAccess(input.projectId, storageKey);
           const sourceBuffer = await getObjectBuffer(storageKey);
-          const sourceHash = stableHashForOutput(sourceBuffer);
           const filename =
             typeof resolvedParams.filename === "string" && resolvedParams.filename.length > 0
               ? resolvedParams.filename
-              : storageKey.split("/").pop() ?? "image.jpg";
-          const sourceArtifact: RuntimeArtifactRef = {
-            artifactId: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+              : storageKey.split("/").pop() ?? (task.nodeType === "input.video" ? "input.mp4" : "image.jpg");
+          const outputId = task.nodeType === "input.video" ? "video" : "image";
+          const artifactType: ArtifactType = task.nodeType === "input.video" ? "Video" : "Image";
+          const sourceArtifact = buildSourceRuntimeArtifact({
             nodeId: task.nodeId,
-            outputId: "image",
-            kind: "image",
-            artifactType: "Image",
-            hash: sourceHash,
-            mimeType: inferImageMimeTypeFromPath(filename),
+            outputId,
             storageKey,
-            byteSize: sourceBuffer.length,
-            meta: {
-              outputKey: "image",
-              artifactType: "Image",
-              filename,
-              sourceStorageKey: storageKey
-            },
-            ref: {
-              id: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
-              type: "Image",
-              name: "image",
-              mimeType: inferImageMimeTypeFromPath(filename),
-              storageKey,
-              metadata: {
-                outputKey: "image",
-                artifactType: "Image",
-                filename,
-                sourceStorageKey: storageKey
-              },
-              producerNodeId: task.nodeId,
-              createdAt: new Date().toISOString()
-            },
-            createdAt: new Date(),
-            previewStorageKey: null
-          };
-          producedByOutput.set(mapKey(task.nodeId, "image"), sourceArtifact);
+            buffer: sourceBuffer,
+            artifactType,
+            mimeType: task.nodeType === "input.video" ? inferMimeTypeFromPath(filename) : inferImageMimeTypeFromPath(filename),
+            filename
+          });
+          producedByOutput.set(mapKey(task.nodeId, outputId), sourceArtifact);
           producedByArtifactId.set(sourceArtifact.artifactId, sourceArtifact);
           console.log(
-            `[worker] node=${task.nodeId} outputs image:image:${storageKey}`
+            `[worker] node=${task.nodeId} outputs ${outputId}:${artifactType.toLowerCase()}:${storageKey}`
           );
 
           const progress = Math.round(((i + 1) / total) * 100);
@@ -902,10 +910,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             step,
             status: "success",
             cacheHit: false,
-            outputSummary: `image:${storageKey}`,
+            outputSummary: `${outputId}:${storageKey}`,
             metadata: {
               mode: runtimeMode ?? null,
-              outputs: ["image"]
+              outputs: [outputId]
             } as Prisma.InputJsonValue
           });
           await recordRunEvent({
@@ -920,7 +928,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             message: "Node completed from source input",
             metadata: {
               cacheHit: false,
-              outputs: ["image"]
+              outputs: [outputId]
             } as Prisma.InputJsonValue
           });
           activeNodeContext = null;

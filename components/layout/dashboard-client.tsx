@@ -135,9 +135,17 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
       if (!res.ok) {
         throw new Error("Failed to delete project");
       }
+      const data = await res.json().catch(() => null);
 
       setProjects((prev) => prev.filter((project) => project.id !== projectId));
-      toast({ title: "Project deleted", description: projectName });
+      if (data && data.storageCleanupOk === false) {
+        toast({
+          title: "Project deleted",
+          description: `${projectName} was removed from the database, but some storage files need manual cleanup.`
+        });
+      } else {
+        toast({ title: "Project deleted", description: projectName });
+      }
       router.refresh();
     } catch (error) {
       toast({ title: "Delete failed", description: error instanceof Error ? error.message : "Unknown error" });

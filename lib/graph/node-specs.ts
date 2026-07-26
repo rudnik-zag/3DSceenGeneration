@@ -27,6 +27,11 @@ const imageInput = z.object({
   storageKey: z.string().max(1024).optional(),
   filename: z.string().max(260).default("image.png")
 });
+const videoInput = z.object({
+  filename: z.string().max(260).default("input.mp4"),
+  storageKey: z.string().max(1024).default(""),
+  uploadAssetId: z.string().max(120).optional()
+});
 const cameraPathInput = z.object({ json: z.string().max(256_000).default("[]") });
 const viewerEnvironmentParams = z.object({
   enabled: z.boolean().default(true),
@@ -99,7 +104,18 @@ const qwenImageEditParams = z.object({
   scheduler: z.string().max(120).default("simple"),
   denoise: z.number().min(0).max(1).default(1)
 });
-const depthParams = z.object({ model: z.string().max(120).default("fast-depth") });
+const depthParams = z.object({
+  modelVariant: z.enum(["da3-base", "da3metric-large"]).default("da3-base"),
+  device: z.enum(["auto", "cuda", "cpu"]).default("auto"),
+  exportConfidence: z.boolean().default(true),
+  exportSky: z.boolean().default(true),
+  saveNpz: z.boolean().default(false),
+  useRayPose: z.boolean().default(false),
+  refViewStrategy: z.enum(["saddle_balanced", "first"]).default("saddle_balanced"),
+  frameStride: z.number().int().min(1).max(120).default(1),
+  maxFrames: z.number().int().min(1).max(2048).default(32),
+  resizeLongEdge: z.number().int().min(0).max(4096).default(0)
+});
 const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
 const meshReconstructionParams = z.object({ quality: z.string().max(120).default("balanced") });
 const uvParams = z.object({ padding: z.number().min(1).max(32).default(8) });
@@ -200,6 +216,24 @@ export const nodeSpecEntries = [
     paramSchema: textInput,
     paramFields: [{ key: "value", label: "Text", input: "textarea" }],
     defaultParams: { value: "Describe a stylized courtyard." }
+  }),
+  makeSpec("input.video", {
+    type: "input.video",
+    category: "Inputs",
+    title: "Input Video",
+    icon: "Film",
+    description: "Upload/reference an MP4 source video.",
+    inputPorts: [],
+    outputPorts: [{ id: "video", label: "Video", artifactType: "Video" }],
+    paramSchema: videoInput,
+    paramFields: [
+      { key: "filename", label: "Filename", input: "text" },
+      { key: "storageKey", label: "Storage Key", input: "text", placeholder: "projects/..." }
+    ],
+    defaultParams: {
+      filename: "input.mp4",
+      storageKey: ""
+    }
   }),
   makeSpec("input.cameraPath", {
     type: "input.cameraPath",
@@ -503,12 +537,50 @@ export const nodeSpecEntries = [
     category: "Geometry",
     title: "Depth Estimation",
     icon: "Mountain",
-    description: "Estimate depth from RGB image.",
-    inputPorts: [{ id: "image", label: "Image", artifactType: "Image", required: true }],
-    outputPorts: [{ id: "depth", label: "Depth", artifactType: "DepthMap" }],
+    description: "Estimate depth from an RGB image or MP4 video with Depth Anything 3.",
+    inputPorts: [
+      { id: "image", label: "Image", artifactType: "Image" },
+      { id: "video", label: "Video", artifactType: "Video" }
+    ],
+    outputPorts: [
+      { id: "depth", label: "Depth", artifactType: "DepthMap" },
+      { id: "sequence", label: "Depth Sequence", artifactType: "JsonData", advancedOnly: true },
+      { id: "camera", label: "Camera", artifactType: "Descriptor", advancedOnly: true },
+      { id: "confidence", label: "Confidence", artifactType: "Image", hidden: true, advancedOnly: true },
+      { id: "sky", label: "Sky", artifactType: "Image", hidden: true, advancedOnly: true },
+      { id: "meta", label: "Meta", artifactType: "JsonData", hidden: true, advancedOnly: true }
+    ],
     paramSchema: depthParams,
-    paramFields: [{ key: "model", label: "Model", input: "text" }],
-    defaultParams: { model: "fast-depth" }
+    paramFields: [
+      { key: "modelVariant", label: "Model Variant", input: "select", options: ["da3-base", "da3metric-large"] },
+      { key: "device", label: "Device", input: "select", options: ["auto", "cuda", "cpu"] },
+      { key: "exportConfidence", label: "Export Confidence", input: "boolean" },
+      { key: "exportSky", label: "Export Sky", input: "boolean" },
+      { key: "saveNpz", label: "Save Raw NPZ", input: "boolean" },
+      { key: "useRayPose", label: "Use Ray Pose", input: "boolean" },
+      { key: "refViewStrategy", label: "Ref View Strategy", input: "select", options: ["saddle_balanced", "first"] },
+      { key: "frameStride", label: "Frame Stride", input: "number", min: 1, max: 120, step: 1 },
+      { key: "maxFrames", label: "Max Frames", input: "number", min: 1, max: 2048, step: 1 },
+      { key: "resizeLongEdge", label: "Resize Long Edge", input: "number", min: 0, max: 4096, step: 1 }
+    ],
+    defaultParams: {
+      modelVariant: "da3-base",
+      device: "auto",
+      exportConfidence: true,
+      exportSky: true,
+      saveNpz: false,
+      useRayPose: false,
+      refViewStrategy: "saddle_balanced",
+      frameStride: 1,
+      maxFrames: 32,
+      resizeLongEdge: 0
+    },
+    ui: {
+      previewOutputIds: ["depth"],
+      hiddenOutputIds: ["confidence", "sky", "meta"],
+      advancedOutputIds: ["sequence", "camera", "confidence", "sky", "meta"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("geo.pointcloud_from_depth", {
     type: "geo.pointcloud_from_depth",

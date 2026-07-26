@@ -4,6 +4,7 @@ export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 
 export type ArtifactType =
   | "Image"
+  | "Video"
   | "Descriptor"
   | "MaskSet"
   | "SceneAsset"
@@ -19,6 +20,7 @@ export type PayloadKind = ArtifactType;
 
 export type WorkflowNodeType =
   | "input.image"
+  | "input.video"
   | "input.text"
   | "input.cameraPath"
   | "viewer.environment"

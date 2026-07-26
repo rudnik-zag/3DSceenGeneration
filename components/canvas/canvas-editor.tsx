@@ -254,6 +254,7 @@ interface ClipboardSnapshot {
 
 const nodeTypes = {
   "input.image": WorkflowNode,
+  "input.video": WorkflowNode,
   "input.text": WorkflowNode,
   "input.cameraPath": WorkflowNode,
   "viewer.environment": WorkflowNode,
@@ -290,6 +291,7 @@ const miniMapStyle = { background: "rgba(26,26,26,0.96)" };
 const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "T",
   "input.image": "I",
+  "input.video": "Y",
   "input.cameraPath": "C",
   "viewer.environment": "H",
   "model.groundingdino": "G",
@@ -665,7 +667,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
         ? runtimeMetaCandidate.warning
         : null;
   const inputNodeStorageKey =
-    nodeType === "input.image" && typeof mergedParams.storageKey === "string"
+    (nodeType === "input.image" || nodeType === "input.video") && typeof mergedParams.storageKey === "string"
       ? mergedParams.storageKey.trim()
       : "";
   const inputNodePreviewUrl = inputNodeStorageKey
@@ -690,7 +692,9 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
         resolvedPreviewArtifact?.previewUrl ??
         resolvedPreviewArtifact?.url ??
         inputNodePreviewUrl ??
-        (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
+        ((nodeType === "input.image" || nodeType === "input.video") && typeof base.data.previewUrl === "string"
+          ? base.data.previewUrl
+          : null),
       outputArtifacts,
       outputArtifactHistory: Object.keys(outputArtifactHistory).length > 0 ? outputArtifactHistory : undefined,
       scenePreviewStages: scenePreviewStages ?? undefined,
@@ -1246,7 +1250,10 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       return;
     }
 
-    if (selectedNode?.data.previewUrl && selectedNode.data.latestArtifactKind !== "json") {
+    if (
+      selectedNode?.data.previewUrl &&
+      (selectedNode.type === "input.video" || selectedNode.data.latestArtifactKind !== "json")
+    ) {
       setSelectedArtifactPreview({ previewUrl: selectedNode.data.previewUrl, jsonSnippet: null });
       return;
     }
@@ -2658,7 +2665,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     updateNodeParamById(selectedNode.id, key, value);
   };
 
-  const createNodePreviewUrl = useCallback(async (file: File) => {
+  const createImagePreviewUrl = useCallback(async (file: File) => {
     const objectUrl = URL.createObjectURL(file);
     const asDataUrl = () =>
       new Promise<string>((resolve) => {
@@ -2701,6 +2708,71 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     }
   }, []);
 
+  const createUploadPreviewUrl = useCallback(async (file: File, nodeType: WorkflowNodeType) => {
+    if (nodeType === "input.video") {
+      return URL.createObjectURL(file);
+    }
+    return createImagePreviewUrl(file);
+  }, [createImagePreviewUrl]);
+
+  const persistUploadedNodeState = useCallback(
+    async (nextNodes: Node<GraphNodeData>[]) => {
+      const payload = {
+        nodes: nextNodes.map((n) => ({
+          id: n.id,
+          type: n.type as WorkflowNodeType,
+          position: n.position,
+          data: {
+            label: n.data.label,
+            params: n.data.params,
+            uiScale: n.data.uiScale ?? nodeScalePreset,
+            previewUrl: n.data.previewUrl ?? null
+          }
+        })),
+        edges: edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle ?? undefined,
+          targetHandle: e.targetHandle ?? undefined
+        })),
+        viewport: { x: 0, y: 0, zoom: 1 },
+        workflowLibrary: {
+          templates: workflowTemplates,
+          groups: workflowGroups
+        }
+      } as GraphDocument;
+
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            draftStorageKey,
+            JSON.stringify({
+              updatedAt: new Date().toISOString(),
+              graph: payload
+            })
+          );
+        } catch {
+          // Ignore quota and serialization errors.
+        }
+      }
+
+      try {
+        await fetch(`/api/projects/${projectId}/graph`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Main Graph",
+            graphJson: payload
+          })
+        });
+      } catch {
+        // Keep local draft even if remote persistence fails.
+      }
+    },
+    [draftStorageKey, edges, nodeScalePreset, projectId, workflowGroups, workflowTemplates]
+  );
+
   const uploadImageForNode = useCallback(
     async (nodeId: string, file: File) => {
       if (!nodeId) return;
@@ -2709,6 +2781,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         toast({ title: "Node is busy", description: "Cannot replace inputs while this node is still running." });
         return;
       }
+      const targetNodeType = targetNode?.type as WorkflowNodeType | undefined;
       const extension = file.name.toLowerCase().split(".").pop();
       const inferredContentType = extension === "png"
         ? "image/png"
@@ -2716,18 +2789,28 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           ? "image/jpeg"
           : extension === "webp"
             ? "image/webp"
-            : "";
-      const contentType = ["image/png", "image/jpeg", "image/webp"].includes(file.type)
+            : extension === "mp4"
+              ? "video/mp4"
+              : "";
+      const contentType = ["image/png", "image/jpeg", "image/webp", "video/mp4"].includes(file.type)
         ? file.type
         : inferredContentType;
       if (!contentType) {
-        toast({ title: "Unsupported image", description: "Use PNG, JPEG, or WebP." });
+        toast({ title: "Unsupported upload", description: "Use PNG, JPEG, WebP, or MP4." });
         return;
       }
-      const localPreviewUrl = await createNodePreviewUrl(file);
+      if (targetNodeType === "input.video" && contentType !== "video/mp4") {
+        toast({ title: "Unsupported video", description: "Use MP4 for video inputs." });
+        return;
+      }
+      if (targetNodeType === "input.image" && contentType === "video/mp4") {
+        toast({ title: "Unsupported image", description: "Use PNG, JPEG, or WebP for image inputs." });
+        return;
+      }
+      const localPreviewUrl = await createUploadPreviewUrl(file, targetNodeType ?? "input.image");
       setNodes((prev) =>
         prev.map((node) => {
-          if (node.id !== nodeId || node.type !== "input.image") return node;
+          if (node.id !== nodeId || (node.type !== "input.image" && node.type !== "input.video")) return node;
           return {
             ...node,
             data: {
@@ -2749,6 +2832,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           body: JSON.stringify({
             projectId,
             nodeId,
+            category: targetNodeType === "input.video" ? "input.video" : "input.image",
             filename: file.name,
             contentType,
             byteSize: file.size
@@ -2771,29 +2855,37 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         if (!uploadRes.ok) {
           throw new Error(`Upload failed (${uploadRes.status})`);
         }
-        setNodes((prev) =>
-          prev.map((node) => {
-            if (node.id !== nodeId || node.type !== "input.image") return node;
-            return {
-              ...node,
-              data: {
-                ...node.data,
-                params: {
-                  ...node.data.params,
-                  storageKey: uploadData.key,
-                  filename: file.name,
-                  uploadAssetId: uploadData.uploadAssetId ?? ""
+        const uploadedPreviewUrl = `/api/storage/object?key=${encodeURIComponent(uploadData.key)}`;
+        const nextNodes = (() => {
+          let computed: Node<GraphNodeData>[] = [];
+          setNodes((prev) => {
+            computed = prev.map((node) => {
+              if (node.id !== nodeId || (node.type !== "input.image" && node.type !== "input.video")) return node;
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  previewUrl: uploadedPreviewUrl,
+                  params: {
+                    ...node.data.params,
+                    storageKey: uploadData.key,
+                    filename: file.name,
+                    uploadAssetId: uploadData.uploadAssetId ?? ""
+                  }
                 }
-              }
-            };
-          })
-        );
-        toast({ title: "Image uploaded", description: file.name });
+              };
+            });
+            return computed;
+          });
+          return computed;
+        })();
+        void persistUploadedNodeState(nextNodes);
+        toast({ title: targetNodeType === "input.video" ? "Video uploaded" : "Image uploaded", description: file.name });
       } catch (error) {
         toast({ title: "Upload failed", description: error instanceof Error ? error.message : "Unknown error" });
       }
     },
-    [createNodePreviewUrl, nodeById, projectId, setNodes]
+    [createUploadPreviewUrl, nodeById, nodes, persistUploadedNodeState, projectId, setNodes]
   );
 
   const workflowLibraryPayload = useCallback((): WorkflowLibraryPayload => ({
@@ -4497,7 +4589,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                           ))}
                         </div>
                         {selectedArtifactPreview.previewUrl ? (
-                          <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                          selectedNode?.type === "input.video" ? (
+                            <video
+                              src={selectedArtifactPreview.previewUrl}
+                              className="h-32 w-full rounded-lg border object-contain bg-black/40"
+                              controls
+                              muted
+                            />
+                          ) : (
+                            <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                          )
                         ) : null}
                         {selectedArtifactPreview.jsonSnippet ? (
                           <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">

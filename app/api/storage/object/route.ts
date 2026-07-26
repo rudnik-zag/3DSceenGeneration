@@ -13,6 +13,7 @@ function guessContentTypeFromKey(key: string) {
   if (lowered.endsWith(".png")) return "image/png";
   if (lowered.endsWith(".jpg") || lowered.endsWith(".jpeg")) return "image/jpeg";
   if (lowered.endsWith(".webp")) return "image/webp";
+  if (lowered.endsWith(".mp4")) return "video/mp4";
   if (lowered.endsWith(".json")) return "application/json";
   if (lowered.endsWith(".glb")) return "model/gltf-binary";
   if (lowered.endsWith(".ply")) return "application/octet-stream";
@@ -58,6 +59,7 @@ function validateUploadContent(body: Buffer, contentType: string) {
     if (contentType === "image/gif") return ["GIF87a", "GIF89a"].includes(body.subarray(0, 6).toString("ascii"));
     if (contentType === "image/bmp") return body.subarray(0, 2).toString("ascii") === "BM";
     if (contentType === "image/tiff") return ["II*\u0000", "MM\u0000*"].includes(body.subarray(0, 4).toString("binary"));
+    if (contentType === "video/mp4") return body.length >= 12 && body.subarray(4, 8).toString("ascii") === "ftyp";
     if (contentType === "model/gltf-binary") return body.subarray(0, 4).toString("ascii") === "glTF";
     if (contentType === "application/json") {
       try {
@@ -163,7 +165,10 @@ export async function GET(req: NextRequest) {
           "Cache-Control": "private, no-store",
           "X-Content-Type-Options": "nosniff",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Disposition": contentType === "image/png" || contentType === "image/jpeg" || contentType === "image/webp"
+          "Content-Disposition": contentType === "image/png" ||
+            contentType === "image/jpeg" ||
+            contentType === "image/webp" ||
+            contentType === "video/mp4"
             ? "inline"
             : "attachment"
         }

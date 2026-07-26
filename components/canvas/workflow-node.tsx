@@ -7,6 +7,7 @@ import {
   Camera,
   Clock3,
   FileCode2,
+  Film,
   Image as ImageIcon,
   Layers,
   Play,
@@ -44,6 +45,7 @@ const previewTint: Record<string, string> = {
 
 const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: string }>>> = {
   "input.image": ImageIcon,
+  "input.video": Film,
   "input.text": TypeIcon,
   "input.cameraPath": Camera,
   "viewer.environment": Sparkles,
@@ -66,6 +68,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
 const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "GPT-5.2",
   "input.image": "Reference",
+  "input.video": "Reference",
   "viewer.environment": "Lighting",
   "model.groundingdino": "ObjectDetection",
   "model.sam2": "SegmentScene",
@@ -172,6 +175,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
+  const isInputVideoNode = nodeType === "input.video";
+  const isInputMediaNode = isInputImageNode || isInputVideoNode;
   const inputImageSourceMode =
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
   const inputImageModel =
@@ -188,8 +193,8 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const isTextNode = nodeType === "input.text";
   const effectivePreviewUrl = data.previewUrl ?? null;
   const effectiveArtifactKind = data.latestArtifactKind;
-  const isImageNode = isInputImageNode || isPreviewNode;
-  const usesImageSizing = isInputImageNode || isPreviewNode;
+  const isImageNode = isInputMediaNode || isPreviewNode;
+  const usesImageSizing = isInputMediaNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
@@ -245,7 +250,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
   const qwenImageEditPrompt =
     isQwenImageEditNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
-  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
+  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputMediaNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
     isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
@@ -712,6 +717,10 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </div>
           ) : null}
         </div>
+      ) : isInputVideoNode ? (
+        <div className={cn("mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
+          <p className="text-[10px] text-zinc-400">Upload an MP4 source video for frame-wise depth estimation.</p>
+        </div>
       ) : null}
 
       {isSceneGenerationNode ? (
@@ -746,7 +755,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
           )}
           onDragOver={
-            isInputImageNode && !isRuntimeLocked
+            isInputMediaNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -754,7 +763,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               : undefined
           }
           onDrop={
-            isInputImageNode && !isImageGenerationNode && !isRuntimeLocked
+            isInputMediaNode && !isImageGenerationNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -780,14 +789,25 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ) : data.status === "running" ? (
               <div className="h-full w-full animate-pulse bg-white/10" />
             ) : effectivePreviewUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={effectivePreviewUrl}
-                alt={`${spec.title} preview`}
-                className="nodrag h-full w-full cursor-zoom-in object-contain"
-                onDoubleClick={openPreviewModal}
-                title="Double-click to open full size"
-              />
+              isInputVideoNode ? (
+                <video
+                  src={effectivePreviewUrl}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  controls
+                  muted
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={effectivePreviewUrl}
+                  alt={`${spec.title} preview`}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              )
             ) : (
               <div className="grid h-full w-full place-items-center bg-black/35">
                 <p className="px-3 text-center text-[10px] text-zinc-400">
@@ -795,11 +815,13 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                     ? "Choose prompt and run to generate preview."
                     : isPreviewNode
                       ? "Connect an artifact to preview."
-                      : "Upload an image."}
+                      : isInputVideoNode
+                        ? "Upload an MP4 video."
+                        : "Upload an image."}
                 </p>
               </div>
             )}
-            {isInputImageNode && hasImagePreview && !isImageGenerationNode ? (
+            {isInputMediaNode && hasImagePreview && !isImageGenerationNode ? (
               <label
                 className={cn(
                   "nodrag absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full border border-white/25 bg-black/70 px-2 py-1 text-[10px] text-zinc-100 transition hover:border-white/40 hover:bg-black/85",
@@ -810,7 +832,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 <span>Replace</span>
                 <input
                   type="file"
-                  accept="image/png,image/jpeg,image/webp"
+                  accept={isInputVideoNode ? "video/mp4" : "image/png,image/jpeg,image/webp"}
                   disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
@@ -832,16 +854,16 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 ? `Output: ${effectiveArtifactKind}`
                 : spec.description}
           </p>
-          {isInputImageNode && !hasImagePreview && !isImageGenerationNode ? (
+          {isInputMediaNode && !hasImagePreview && !isImageGenerationNode ? (
             <div
               className={cn("nodrag mt-2 rounded-lg border border-dashed border-white/20 bg-black/20 p-2 text-center", isRuntimeLocked && "opacity-60")}
             >
               <label className={cn("nodrag inline-flex items-center gap-1 text-[11px] text-zinc-200", isRuntimeLocked ? "cursor-not-allowed" : "cursor-pointer")}>
                 <UploadCloud className="h-3.5 w-3.5" />
-                <span>Upload / Drop Image</span>
+                <span>{isInputVideoNode ? "Upload / Drop MP4" : "Upload / Drop Image"}</span>
                 <input
                   type="file"
-                  accept="image/png,image/jpeg,image/webp"
+                  accept={isInputVideoNode ? "video/mp4" : "image/png,image/jpeg,image/webp"}
                   disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
@@ -854,7 +876,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               </label>
             </div>
           ) : null}
-          {isInputImageNode && hasImagePreview && !isImageGenerationNode ? <p className="mt-1 text-[10px] text-zinc-500">Drag and drop to replace image.</p> : null}
+          {isInputMediaNode && hasImagePreview && !isImageGenerationNode ? (
+            <p className="mt-1 text-[10px] text-zinc-500">
+              {isInputVideoNode ? "Drag and drop to replace video." : "Drag and drop to replace image."}
+            </p>
+          ) : null}
         </div>
       ) : isTextNode ? (
         <div className="mb-2 rounded-xl border border-white/10 bg-black/30 px-2.5 py-2 text-[11px] text-zinc-300">
@@ -983,8 +1009,12 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           </div>
           <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
             {effectivePreviewUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              isInputVideoNode ? (
+                <video src={effectivePreviewUrl} className="h-auto max-h-[80vh] w-full" controls />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              )
             ) : null}
           </div>
         </DialogContent>

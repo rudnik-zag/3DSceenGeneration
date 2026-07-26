@@ -4,6 +4,7 @@ import { ArtifactType, PayloadKind } from "@/types/workflow";
 
 const LEGACY_PAYLOAD_TO_ARTIFACT: Record<string, ArtifactType> = {
   Image: "Image",
+  Video: "Video",
   Mask: "MaskSet",
   MaskDir: "MaskSet",
   Boxes: "Descriptor",
@@ -28,6 +29,7 @@ const LEGACY_PAYLOAD_TO_ARTIFACT: Record<string, ArtifactType> = {
 
 const ALL_ARTIFACT_TYPES: ArtifactType[] = [
   "Image",
+  "Video",
   "Descriptor",
   "MaskSet",
   "SceneAsset",
@@ -89,6 +91,8 @@ export function artifactKindFromArtifactType(type: ArtifactType, preferredKind?:
     case "Image":
     case "DepthMap":
       return "image";
+    case "Video":
+      return "json";
     case "MaskSet":
       return "json";
     case "PointCloud":

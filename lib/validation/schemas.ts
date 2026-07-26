@@ -39,6 +39,7 @@ export const nodeRunPayloadSchema = z.object({
 export const uploadInitPayloadSchema = z.object({
   projectId: z.string().cuid(),
   nodeId: z.string().min(1).max(180).nullable().optional(),
+  category: z.string().min(1).max(80).optional(),
   filename: z.string().min(1).max(260),
   contentType: z.string().min(1).max(140),
   byteSize: z.number().int().min(1).max(1024 * 1024 * 100)
