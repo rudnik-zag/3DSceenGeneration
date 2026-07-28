@@ -22,6 +22,7 @@ interface DepthResultManifest {
   has_confidence?: boolean;
   has_sky?: boolean;
   depth_preview_path?: string | null;
+  depth_video_path?: string | null;
   confidence_preview_path?: string | null;
   sky_preview_path?: string | null;
   camera_json_path?: string | null;
@@ -40,6 +41,20 @@ interface DepthSequenceManifest {
     sky_path?: string;
     source_frame_index?: number;
     timestamp_sec?: number;
+  }>;
+}
+
+interface UploadedDepthSequenceManifest {
+  media_type: "image" | "video";
+  frame_count: number;
+  fps: number;
+  frames: Array<{
+    index: number;
+    source_frame_index: number;
+    timestamp_sec: number;
+    depth_storage_key: string;
+    confidence_storage_key?: string;
+    sky_storage_key?: string;
   }>;
 }
 
@@ -70,6 +85,7 @@ function inferInputExtension(input: ResolvedArtifactInput) {
 
 function resolveDepthPreviewMime(filePath: string) {
   const lowered = filePath.toLowerCase();
+  if (lowered.endsWith(".mp4")) return "video/mp4";
   if (lowered.endsWith(".png")) return "image/png";
   if (lowered.endsWith(".webp")) return "image/webp";
   return "image/jpeg";
@@ -150,13 +166,14 @@ async function rewriteSequenceManifest(params: {
   ctx: NodeExecutionContext;
   outputDir: string;
   manifest: DepthSequenceManifest;
-}) {
+}): Promise<UploadedDepthSequenceManifest> {
   const rewrittenFrames = await Promise.all(
     params.manifest.frames.map(async (frame) => {
-      const nextFrame: Record<string, unknown> = {
+      const nextFrame: UploadedDepthSequenceManifest["frames"][number] = {
         index: frame.index,
         source_frame_index: frame.source_frame_index ?? frame.index,
-        timestamp_sec: frame.timestamp_sec ?? 0
+        timestamp_sec: frame.timestamp_sec ?? 0,
+        depth_storage_key: ""
       };
 
       const depthLocal = path.join(params.outputDir, frame.depth_path);
@@ -192,6 +209,20 @@ async function rewriteSequenceManifest(params: {
     fps: params.manifest.fps,
     frames: rewrittenFrames
   };
+}
+
+function collectSequenceFrameStorageKeys(manifest: UploadedDepthSequenceManifest) {
+  const keys = new Set<string>();
+  for (const frame of manifest.frames) {
+    keys.add(frame.depth_storage_key);
+    if (typeof frame.confidence_storage_key === "string" && frame.confidence_storage_key.length > 0) {
+      keys.add(frame.confidence_storage_key);
+    }
+    if (typeof frame.sky_storage_key === "string" && frame.sky_storage_key.length > 0) {
+      keys.add(frame.sky_storage_key);
+    }
+  }
+  return [...keys];
 }
 
 export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
@@ -330,6 +361,29 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
     }
   ];
 
+  if (manifest.depth_video_path) {
+    const depthVideoPath = path.join(outputDir, manifest.depth_video_path);
+    const depthVideoBuffer = await fs.readFile(depthVideoPath);
+    outputs.push({
+      outputId: "depthVideo",
+      kind: "json",
+      artifactType: "Video",
+      mimeType: "video/mp4",
+      extension: "mp4",
+      buffer: depthVideoBuffer,
+      meta: {
+        outputKey: "depthVideo",
+        artifactType: "Video",
+        semantic: "depth_video",
+        mediaType: manifest.media_type ?? "video",
+        frameCount: manifest.frame_count ?? 1,
+        fps: manifest.fps ?? 0,
+        modelVariant,
+        contentHash: hashBuffer(depthVideoBuffer)
+      }
+    });
+  }
+
   if (manifest.confidence_preview_path) {
     const confidencePath = path.join(outputDir, manifest.confidence_preview_path);
     const confidenceBuffer = await fs.readFile(confidencePath);
@@ -400,19 +454,22 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
   }
 
   if (uploadedSequenceManifest) {
+    const sequenceFrameStorageKeys = collectSequenceFrameStorageKeys(uploadedSequenceManifest);
     outputs.push({
       outputId: "sequence",
       kind: "json",
       artifactType: "JsonData",
       mimeType: "application/json",
       extension: "json",
-      buffer: createJsonBuffer(uploadedSequenceManifest as Record<string, unknown>),
+      buffer: createJsonBuffer(uploadedSequenceManifest as unknown as Record<string, unknown>),
       meta: {
         outputKey: "sequence",
         artifactType: "JsonData",
+        semantic: "image_sequence",
         mediaType: uploadedSequenceManifest.media_type,
         frameCount: uploadedSequenceManifest.frame_count,
-        fps: uploadedSequenceManifest.fps
+        fps: uploadedSequenceManifest.fps,
+        sequenceFrameStorageKeys
       }
     });
   }

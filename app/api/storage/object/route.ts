@@ -20,6 +20,91 @@ function guessContentTypeFromKey(key: string) {
   return "application/octet-stream";
 }
 
+function deriveLegacyDepthVideoKey(key: string) {
+  const match = key.match(/^(.*)\/outputs\/depth-?video\.mp4$/i);
+  return match?.[1] ? `${match[1]}/depth_anything3/depth_preview.mp4` : null;
+}
+
+async function getObjectBufferWithLegacyFallback(key: string) {
+  try {
+    return {
+      buffer: await getObjectBuffer(key),
+      resolvedKey: key
+    };
+  } catch (error) {
+    const legacyKey = deriveLegacyDepthVideoKey(key);
+    if (!legacyKey) throw error;
+    return {
+      buffer: await getObjectBuffer(legacyKey),
+      resolvedKey: legacyKey
+    };
+  }
+}
+
+function isInlineContentType(contentType: string) {
+  return (
+    contentType === "image/png" ||
+    contentType === "image/jpeg" ||
+    contentType === "image/webp" ||
+    contentType === "video/mp4"
+  );
+}
+
+function buildReadHeaders(contentType: string, byteLength: number, extra?: Record<string, string>) {
+  const headers: Record<string, string> = {
+    "Content-Type": contentType,
+    "Content-Length": String(byteLength),
+    "Cache-Control": "private, max-age=600, immutable",
+    "Accept-Ranges": "bytes",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": isInlineContentType(contentType) ? "inline" : "attachment",
+    ...(extra ?? {})
+  };
+
+  if (!isInlineContentType(contentType)) {
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'";
+  }
+
+  return headers;
+}
+
+function parseRangeHeader(rangeHeader: string | null, totalBytes: number) {
+  if (!rangeHeader) return null;
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return "invalid" as const;
+
+  const [, startRaw, endRaw] = match;
+  if (!startRaw && !endRaw) return "invalid" as const;
+
+  let start: number;
+  let end: number;
+
+  if (!startRaw) {
+    const suffixLength = Number(endRaw);
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) return "invalid" as const;
+    start = Math.max(0, totalBytes - suffixLength);
+    end = totalBytes - 1;
+  } else {
+    start = Number(startRaw);
+    end = endRaw ? Number(endRaw) : totalBytes - 1;
+  }
+
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end < start ||
+    start >= totalBytes
+  ) {
+    return "invalid" as const;
+  }
+
+  return {
+    start,
+    end: Math.min(end, totalBytes - 1)
+  };
+}
+
 async function readUploadBody(req: NextRequest, expectedBytes: number) {
   const contentLength = Number(req.headers.get("content-length"));
   if (!Number.isInteger(contentLength) || contentLength !== expectedBytes) {
@@ -143,14 +228,18 @@ export async function GET(req: NextRequest) {
     await enforceRateLimit({
       bucket: "storage:get",
       identifier: access.user.id,
-      limit: env.SIGNED_URL_LIMIT,
-      windowSec: env.SIGNED_URL_WINDOW_SEC,
+      limit: env.STORAGE_OBJECT_READ_LIMIT,
+      windowSec: env.STORAGE_OBJECT_READ_WINDOW_SEC,
       message: "Storage read rate limit exceeded"
     });
 
     try {
-      const buffer = await getObjectBuffer(key);
-      const contentType = (await getStorageObjectContentType(key)) ?? guessContentTypeFromKey(key);
+      const { buffer, resolvedKey } = await getObjectBufferWithLegacyFallback(key);
+      const contentType =
+        resolvedKey === key
+          ? (await getStorageObjectContentType(key).catch(() => null)) ?? guessContentTypeFromKey(key)
+          : guessContentTypeFromKey(key);
+      const range = parseRangeHeader(req.headers.get("range"), buffer.length);
       await logAuditEventFromRequest(req, {
         action: "storage_object_read",
         resourceType: "storage_object",
@@ -158,20 +247,26 @@ export async function GET(req: NextRequest) {
         projectId: access.project.id,
         userId: access.user.id
       });
+      if (range === "invalid") {
+        return new NextResponse(null, {
+          status: 416,
+          headers: buildReadHeaders(contentType, 0, {
+            "Content-Range": `bytes */${buffer.length}`
+          })
+        });
+      }
+      if (range) {
+        const chunk = buffer.subarray(range.start, range.end + 1);
+        return new NextResponse(chunk, {
+          status: 206,
+          headers: buildReadHeaders(contentType, chunk.length, {
+            "Content-Range": `bytes ${range.start}-${range.end}/${buffer.length}`
+          })
+        });
+      }
       return new NextResponse(buffer, {
         status: 200,
-        headers: {
-          "Content-Type": contentType,
-          "Cache-Control": "private, no-store",
-          "X-Content-Type-Options": "nosniff",
-          "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Disposition": contentType === "image/png" ||
-            contentType === "image/jpeg" ||
-            contentType === "image/webp" ||
-            contentType === "video/mp4"
-            ? "inline"
-            : "attachment"
-        }
+        headers: buildReadHeaders(contentType, buffer.length)
       });
     } catch (error) {
       return NextResponse.json(

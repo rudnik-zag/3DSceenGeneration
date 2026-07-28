@@ -33,6 +33,13 @@ const videoInput = z.object({
   uploadAssetId: z.string().max(120).optional()
 });
 const cameraPathInput = z.object({ json: z.string().max(256_000).default("[]") });
+const previewNodeParams = z.object({
+  previewMode: z.enum(["auto", "single", "sequence"]).default("auto"),
+  sequenceFps: z.number().int().min(1).max(60).default(12),
+  sequenceLoop: z.boolean().default(true),
+  sequenceAutoplay: z.boolean().default(false),
+  previewFit: z.enum(["contain", "cover"]).default("contain")
+});
 const viewerEnvironmentParams = z.object({
   enabled: z.boolean().default(true),
   hdriUrl: z.string().max(2048).default(""),
@@ -544,6 +551,7 @@ export const nodeSpecEntries = [
     ],
     outputPorts: [
       { id: "depth", label: "Depth", artifactType: "DepthMap" },
+      { id: "depthVideo", label: "Depth Video", artifactType: "Video" },
       { id: "sequence", label: "Depth Sequence", artifactType: "JsonData", advancedOnly: true },
       { id: "camera", label: "Camera", artifactType: "Descriptor", advancedOnly: true },
       { id: "confidence", label: "Confidence", artifactType: "Image", hidden: true, advancedOnly: true },
@@ -576,7 +584,7 @@ export const nodeSpecEntries = [
       resizeLongEdge: 0
     },
     ui: {
-      previewOutputIds: ["depth"],
+      previewOutputIds: ["depthVideo", "depth"],
       hiddenOutputIds: ["confidence", "sky", "meta"],
       advancedOutputIds: ["sequence", "camera", "confidence", "sky", "meta"],
       nodeRunEnabled: true
@@ -661,13 +669,19 @@ export const nodeSpecEntries = [
     icon: "ExternalLink",
     description: "Connect any node output to preview its latest artifact.",
     inputPorts: [
-      { id: "artifact", label: "Artifact", artifactType: "JsonData", required: true },
+      { id: "artifact", label: "Artifact", artifactType: "AnyArtifact", required: true },
       { id: "environment", label: "Environment", artifactType: "JsonData" }
     ],
     outputPorts: [],
-    paramSchema: z.object({}),
+    paramSchema: previewNodeParams,
     paramFields: [],
-    defaultParams: {}
+    defaultParams: {
+      previewMode: "auto",
+      sequenceFps: 12,
+      sequenceLoop: true,
+      sequenceAutoplay: false,
+      previewFit: "contain"
+    }
   })
 ] as const;
 

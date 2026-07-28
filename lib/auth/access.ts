@@ -16,6 +16,19 @@ function hasRole(actual: ProjectRole | null, required: ProjectRole) {
   return roleRank[actual] >= roleRank[required];
 }
 
+function artifactMetaArrayContains(pathKey: string, value: string) {
+  return {
+    path: [pathKey],
+    array_contains: [value]
+  } as Record<string, unknown>;
+}
+
+function parseProjectScopeFromStorageKey(storageKey: string) {
+  const [root, scope] = storageKey.trim().split("/", 3);
+  if (root !== "projects" || !scope) return null;
+  return scope;
+}
+
 async function resolveProjectRoleForUser(input: {
   projectId: string;
   userId: string;
@@ -100,17 +113,13 @@ export async function requireStorageObjectAccess(storageKey: string, minimumRole
     throw new HttpError(400, "Storage key is required", "validation_error");
   }
 
-  const metaContainsStorageKey = {
-    path: ["meshObjectStorageKeys"],
-    array_contains: [key]
-  } as Record<string, unknown>;
-
   const artifact = await prisma.artifact.findFirst({
     where: {
       OR: [
         { storageKey: key },
         { previewStorageKey: key },
-        { meta: metaContainsStorageKey as never }
+        { meta: artifactMetaArrayContains("meshObjectStorageKeys", key) as never },
+        { meta: artifactMetaArrayContains("sequenceFrameStorageKeys", key) as never }
       ]
     },
     select: {
@@ -130,16 +139,36 @@ export async function requireStorageObjectAccess(storageKey: string, minimumRole
       });
 
   const projectId = artifact?.projectId ?? uploadAsset?.projectId;
-  if (!projectId) {
-    throw new HttpError(404, "Storage object not found", "storage_object_not_found");
+  let resolved = projectId
+    ? await resolveProjectRoleForUser({
+        projectId,
+        userId: user.id
+      })
+    : null;
+
+  if (!resolved) {
+    const projectScope = parseProjectScopeFromStorageKey(key);
+    if (projectScope) {
+      const scopedProject = await prisma.project.findFirst({
+        where: {
+          OR: [
+            { id: projectScope },
+            { slug: projectScope }
+          ]
+        },
+        select: { id: true }
+      });
+      if (scopedProject) {
+        resolved = await resolveProjectRoleForUser({
+          projectId: scopedProject.id,
+          userId: user.id
+        });
+      }
+    }
   }
 
-  const resolved = await resolveProjectRoleForUser({
-    projectId,
-    userId: user.id
-  });
   if (!resolved || !hasRole(resolved.role, minimumRole)) {
-    throw new HttpError(403, "Access denied", "forbidden");
+    throw new HttpError(projectId ? 403 : 404, projectId ? "Access denied" : "Storage object not found", projectId ? "forbidden" : "storage_object_not_found");
   }
 
   return {

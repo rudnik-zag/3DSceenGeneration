@@ -22,7 +22,7 @@ if (process.env.NODE_ENV === "production" && authSecret === "local-dev-auth-secr
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
   secret: authSecret,
-  debug: process.env.NODE_ENV !== "production",
+  debug: process.env.AUTH_DEBUG === "true",
   useSecureCookies: process.env.NODE_ENV === "production",
   session: {
     strategy: "jwt",

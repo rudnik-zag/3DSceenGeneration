@@ -74,7 +74,7 @@ import {
 } from "@/lib/graph/node-specs";
 import { applySceneGenerationPreset } from "@/lib/graph/scene-generation-presets";
 import { workflowPresets } from "@/lib/graph/workflow-presets";
-import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
+import { ArtifactType, GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
   id: string;
@@ -88,6 +88,8 @@ interface NodeArtifact {
   id: string;
   nodeId: string;
   kind: string;
+  mimeType?: string | null;
+  artifactType?: string | null;
   outputKey?: string;
   hidden?: boolean;
   url?: string | null;
@@ -100,6 +102,8 @@ interface RunArtifactPayload {
   nodeId: string;
   id: string;
   kind: string;
+  mimeType?: string | null;
+  artifactType?: string | null;
   outputKey?: string;
   hidden?: boolean;
   previewUrl?: string | null;
@@ -252,7 +256,7 @@ interface ClipboardSnapshot {
   };
 }
 
-const nodeTypes = {
+const NODE_TYPES = Object.freeze({
   "input.image": WorkflowNode,
   "input.video": WorkflowNode,
   "input.text": WorkflowNode,
@@ -272,11 +276,11 @@ const nodeTypes = {
   "geo.bake_textures": WorkflowNode,
   "out.export_scene": WorkflowNode,
   "out.open_in_viewer": WorkflowNode
-};
+});
 
-const edgeTypes = {
+const EDGE_TYPES = Object.freeze({
   flowing: FlowingEdge
-};
+});
 
 const defaultEdgeOptions = {
   type: "flowing",
@@ -374,13 +378,22 @@ function parseTemplateNodeId(artifact: NodeArtifact) {
 }
 
 function mapArtifactView(artifact: NodeArtifact): OutputArtifactView {
+  const artifactType =
+    typeof artifact.artifactType === "string"
+      ? artifact.artifactType
+      : artifact.meta && typeof artifact.meta.artifactType === "string"
+        ? artifact.meta.artifactType
+        : null;
   return {
     id: artifact.id,
     kind: artifact.kind,
+    mimeType: artifact.mimeType ?? null,
+    artifactType: artifactType as OutputArtifactView["artifactType"],
     hidden: Boolean(artifact.hidden),
     url: artifact.url ?? null,
     previewUrl: artifact.previewUrl ?? null,
-    createdAt: artifact.createdAt
+    createdAt: artifact.createdAt,
+    meta: artifact.meta ?? null
   };
 }
 
@@ -421,6 +434,32 @@ function resolveSelectedOutputArtifacts(
       : entries[0];
   }
   return selected;
+}
+
+function isVideoArtifactView(artifact: OutputArtifactView | undefined | null) {
+  return (
+    artifact?.mimeType === "video/mp4" ||
+    artifact?.artifactType === "Video" ||
+    artifact?.meta?.semantic === "depth_video"
+  );
+}
+
+function pickPreviewArtifact(
+  outputArtifacts: Record<string, OutputArtifactView | undefined>,
+  spec: (typeof nodeSpecRegistry)[WorkflowNodeType]
+) {
+  const previewOutputIds = spec.ui?.previewOutputIds ?? [];
+  const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+  return (
+    previewOutputIds
+      .map((key) => outputArtifacts[key])
+      .find((artifact) => Boolean(artifact?.id)) ??
+    Object.values(outputArtifacts).find((artifact) => isVideoArtifactView(artifact)) ??
+    Object.entries(outputArtifacts)
+      .filter(([key, artifact]) => artifact && !artifact.hidden && !hiddenOutputIds.has(key))
+      .sort((a, b) => new Date(b[1]?.createdAt ?? 0).getTime() - new Date(a[1]?.createdAt ?? 0).getTime())[0]?.[1] ??
+    Object.values(outputArtifacts)[0]
+  );
 }
 
 function createWorkflowId(prefix: string) {
@@ -563,9 +602,17 @@ function mergeOutputArtifactHistory(
 }
 
 function toScenePreviewStage(label: string, artifact: NodeArtifact): ScenePreviewStageView {
+  const artifactType =
+    typeof artifact.artifactType === "string"
+      ? artifact.artifactType
+      : artifact.meta && typeof artifact.meta.artifactType === "string"
+        ? artifact.meta.artifactType
+        : null;
   return {
     id: artifact.id,
     kind: artifact.kind,
+    mimeType: artifact.mimeType ?? null,
+    artifactType: artifactType as ArtifactType | null,
     label,
     hidden: Boolean(artifact.hidden),
     outputKey: artifact.outputKey ?? "default",
@@ -634,16 +681,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
   const outputArtifactHistory = buildOutputArtifactHistory(matched);
   const outputArtifacts = resolveSelectedOutputArtifacts(outputArtifactHistory, mergedParams);
 
-  const previewOutputIds = spec.ui?.previewOutputIds ?? [];
-  const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-  const previewArtifact =
-    previewOutputIds
-      .map((key) => outputArtifacts[key])
-      .find((artifact) => Boolean(artifact?.id)) ??
-    Object.entries(outputArtifacts)
-      .filter(([key, artifact]) => !artifact.hidden && !hiddenOutputIds.has(key))
-      .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-    Object.values(outputArtifacts)[0];
+  const previewArtifact = pickPreviewArtifact(outputArtifacts, spec);
   const scenePreviewStages =
     nodeType === "pipeline.scene_generation"
       ? buildSceneGenerationPreviewStages(base.id, artifacts)
@@ -688,6 +726,8 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       runProgress: 0,
       latestArtifactId: resolvedPreviewArtifact?.id,
       latestArtifactKind: resolvedPreviewArtifact?.kind,
+      latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? null,
+      latestArtifactType: resolvedPreviewArtifact?.artifactType ?? null,
       previewUrl:
         resolvedPreviewArtifact?.previewUrl ??
         resolvedPreviewArtifact?.url ??
@@ -942,10 +982,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         {
           id: string;
           kind: string;
+          mimeType: string | null;
+          artifactType: ArtifactType | null;
           previewUrl: string | null;
           url: string | null;
           hidden?: boolean;
           createdAt?: string;
+          meta?: Record<string, unknown> | null;
         }
       >();
 
@@ -968,30 +1011,67 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           if (!sourceNode) continue;
           const sourceType = sourceNode.type as WorkflowNodeType;
           const sourceSpec = nodeSpecRegistry[sourceType];
-          const sourceOutputHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+          const explicitSourceOutputHandle = edge.sourceHandle ?? null;
+          const sourceOutputHandle = explicitSourceOutputHandle ?? sourceSpec.outputPorts[0]?.id;
+          const sourceOutputArtifacts = sourceNode.data.outputArtifacts ?? {};
           const sourcePortArtifact = sourceOutputHandle
-            ? sourceNode.data.outputArtifacts?.[sourceOutputHandle]
+            ? sourceOutputArtifacts[sourceOutputHandle]
             : undefined;
+          const prefersSequence = targetNode.data.params?.previewMode === "sequence";
+          const preferredPreviewArtifact = pickPreviewArtifact(sourceOutputArtifacts, sourceSpec);
+          const depthVideoArtifact = sourceOutputArtifacts.depthVideo;
+          const sourcePortIsSequence =
+            sourceOutputHandle === "sequence" ||
+            sourcePortArtifact?.meta?.outputKey === "sequence" ||
+            sourcePortArtifact?.meta?.semantic === "image_sequence";
+          const sourcePortIsDepthPreview =
+            sourceType === "geo.depth_estimation" &&
+            (explicitSourceOutputHandle === null ||
+              sourceOutputHandle === "depth" ||
+              sourcePortArtifact?.meta?.semantic === "depth" ||
+              sourcePortIsSequence);
+          const videoSiblingArtifact =
+            !prefersSequence && isVideoArtifactView(depthVideoArtifact) && sourcePortIsDepthPreview
+              ? depthVideoArtifact
+              : !prefersSequence && sourcePortIsSequence && isVideoArtifactView(depthVideoArtifact)
+                ? depthVideoArtifact
+                : !prefersSequence && explicitSourceOutputHandle === null && isVideoArtifactView(preferredPreviewArtifact)
+                  ? preferredPreviewArtifact
+                  : undefined;
+          const handlelessPreferredArtifact =
+            !videoSiblingArtifact && explicitSourceOutputHandle === null && preferredPreviewArtifact?.id
+              ? preferredPreviewArtifact
+              : undefined;
           const fallbackArtifact =
-            !sourcePortArtifact && sourceNode.data.latestArtifactId && sourceNode.data.latestArtifactKind
+            !videoSiblingArtifact &&
+            !handlelessPreferredArtifact &&
+            !sourcePortArtifact &&
+            sourceNode.data.latestArtifactId &&
+            sourceNode.data.latestArtifactKind
               ? {
                   id: sourceNode.data.latestArtifactId,
                   kind: sourceNode.data.latestArtifactKind,
+                  mimeType: sourceNode.data.latestArtifactMimeType ?? null,
+                  artifactType: sourceNode.data.latestArtifactType ?? null,
                   previewUrl: sourceNode.data.previewUrl ?? null,
                   url: sourceNode.data.previewUrl ?? null,
                   hidden: false,
-                  createdAt: sourceNode.data.lastRunAt
+                  createdAt: sourceNode.data.lastRunAt,
+                  meta: null
                 }
               : undefined;
-          const resolved = sourcePortArtifact ?? fallbackArtifact;
+          const resolved = videoSiblingArtifact ?? handlelessPreferredArtifact ?? sourcePortArtifact ?? fallbackArtifact;
           if (!resolved?.id) continue;
           previewArtifactByNode.set(edge.target, {
             id: resolved.id,
             kind: resolved.kind,
+            mimeType: resolved.mimeType ?? null,
+            artifactType: resolved.artifactType ?? null,
             previewUrl: resolved.previewUrl ?? null,
             url: resolved.url ?? null,
             hidden: resolved.hidden,
-            createdAt: resolved.createdAt
+            createdAt: resolved.createdAt,
+            meta: resolved.meta ?? null
           });
         }
       }
@@ -1022,16 +1102,21 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const previewArtifact = previewArtifactByNode.get(node.id);
           const nextLatestArtifactId = previewArtifact?.id;
           const nextLatestArtifactKind = previewArtifact?.kind;
+          const nextLatestArtifactMimeType = previewArtifact?.mimeType;
+          const nextLatestArtifactType = previewArtifact?.artifactType;
           const nextPreviewUrl = previewArtifact?.previewUrl ?? previewArtifact?.url ?? null;
           const nextOutputArtifacts = previewArtifact
             ? ({
                 artifact: {
                   id: previewArtifact.id,
                   kind: previewArtifact.kind,
+                  mimeType: previewArtifact.mimeType ?? null,
+                  artifactType: previewArtifact.artifactType ?? null,
                   hidden: Boolean(previewArtifact.hidden),
                   url: previewArtifact.url,
                   previewUrl: previewArtifact.previewUrl,
-                  createdAt: previewArtifact.createdAt
+                  createdAt: previewArtifact.createdAt,
+                  meta: previewArtifact.meta ?? null
                 }
               } as NonNullable<GraphNodeData["outputArtifacts"]>)
             : undefined;
@@ -1040,13 +1125,18 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const outputArtifactsUnchanged = previewArtifact
             ? currentArtifactEntry?.id === previewArtifact.id &&
               currentArtifactEntry?.kind === previewArtifact.kind &&
+              (currentArtifactEntry?.mimeType ?? null) === (previewArtifact.mimeType ?? null) &&
+              (currentArtifactEntry?.artifactType ?? null) === (previewArtifact.artifactType ?? null) &&
               (currentArtifactEntry?.previewUrl ?? null) === (previewArtifact.previewUrl ?? null) &&
-              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null)
+              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null) &&
+              JSON.stringify(currentArtifactEntry?.meta ?? null) === JSON.stringify(previewArtifact.meta ?? null)
             : !node.data.outputArtifacts || Object.keys(node.data.outputArtifacts).length === 0;
 
           if (
             (node.data.latestArtifactId ?? undefined) === nextLatestArtifactId &&
             (node.data.latestArtifactKind ?? undefined) === nextLatestArtifactKind &&
+            (node.data.latestArtifactMimeType ?? undefined) === nextLatestArtifactMimeType &&
+            (node.data.latestArtifactType ?? undefined) === nextLatestArtifactType &&
             (node.data.previewUrl ?? null) === nextPreviewUrl &&
             outputArtifactsUnchanged
           ) {
@@ -1060,6 +1150,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               ...node.data,
               latestArtifactId: nextLatestArtifactId,
               latestArtifactKind: nextLatestArtifactKind,
+              latestArtifactMimeType: nextLatestArtifactMimeType,
+              latestArtifactType: nextLatestArtifactType,
               previewUrl: nextPreviewUrl,
               outputArtifacts: nextOutputArtifacts
             }
@@ -2592,16 +2684,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               const outputArtifacts = node.data.outputArtifactHistory
                 ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, applied)
                 : node.data.outputArtifacts;
-              const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-              const previewArtifact =
-                (spec.ui?.previewOutputIds ?? [])
-                  .map((outputId) => outputArtifacts?.[outputId])
-                  .find((artifact) => Boolean(artifact?.id)) ??
-                Object.entries(outputArtifacts ?? {})
-                  .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
-                  .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-                Object.values(outputArtifacts ?? {})[0] ??
-                null;
+              const previewArtifact = outputArtifacts ? pickPreviewArtifact(outputArtifacts, spec) : null;
               return {
                 ...node,
                 data: {
@@ -2610,6 +2693,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
                   latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
                   latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
+                  latestArtifactMimeType: previewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+                  latestArtifactType: previewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
                   previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null
                 }
               };
@@ -2623,16 +2708,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const outputArtifacts = node.data.outputArtifactHistory
             ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, nextParams)
             : node.data.outputArtifacts;
-          const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-          const previewArtifact =
-            (spec.ui?.previewOutputIds ?? [])
-              .map((outputId) => outputArtifacts?.[outputId])
-              .find((artifact) => Boolean(artifact?.id)) ??
-            Object.entries(outputArtifacts ?? {})
-              .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
-              .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-            Object.values(outputArtifacts ?? {})[0] ??
-            null;
+          const previewArtifact = outputArtifacts ? pickPreviewArtifact(outputArtifacts, spec) : null;
           const selectedScenePreviewStage =
             nodeType === "pipeline.scene_generation" && typeof nextParams.ScenePreviewStage === "string"
               ? nextParams.ScenePreviewStage
@@ -2651,6 +2727,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
               latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
               latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+              latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+              latestArtifactType: resolvedPreviewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
               previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null
             }
           };
@@ -3010,6 +3088,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       nodeId: string;
       id: string;
       kind: string;
+      mimeType?: string | null;
+      artifactType?: string | null;
       outputKey?: string;
       hidden?: boolean;
       previewUrl?: string | null;
@@ -3055,12 +3135,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         const mergedHistory = mergeOutputArtifactHistory(node.data.outputArtifactHistory, runHistory);
         const artifactByOutput = resolveSelectedOutputArtifacts(mergedHistory, node.data.params ?? {});
 
-        const previewArtifact =
-          (spec.ui?.previewOutputIds ?? [])
-            .map((outputId) => artifactByOutput[outputId])
-            .find((artifact) => Boolean(artifact?.id)) ??
-          Object.values(artifactByOutput).find((artifact) => !artifact.hidden) ??
-          Object.values(artifactByOutput)[0];
+        const previewArtifact = pickPreviewArtifact(artifactByOutput, spec);
         const scenePreviewStages =
           nodeType === "pipeline.scene_generation"
             ? buildSceneGenerationPreviewStages(node.id, artifactPairs)
@@ -3109,6 +3184,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
             runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
             latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
             latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+            latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+            latestArtifactType: resolvedPreviewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
             previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null,
             outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
             outputArtifactHistory:
@@ -3156,6 +3233,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           nodeId: artifact.nodeId,
           id: artifact.id,
           kind: artifact.kind,
+          mimeType: artifact.mimeType ?? null,
+          artifactType: artifact.artifactType ?? null,
           outputKey: artifact.outputKey,
           hidden: artifact.hidden,
           previewUrl: artifact.previewUrl ?? null,
@@ -4116,8 +4195,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
+            nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}

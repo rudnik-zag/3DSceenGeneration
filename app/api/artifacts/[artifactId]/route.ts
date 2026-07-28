@@ -113,6 +113,13 @@ export async function DELETE(
           }
         }
       }
+      if (Array.isArray(meta.sequenceFrameStorageKeys)) {
+        for (const value of meta.sequenceFrameStorageKeys) {
+          if (typeof value === "string" && value.length > 0) {
+            storageKeys.add(value);
+          }
+        }
+      }
     }
 
     await prisma.$transaction(async (tx) => {
@@ -121,8 +128,12 @@ export async function DELETE(
     });
 
     for (const key of storageKeys) {
-      const metaContainsStorageKey = {
+      const meshMetaContainsStorageKey = {
         path: ["meshObjectStorageKeys"],
+        array_contains: [key]
+      } as Record<string, unknown>;
+      const sequenceMetaContainsStorageKey = {
+        path: ["sequenceFrameStorageKeys"],
         array_contains: [key]
       } as Record<string, unknown>;
       const [artifactRefs, uploadRefs] = await Promise.all([
@@ -131,7 +142,8 @@ export async function DELETE(
             OR: [
               { storageKey: key },
               { previewStorageKey: key },
-              { meta: metaContainsStorageKey as never }
+              { meta: meshMetaContainsStorageKey as never },
+              { meta: sequenceMetaContainsStorageKey as never }
             ]
           }
         }),

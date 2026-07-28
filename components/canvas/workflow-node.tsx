@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
 import { Handle, NodeProps, NodeResizer, Position } from "reactflow";
 import {
   Boxes,
@@ -10,6 +10,7 @@ import {
   Film,
   Image as ImageIcon,
   Layers,
+  Pause,
   Play,
   Sparkles,
   Type as TypeIcon,
@@ -102,6 +103,69 @@ function formatArtifactVersionLabel(artifact: {
   return `${artifact.id.slice(0, 8)} · ${artifact.kind} · ${timeLabel}`;
 }
 
+type PreviewSequenceManifest = {
+  media_type: "image" | "video";
+  frame_count: number;
+  fps: number;
+  frames: Array<{
+    index: number;
+    depth_storage_key: string;
+    source_frame_index: number;
+    timestamp_sec: number;
+  }>;
+};
+
+function buildStorageObjectUrl(storageKey: string) {
+  return `/api/storage/object?key=${encodeURIComponent(storageKey)}`;
+}
+
+function looksLikeVideoUrl(value: string | null | undefined) {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value, "http://localhost");
+    const key = parsed.searchParams.get("key");
+    return parsed.pathname.toLowerCase().endsWith(".mp4") || key?.toLowerCase().endsWith(".mp4") === true;
+  } catch {
+    return value.toLowerCase().includes(".mp4");
+  }
+}
+
+function normalizeSequenceManifest(raw: unknown): PreviewSequenceManifest | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const candidate = raw as Record<string, unknown>;
+  const mediaType = candidate.media_type === "video" ? "video" : "image";
+  const fps = Number.isFinite(Number(candidate.fps)) ? Math.max(1, Math.floor(Number(candidate.fps))) : 12;
+  const framesRaw = Array.isArray(candidate.frames) ? candidate.frames : [];
+  const frames = framesRaw
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const frame = entry as Record<string, unknown>;
+      const depthStorageKey =
+        typeof frame.depth_storage_key === "string" && frame.depth_storage_key.trim().length > 0
+          ? frame.depth_storage_key.trim()
+          : null;
+      if (!depthStorageKey) return null;
+      return {
+        index: Number.isFinite(Number(frame.index)) ? Math.max(0, Math.floor(Number(frame.index))) : index,
+        depth_storage_key: depthStorageKey,
+        source_frame_index: Number.isFinite(Number(frame.source_frame_index))
+          ? Math.max(0, Math.floor(Number(frame.source_frame_index)))
+          : index,
+        timestamp_sec: Number.isFinite(Number(frame.timestamp_sec)) ? Math.max(0, Number(frame.timestamp_sec)) : 0
+      };
+    })
+    .filter((value): value is PreviewSequenceManifest["frames"][number] => Boolean(value));
+
+  if (frames.length === 0) return null;
+
+  return {
+    media_type: mediaType,
+    frame_count: Number.isFinite(Number(candidate.frame_count)) ? Math.max(1, Math.floor(Number(candidate.frame_count))) : frames.length,
+    fps,
+    frames
+  };
+}
+
 let sam2ConfigCache: string[] | null = null;
 let sam2ConfigInflight: Promise<string[]> | null = null;
 let sam3dConfigCache: string[] | null = null;
@@ -159,7 +223,7 @@ async function fetchSam3dConfigs() {
   return sam3dConfigCache;
 }
 
-export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
+function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [hasCustomImageWidth, setHasCustomImageWidth] = useState(false);
   const nodeType = type as WorkflowNodeType;
@@ -191,8 +255,9 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       : "";
   const isImageGenerationNode = isInputImageNode && inputImageSourceMode === "generate";
   const isTextNode = nodeType === "input.text";
-  const effectivePreviewUrl = data.previewUrl ?? null;
   const effectiveArtifactKind = data.latestArtifactKind;
+  const effectiveArtifactMimeType = data.latestArtifactMimeType ?? null;
+  const effectiveArtifactType = data.latestArtifactType ?? null;
   const isImageNode = isInputMediaNode || isPreviewNode;
   const usesImageSizing = isInputMediaNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
@@ -250,7 +315,69 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
   const qwenImageEditPrompt =
     isQwenImageEditNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
-  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputMediaNode);
+  const previewMode =
+    isPreviewNode && typeof data.params?.previewMode === "string" && ["auto", "single", "sequence"].includes(data.params.previewMode)
+      ? data.params.previewMode
+      : "auto";
+  const previewFit =
+    isPreviewNode && data.params?.previewFit === "cover"
+      ? "cover"
+      : "contain";
+  const sequenceFps =
+    isPreviewNode && Number.isFinite(Number(data.params?.sequenceFps))
+      ? Math.max(1, Math.min(60, Math.floor(Number(data.params.sequenceFps))))
+      : 12;
+  const sequenceLoop = isPreviewNode ? data.params?.sequenceLoop !== false : true;
+  const sequenceAutoplay = isPreviewNode ? data.params?.sequenceAutoplay === true : true;
+  const previewSourceArtifact = isPreviewNode ? data.outputArtifacts?.artifact ?? null : null;
+  const effectivePreviewUrl = data.previewUrl ?? previewSourceArtifact?.previewUrl ?? previewSourceArtifact?.url ?? null;
+  const previewSourceSemantic =
+    previewSourceArtifact?.meta && typeof previewSourceArtifact.meta.semantic === "string"
+      ? previewSourceArtifact.meta.semantic
+      : null;
+  const isVideoPreview =
+    isInputVideoNode ||
+    effectiveArtifactMimeType === "video/mp4" ||
+    effectiveArtifactType === "Video" ||
+    previewSourceArtifact?.mimeType === "video/mp4" ||
+    previewSourceArtifact?.artifactType === "Video" ||
+    previewSourceSemantic === "depth_video" ||
+    looksLikeVideoUrl(effectivePreviewUrl);
+  const shouldPreferVideoPreview = Boolean(isPreviewNode && effectivePreviewUrl && isVideoPreview);
+  const previewSourceMeta = previewSourceArtifact?.meta ?? null;
+  const hasSequenceManifestArtifact =
+    isPreviewNode &&
+    previewSourceArtifact?.kind === "json" &&
+    previewSourceMeta &&
+    ((typeof previewSourceMeta.outputKey === "string" && previewSourceMeta.outputKey === "sequence") ||
+      (typeof previewSourceMeta.semantic === "string" && previewSourceMeta.semantic === "image_sequence")) &&
+    typeof previewSourceArtifact.url === "string" &&
+    previewSourceArtifact.url.length > 0;
+  const [sequenceManifest, setSequenceManifest] = useState<PreviewSequenceManifest | null>(null);
+  const [sequenceLoading, setSequenceLoading] = useState(false);
+  const [sequenceError, setSequenceError] = useState<string | null>(null);
+  const [sequenceFrameIndex, setSequenceFrameIndex] = useState(0);
+  const [sequencePlaying, setSequencePlaying] = useState(false);
+  const [sequenceFrameUrls, setSequenceFrameUrls] = useState<Record<string, string>>({});
+  const sequenceFrameUrlRegistryRef = useRef<Record<string, string>>({});
+  const shouldLoadSequenceManifest = Boolean(
+    hasSequenceManifestArtifact &&
+    !shouldPreferVideoPreview &&
+    ["auto", "single", "sequence"].includes(previewMode)
+  );
+  const shouldRenderSequence = Boolean(
+    shouldLoadSequenceManifest &&
+    sequenceManifest
+  );
+  const sequenceFrames = sequenceManifest?.frames ?? [];
+  const clampedSequenceFrameIndex =
+    sequenceFrames.length > 0 ? Math.min(sequenceFrameIndex, sequenceFrames.length - 1) : 0;
+  const activeSequenceFrame = sequenceFrames[clampedSequenceFrameIndex] ?? null;
+  const activeSequenceFrameUrl = activeSequenceFrame
+    ? sequenceFrameUrls[activeSequenceFrame.depth_storage_key] ?? null
+    : null;
+  const shouldAutoPlaySequence = Boolean(shouldRenderSequence && previewMode !== "single" && sequenceAutoplay);
+  const hasOpenablePreview = (Boolean(effectivePreviewUrl) || Boolean(activeSequenceFrameUrl)) && (isPreviewNode || isInputMediaNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
     isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
@@ -361,6 +488,155 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       mounted = false;
     };
   }, [isCustomSceneGenNode]);
+
+  useEffect(() => {
+    if (!shouldLoadSequenceManifest || typeof previewSourceArtifact?.url !== "string") {
+      setSequenceManifest(null);
+      setSequenceLoading(false);
+      setSequenceError(null);
+      setSequenceFrameIndex(0);
+      setSequencePlaying(false);
+      for (const objectUrl of Object.values(sequenceFrameUrlRegistryRef.current)) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      sequenceFrameUrlRegistryRef.current = {};
+      setSequenceFrameUrls({});
+      return;
+    }
+
+    let mounted = true;
+    setSequenceLoading(true);
+    setSequenceError(null);
+
+    fetch(previewSourceArtifact.url, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load sequence manifest (${response.status})`);
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        if (!mounted) return;
+        const normalized = normalizeSequenceManifest(payload);
+        if (!normalized) {
+          throw new Error("Sequence manifest is invalid.");
+        }
+        setSequenceManifest(normalized);
+        setSequenceFrameIndex(0);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setSequenceManifest(null);
+        setSequenceError(error instanceof Error ? error.message : "Failed to load sequence.");
+      })
+      .finally(() => {
+        if (mounted) {
+          setSequenceLoading(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [shouldLoadSequenceManifest, previewSourceArtifact?.url]);
+
+  useEffect(() => {
+    return () => {
+      for (const objectUrl of Object.values(sequenceFrameUrlRegistryRef.current)) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      sequenceFrameUrlRegistryRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || sequenceFrames.length === 0) {
+      return;
+    }
+
+    const activeKey = activeSequenceFrame?.depth_storage_key ?? null;
+    const nextKey =
+      sequenceFrames.length > 1
+        ? sequenceFrames[(clampedSequenceFrameIndex + 1) % sequenceFrames.length]?.depth_storage_key ?? null
+        : null;
+    const keysToLoad = [activeKey, nextKey]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .filter((value) => !sequenceFrameUrlRegistryRef.current[value]);
+
+    if (keysToLoad.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    Promise.all(
+      keysToLoad.map(async (storageKey) => {
+        const response = await fetch(buildStorageObjectUrl(storageKey), { cache: "force-cache" });
+        if (!response.ok) {
+          throw new Error(`Failed to load frame (${response.status})`);
+        }
+        const blob = await response.blob();
+        return {
+          storageKey,
+          objectUrl: URL.createObjectURL(blob)
+        };
+      })
+    )
+      .then((entries) => {
+        if (cancelled) {
+          for (const entry of entries) {
+            URL.revokeObjectURL(entry.objectUrl);
+          }
+          return;
+        }
+        for (const entry of entries) {
+          sequenceFrameUrlRegistryRef.current[entry.storageKey] = entry.objectUrl;
+        }
+        setSequenceFrameUrls({ ...sequenceFrameUrlRegistryRef.current });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setSequenceError(error instanceof Error ? error.message : "Failed to load sequence frame.");
+        setSequencePlaying(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSequenceFrame?.depth_storage_key, clampedSequenceFrameIndex, sequenceFrames, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence) {
+      setSequencePlaying(false);
+      return;
+    }
+    setSequencePlaying(shouldAutoPlaySequence);
+  }, [shouldAutoPlaySequence, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || !sequencePlaying || sequenceFrames.length <= 1) {
+      return;
+    }
+    const intervalMs = Math.max(40, Math.floor(1000 / sequenceFps));
+    const timer = window.setInterval(() => {
+      setSequenceFrameIndex((current) => {
+        if (current >= sequenceFrames.length - 1) {
+          if (sequenceLoop) return 0;
+          window.clearInterval(timer);
+          return current;
+        }
+        return current + 1;
+      });
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [sequenceFps, sequenceFrames.length, sequenceLoop, sequencePlaying, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || sequenceLoop || sequenceFrames.length === 0) return;
+    if (sequenceFrameIndex >= sequenceFrames.length - 1) {
+      setSequencePlaying(false);
+    }
+  }, [sequenceFrameIndex, sequenceFrames.length, sequenceLoop, shouldRenderSequence]);
 
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
@@ -748,6 +1024,184 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </button>
           </div>
         </div>
+      ) : isPreviewNode ? (
+        <div className="mb-2 space-y-2">
+          <div className={cn("nodrag space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <p className="text-[10px] text-zinc-400">Preview Mode</p>
+                <select
+                  className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                  value={previewMode}
+                  onChange={(event) => data.onUpdateParam?.(id, "previewMode", event.target.value)}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="single">Single</option>
+                  <option value="sequence">Sequence</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] text-zinc-400">Fit</p>
+                <select
+                  className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                  value={previewFit}
+                  onChange={(event) => data.onUpdateParam?.(id, "previewFit", event.target.value)}
+                >
+                  <option value="contain">Contain</option>
+                  <option value="cover">Cover</option>
+                </select>
+              </div>
+            </div>
+
+            {hasSequenceManifestArtifact && !shouldPreferVideoPreview ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <p className="text-[10px] text-zinc-400">Playback FPS</p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    step={1}
+                    className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                    value={sequenceFps}
+                    onChange={(event) => data.onUpdateParam?.(id, "sequenceFps", Number(event.target.value) || 1)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-1 self-end">
+                  <button
+                    type="button"
+                    onClick={() => data.onUpdateParam?.(id, "sequenceAutoplay", !sequenceAutoplay)}
+                    className={cn(
+                      "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                      sequenceAutoplay ? "border border-[#4f6478] bg-[#253341] text-[#c9def1]" : "border border-[#555] bg-[#1f1f1f] text-zinc-300"
+                    )}
+                  >
+                    Autoplay
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => data.onUpdateParam?.(id, "sequenceLoop", !sequenceLoop)}
+                    className={cn(
+                      "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                      sequenceLoop ? "border border-[#4f6478] bg-[#253341] text-[#c9def1]" : "border border-[#555] bg-[#1f1f1f] text-zinc-300"
+                    )}
+                  >
+                    Loop
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div
+            className={cn(
+              "rounded-xl border border-white/10 bg-gradient-to-br p-2",
+              previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+            )}
+          >
+            <div className="relative aspect-video overflow-hidden rounded-lg border border-white/10 bg-black/35">
+              {shouldPreferVideoPreview && effectivePreviewUrl ? (
+                <video
+                  src={effectivePreviewUrl}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  controls
+                  muted
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : sequenceLoading || (shouldRenderSequence && !activeSequenceFrameUrl && !sequenceError) ? (
+                <div className="grid h-full w-full place-items-center bg-black/35">
+                  <p className="px-3 text-center text-[10px] text-zinc-400">Loading sequence preview…</p>
+                </div>
+              ) : shouldRenderSequence && activeSequenceFrameUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={activeSequenceFrameUrl}
+                  alt={`${spec.title} frame ${clampedSequenceFrameIndex + 1}`}
+                  className={cn(
+                    "nodrag h-full w-full cursor-zoom-in",
+                    previewFit === "cover" ? "object-cover" : "object-contain"
+                  )}
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : effectivePreviewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={effectivePreviewUrl}
+                  alt={`${spec.title} output`}
+                  className={cn(
+                    "nodrag h-full w-full cursor-zoom-in",
+                    previewFit === "cover" ? "object-cover" : "object-contain"
+                  )}
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : (
+                <div className="grid h-full w-full place-items-center bg-black/35">
+                  <p className="px-3 text-center text-[10px] text-zinc-400">
+                    {sequenceError
+                      ? sequenceError
+                      : hasSequenceManifestArtifact
+                        ? "Sequence manifest loaded, but no frames are available."
+                        : "Connect an artifact to preview."}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {!shouldPreferVideoPreview && shouldRenderSequence && sequenceFrames.length > 0 ? (
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="nodrag inline-flex h-7 items-center gap-1 rounded-md border border-[#4f6478] bg-[#253341] px-2 text-[10px] font-medium text-[#c9def1] transition hover:bg-[#2b3d4e]"
+                    onClick={() => setSequencePlaying((current) => !current)}
+                    disabled={previewMode === "single" || sequenceFrames.length <= 1}
+                  >
+                    {sequencePlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+                    {sequencePlaying ? "Pause" : "Play"}
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag h-7 rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-zinc-300"
+                    onClick={() => {
+                      setSequencePlaying(false);
+                      setSequenceFrameIndex((current) => Math.max(0, current - 1));
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag h-7 rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-zinc-300"
+                    onClick={() => {
+                      setSequencePlaying(false);
+                      setSequenceFrameIndex((current) => Math.min(sequenceFrames.length - 1, current + 1));
+                    }}
+                  >
+                    Next
+                  </button>
+                  <span className="ml-auto text-[10px] text-zinc-400">
+                    Frame {clampedSequenceFrameIndex + 1}/{sequenceFrames.length}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, sequenceFrames.length - 1)}
+                  step={1}
+                  value={clampedSequenceFrameIndex}
+                  onChange={(event) => {
+                    setSequencePlaying(false);
+                    setSequenceFrameIndex(Number(event.target.value) || 0);
+                  }}
+                  className="nodrag w-full accent-sky-400"
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : isImageNode ? (
         <div
           className={cn(
@@ -789,7 +1243,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ) : data.status === "running" ? (
               <div className="h-full w-full animate-pulse bg-white/10" />
             ) : effectivePreviewUrl ? (
-              isInputVideoNode ? (
+              isVideoPreview ? (
                 <video
                   src={effectivePreviewUrl}
                   className="nodrag h-full w-full cursor-zoom-in object-contain"
@@ -900,17 +1354,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <div className="h-3 w-24 animate-pulse rounded bg-white/15" />
               <div className="h-3 w-32 animate-pulse rounded bg-white/10" />
             </div>
-          ) : isPreviewNode && effectivePreviewUrl ? (
-            <div className="overflow-hidden rounded-lg border border-white/10 bg-black/40">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={effectivePreviewUrl}
-                alt={`${spec.title} output`}
-                className="nodrag aspect-video h-full w-full cursor-zoom-in object-cover"
-                onDoubleClick={openPreviewModal}
-                title="Double-click to open full size"
-              />
-            </div>
           ) : effectiveArtifactKind ? (
             <div className="space-y-1">
               <p className="font-medium text-zinc-100">Output: {effectiveArtifactKind}</p>
@@ -1008,8 +1451,17 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </DialogClose>
           </div>
           <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
-            {effectivePreviewUrl ? (
-              isInputVideoNode ? (
+            {shouldPreferVideoPreview && effectivePreviewUrl ? (
+              <video src={effectivePreviewUrl} className="h-auto max-h-[80vh] w-full" controls />
+            ) : shouldRenderSequence && activeSequenceFrameUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={activeSequenceFrameUrl}
+                alt={`${spec.title} frame ${clampedSequenceFrameIndex + 1}`}
+                className={cn("h-auto w-full", previewFit === "cover" ? "object-cover" : "object-contain")}
+              />
+            ) : effectivePreviewUrl ? (
+              isVideoPreview ? (
                 <video src={effectivePreviewUrl} className="h-auto max-h-[80vh] w-full" controls />
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -1022,3 +1474,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     </div>
   );
 }
+
+export const WorkflowNode = memo(WorkflowNodeImpl);
+WorkflowNode.displayName = "WorkflowNode";

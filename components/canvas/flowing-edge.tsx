@@ -1,12 +1,13 @@
 "use client";
 
+import { memo } from "react";
 import { BaseEdge, EdgeProps, getBezierPath } from "reactflow";
 
 function sanitizeSvgId(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
 
-export function FlowingEdge({
+function FlowingEdgeImpl({
   id,
   sourceX,
   sourceY,
@@ -82,3 +83,5 @@ export function FlowingEdge({
   );
 }
 
+export const FlowingEdge = memo(FlowingEdgeImpl);
+FlowingEdge.displayName = "FlowingEdge";

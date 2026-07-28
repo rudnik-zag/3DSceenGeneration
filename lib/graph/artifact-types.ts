@@ -3,6 +3,8 @@ import { ArtifactKind } from "@prisma/client";
 import { ArtifactType, PayloadKind } from "@/types/workflow";
 
 const LEGACY_PAYLOAD_TO_ARTIFACT: Record<string, ArtifactType> = {
+  Any: "AnyArtifact",
+  AnyArtifact: "AnyArtifact",
   Image: "Image",
   Video: "Video",
   Mask: "MaskSet",
@@ -28,6 +30,7 @@ const LEGACY_PAYLOAD_TO_ARTIFACT: Record<string, ArtifactType> = {
 };
 
 const ALL_ARTIFACT_TYPES: ArtifactType[] = [
+  "AnyArtifact",
   "Image",
   "Video",
   "Descriptor",
@@ -59,6 +62,7 @@ export function normalizeArtifactType(value: unknown, fallback: ArtifactType = "
 }
 
 export function areArtifactTypesCompatible(source: ArtifactType, target: ArtifactType) {
+  if (source === "AnyArtifact" || target === "AnyArtifact") return true;
   return source === target;
 }
 
