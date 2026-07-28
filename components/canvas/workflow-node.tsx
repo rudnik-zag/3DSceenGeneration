@@ -22,6 +22,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { getSceneGenerationPresetNames } from "@/lib/graph/scene-generation-presets";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { cn } from "@/lib/utils";
@@ -431,11 +432,16 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
     : isCustomSceneGenNode
       ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
       : data.latestArtifactId;
+  const getOutputAvailability = (outputId: string) =>
+    nodeType === "geo.depth_estimation"
+      ? getDepthEstimationOutputAvailability(data.params ?? {}, data.outputArtifacts, outputId)
+      : { available: true, reason: null };
   const outputVersionChoices = spec.outputPorts
     .filter((port) => !port.hidden)
     .map((port) => {
       const history = data.outputArtifactHistory?.[port.id] ?? [];
       if (history.length < 2) return null;
+      const availability = getOutputAvailability(port.id);
       const selectionKey = `__selectedArtifact__${port.id}`;
       const selectedRaw =
         typeof data.params?.[selectionKey] === "string"
@@ -450,7 +456,9 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
         portLabel: port.label,
         selectionKey,
         selectedValue,
-        history
+        history,
+        available: availability.available,
+        unavailableReason: availability.reason
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
@@ -1369,12 +1377,20 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
         <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] uppercase tracking-[0.08em] text-zinc-400">Output Version</p>
           {outputVersionChoices.map((choice) => (
-            <div key={`${id}-${choice.portId}`} className="space-y-1">
-              <p className="text-[10px] text-zinc-400">{choice.portLabel}</p>
+            <div
+              key={`${id}-${choice.portId}`}
+              className={cn("space-y-1", !choice.available && "opacity-45")}
+              title={choice.unavailableReason ?? undefined}
+            >
+              <p className="text-[10px] text-zinc-400">
+                {choice.portLabel}
+                {!choice.available ? " (unavailable)" : ""}
+              </p>
               <select
-                className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none disabled:cursor-not-allowed"
                 value={choice.selectedValue}
                 onChange={(event) => data.onUpdateParam?.(id, choice.selectionKey, event.target.value)}
+                disabled={!choice.available}
               >
                 <option value="__latest__">Latest (auto)</option>
                 {choice.history.map((artifact) => (
@@ -1416,18 +1432,30 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
 
       {(isSam2Node ? spec.outputPorts.filter((port) => port.id === "config") : spec.outputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
+        const availability = getOutputAvailability(port.id);
+        const isOutputDisabled = !availability.available;
         return (
-          <div key={`${port.id}-${idx}`}>
+          <div key={`${port.id}-${idx}`} title={availability.reason ?? undefined}>
             <Handle
               id={port.id}
               type="source"
               position={Position.Right}
-              style={{ top, width: 9, height: 9, background: "#66b6ff", border: "1px solid #141414", right: -4.5 }}
+              isConnectable={!isOutputDisabled}
+              style={{
+                top,
+                width: 9,
+                height: 9,
+                background: isOutputDisabled ? "#555" : "#66b6ff",
+                border: isOutputDisabled ? "1px solid #303030" : "1px solid #141414",
+                right: -4.5,
+                cursor: isOutputDisabled ? "not-allowed" : "crosshair"
+              }}
             />
             <span
               className={cn(
                 "pointer-events-none absolute -right-1 translate-x-full px-1 py-0.5 text-[10px] text-[#a9a9a9]",
-                port.hidden && "opacity-70"
+                port.hidden && "opacity-70",
+                isOutputDisabled && "text-zinc-600 line-through opacity-60"
               )}
               style={{ top: top - 8 }}
             >

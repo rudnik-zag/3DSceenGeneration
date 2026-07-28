@@ -66,6 +66,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
 import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib/graph/connection-rules";
+import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
   mergeNodeParamsWithDefaults,
@@ -460,6 +461,11 @@ function pickPreviewArtifact(
       .sort((a, b) => new Date(b[1]?.createdAt ?? 0).getTime() - new Date(a[1]?.createdAt ?? 0).getTime())[0]?.[1] ??
     Object.values(outputArtifacts)[0]
   );
+}
+
+function isSourceOutputAvailable(node: Node<GraphNodeData>, outputId: string | null | undefined) {
+  if ((node.type as WorkflowNodeType) !== "geo.depth_estimation" || !outputId) return true;
+  return getDepthEstimationOutputAvailability(node.data.params ?? {}, node.data.outputArtifacts, outputId).available;
 }
 
 function createWorkflowId(prefix: string) {
@@ -1013,6 +1019,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const sourceSpec = nodeSpecRegistry[sourceType];
           const explicitSourceOutputHandle = edge.sourceHandle ?? null;
           const sourceOutputHandle = explicitSourceOutputHandle ?? sourceSpec.outputPorts[0]?.id;
+          if (!isSourceOutputAvailable(sourceNode, sourceOutputHandle)) continue;
           const sourceOutputArtifacts = sourceNode.data.outputArtifacts ?? {};
           const sourcePortArtifact = sourceOutputHandle
             ? sourceOutputArtifacts[sourceOutputHandle]
@@ -1397,10 +1404,24 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         sourceHandleId: connection.sourceHandle,
         targetHandleId: connection.targetHandle
       });
-      return result.valid;
+      return result.valid && isSourceOutputAvailable(sourceNode, result.sourceHandleId);
     },
     [nodes]
   );
+
+  useEffect(() => {
+    setEdges((currentEdges) => {
+      const nextEdges = currentEdges.filter((edge) => {
+        const sourceNode = nodeById.get(edge.source);
+        if (!sourceNode) return true;
+        const sourceType = sourceNode.type as WorkflowNodeType;
+        const sourceSpec = nodeSpecRegistry[sourceType];
+        const sourceHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+        return isSourceOutputAvailable(sourceNode, sourceHandle);
+      });
+      return nextEdges.length === currentEdges.length ? currentEdges : nextEdges;
+    });
+  }, [nodeById, setEdges]);
 
   const onConnect = useCallback<OnConnect>(
     (params) => {
@@ -1900,7 +1921,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       targetHandleId: port.id
                     })
                   )
-                  .find((result) => result.valid)
+                  .find((result) => result.valid && isSourceOutputAvailable(pendingNode, result.sourceHandleId))
               : findFirstCompatibleHandles(pendingSourceType, nodeType);
 
           if (compatible) {
@@ -1931,7 +1952,19 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       targetHandleId: targetHandle
                     })
                   )
-                  .find((result) => result.valid)
+                  .find((result) => {
+                    if (!result.valid) return false;
+                    const nextNode = {
+                      id: newNodeId,
+                      type: nodeType,
+                      position: { x: paneMenu.flowX, y: paneMenu.flowY },
+                      data: {
+                        label: nodeSpecRegistry[nodeType].title,
+                        params: nodeSpecRegistry[nodeType].defaultParams
+                      }
+                    } as Node<GraphNodeData>;
+                    return isSourceOutputAvailable(nextNode, result.sourceHandleId);
+                  })
               : findFirstCompatibleHandles(nodeType, pendingTargetType);
 
           if (compatible) {
