@@ -3999,6 +3999,15 @@ export function UnifiedWorldViewer({
       return false;
     };
 
+    const isVisibleInHierarchy = (object: THREE.Object3D) => {
+      let current: THREE.Object3D | null = object;
+      while (current) {
+        if (!current.visible) return false;
+        current = current.parent;
+      }
+      return true;
+    };
+
     const buildRectFromClientPoints = (startX: number, startY: number, endX: number, endY: number) => {
       const canvasRect = rendererRef.current?.domElement.getBoundingClientRect();
       if (!canvasRect) return null;
@@ -4024,10 +4033,29 @@ export function UnifiedWorldViewer({
       pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, cameraRef.current);
 
+      raycaster.params.Points.threshold = 0.04;
+      raycaster.params.Line.threshold = 0.006;
+
+      if (showCameraPathRef.current) {
+        const cameraMarkerHits = raycaster.intersectObjects(
+          [...cameraHandlesRef.current.values()]
+            .map((entry) => entry.marker)
+            .filter((marker) => isVisibleInHierarchy(marker)),
+          true
+        );
+        const cameraMarkerHit = cameraMarkerHits[0]?.object ?? null;
+        if (cameraMarkerHit) {
+          for (const handle of cameraHandlesRef.current.values()) {
+            if (isDescendantOf(cameraMarkerHit, handle.marker)) {
+              return { kind: "camera", id: handle.id, object: handle.object };
+            }
+          }
+        }
+      }
+
       const roots = [
         ...meshRootsRef.current,
-        ...[...splatHandlesRef.current].map((entry) => entry.object),
-        ...(showCameraPathRef.current ? [...cameraHandlesRef.current.values()].map((entry) => entry.object) : [])
+        ...[...splatHandlesRef.current].map((entry) => entry.object)
       ];
       const intersections = raycaster.intersectObjects(roots, true);
       if (intersections.length === 0) return null;
