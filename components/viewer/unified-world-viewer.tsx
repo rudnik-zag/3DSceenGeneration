@@ -47,6 +47,7 @@ interface WorldManifest {
     target?: [number, number, number];
     fov?: number;
   };
+  cameraPath?: CameraPathManifest | null;
   environment?: {
     enabled: boolean;
     hdriUrl: string | null;
@@ -71,11 +72,27 @@ interface WorldManifest {
   }>;
 }
 
+interface CameraPathFrame {
+  index: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  fov: number;
+}
+
+interface CameraPathManifest {
+  artifactId: string;
+  frameCount: number;
+  isMetric: boolean;
+  modelVariant: string | null;
+  frames: CameraPathFrame[];
+}
+
 type ViewerEnvironmentConfig = NonNullable<WorldManifest["environment"]>;
 
 type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
-type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform";
+type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform" | "cameras";
 type BundleMode = "same_node" | "project_fallback";
 type SplatRuntimeName = "legacy" | "spark";
 type LoadedSplatRuntime = SplatRuntimeName | "points";
@@ -143,13 +160,27 @@ interface MeshListItem {
   label: string;
 }
 
-type SelectableSceneObjectKind = "mesh" | "splat";
+type SelectableSceneObjectKind = "mesh" | "splat" | "camera";
 type SceneObjectKind = SelectableSceneObjectKind | "group";
 
 interface SplatListItem {
   id: string;
   label: string;
   splatCount: number;
+}
+
+interface CameraListItem {
+  id: string;
+  label: string;
+}
+
+interface CameraObjectHandle {
+  id: string;
+  label: string;
+  object: THREE.Object3D;
+  frustum: THREE.LineSegments;
+  marker: THREE.Mesh;
+  scale: number;
 }
 
 interface ActiveGroupMember {
@@ -941,7 +972,7 @@ function parseObjectItemKey(key: string): { kind: SelectableSceneObjectKind; id:
   if (separatorIndex < 0) return null;
   const kindRaw = key.slice(0, separatorIndex);
   const id = key.slice(separatorIndex + 1);
-  if (kindRaw !== "mesh" && kindRaw !== "splat") return null;
+  if (kindRaw !== "mesh" && kindRaw !== "splat" && kindRaw !== "camera") return null;
   return { kind: kindRaw, id };
 }
 
@@ -960,6 +991,91 @@ function computeUnionBoundsForObjects(objects: THREE.Object3D[]): THREE.Box3 | n
     }
   }
   return hasAny ? union : null;
+}
+
+function vec3Tuple(value: [number, number, number]) {
+  return new THREE.Vector3(value[0], value[1], value[2]);
+}
+
+function getCameraPathVisualScale(frames: CameraPathFrame[]) {
+  if (frames.length < 2) return 0.08;
+  const points = frames.map((frame) => vec3Tuple(frame.position));
+  const box = new THREE.Box3().setFromPoints(points);
+  const size = box.getSize(new THREE.Vector3());
+  const extent = Math.max(size.x, size.y, size.z);
+  return Math.max(0.04, extent * 0.18);
+}
+
+function createCameraFrustumGeometry(frame: CameraPathFrame, scale: number) {
+  const position = vec3Tuple(frame.position);
+  const target = vec3Tuple(frame.target);
+  const up = vec3Tuple(frame.up).normalize();
+  const forward = target.clone().sub(position).normalize();
+  const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+  const correctedUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+  const depth = scale;
+  const halfHeight = Math.tan(THREE.MathUtils.degToRad(frame.fov) / 2) * depth;
+  const halfWidth = halfHeight * 1.6;
+  const center = position.clone().add(forward.clone().multiplyScalar(depth));
+  const corners = [
+    center.clone().add(right.clone().multiplyScalar(-halfWidth)).add(correctedUp.clone().multiplyScalar(halfHeight)),
+    center.clone().add(right.clone().multiplyScalar(halfWidth)).add(correctedUp.clone().multiplyScalar(halfHeight)),
+    center.clone().add(right.clone().multiplyScalar(halfWidth)).add(correctedUp.clone().multiplyScalar(-halfHeight)),
+    center.clone().add(right.clone().multiplyScalar(-halfWidth)).add(correctedUp.clone().multiplyScalar(-halfHeight))
+  ];
+  return new THREE.BufferGeometry().setFromPoints([
+    position, corners[0], position, corners[1], position, corners[2], position, corners[3],
+    corners[0], corners[1], corners[1], corners[2], corners[2], corners[3], corners[3], corners[0]
+  ]);
+}
+
+function createCameraPathGroup(cameraPath: CameraPathManifest) {
+  const group = new THREE.Group();
+  group.name = "DA3CameraPath";
+  const handles: CameraObjectHandle[] = [];
+  const frames = cameraPath.frames;
+  const pathMaterial = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 });
+  const frustumMaterial = new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.72 });
+  const markerMaterial = new THREE.MeshBasicMaterial({ color: 0x22c55e });
+  const points = frames.map((frame) => vec3Tuple(frame.position));
+  if (points.length > 1) {
+    const curve = new THREE.CatmullRomCurve3(points, false, "centripetal", 0.35);
+    const pathGeometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(Math.max(24, points.length * 3)));
+    const pathLine = new THREE.Line(pathGeometry, pathMaterial);
+    pathLine.name = "camera-path-line";
+    group.add(pathLine);
+  }
+  const scale = getCameraPathVisualScale(frames);
+  const activeFrame = frames[0];
+  if (activeFrame) {
+    const activeCamera = new THREE.Group();
+    const id = "camera-path-active";
+    activeCamera.name = id;
+    activeCamera.userData.selectableKind = "camera";
+
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(scale * 0.16, 12, 8), markerMaterial);
+    marker.name = "active-camera-marker";
+    marker.userData.selectableKind = "camera";
+    marker.userData.cameraObjectId = id;
+    activeCamera.add(marker);
+
+    const frustum = new THREE.LineSegments(createCameraFrustumGeometry(activeFrame, scale), frustumMaterial);
+    frustum.name = "active-camera-frustum";
+    frustum.userData.selectableKind = "camera";
+    frustum.userData.cameraObjectId = id;
+    activeCamera.add(frustum);
+
+    group.add(activeCamera);
+    handles.push({
+      id,
+      label: "camera_path",
+      object: activeCamera,
+      frustum,
+      marker,
+      scale
+    });
+  }
+  return { group, handles };
 }
 
 async function getGaussianSplatsModule() {
@@ -1070,6 +1186,15 @@ export function UnifiedWorldViewer({
   const clockRef = useRef(new THREE.Clock());
   const keysRef = useRef<Set<string>>(new Set());
   const splatHandlesRef = useRef(new Set<SplatHandle>());
+  const cameraHandlesRef = useRef(new Map<string, CameraObjectHandle>());
+  const cameraViewReturnRef = useRef<{
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    up: THREE.Vector3;
+    fov: number;
+    navMode: NavigationMode;
+    viewMode: ViewMode;
+  } | null>(null);
   const tempBlobUrlsRef = useRef<string[]>([]);
   const hudRef = useRef<ViewerHudStats>(DEFAULT_STATS);
   const fpsCounterRef = useRef({ acc: 0, frames: 0, fps: 0 });
@@ -1083,6 +1208,7 @@ export function UnifiedWorldViewer({
   const objectItemsRef = useRef<Array<{ id: string; kind: SelectableSceneObjectKind; label: string }>>([]);
   const modelviewerAutoRotateRef = useRef(false);
   const showGridRef = useRef(true);
+  const showCameraPathRef = useRef(true);
   const gridRef = useRef<THREE.GridHelper | null>(null);
   const flySpeedRef = useRef(4);
   const rotationDisplayRef = useRef<Map<string, EulerTriplet>>(new Map());
@@ -1093,6 +1219,7 @@ export function UnifiedWorldViewer({
   const deleteSelectedObjectsFromSceneRef = useRef<() => number>(() => 0);
   const autoAlignOnLoadRef = useRef(false);
   const groundAlignDebugGroupRef = useRef<THREE.Group | null>(null);
+  const cameraPathGroupRef = useRef<THREE.Group | null>(null);
   const splatSupportSampleCacheRef = useRef<Map<string, THREE.Vector3[]>>(new Map());
   const activeGroupRef = useRef<ActiveObjectGroup | null>(null);
   const groupCounterRef = useRef(1);
@@ -1132,6 +1259,7 @@ export function UnifiedWorldViewer({
   const [selectedKind, setSelectedKind] = useState<SceneObjectKind | null>(null);
   const [meshItems, setMeshItems] = useState<MeshListItem[]>([]);
   const [splatItems, setSplatItems] = useState<SplatListItem[]>([]);
+  const [cameraItems, setCameraItems] = useState<CameraListItem[]>([]);
   const [objectCustomLabels, setObjectCustomLabels] = useState<Record<string, string>>({});
   const [renamingObjectKey, setRenamingObjectKey] = useState<string | null>(null);
   const [renamingMeshDraft, setRenamingMeshDraft] = useState("");
@@ -1150,6 +1278,9 @@ export function UnifiedWorldViewer({
   const [objectContextMenu, setObjectContextMenu] = useState<ObjectContextMenuState | null>(null);
   const [artifactContextMenu, setArtifactContextMenu] = useState<ArtifactContextMenuState | null>(null);
   const [groundAlignDebug, setGroundAlignDebug] = useState(false);
+  const [showCameraPath, setShowCameraPath] = useState(true);
+  const [activeCameraFrameIndex, setActiveCameraFrameIndex] = useState(0);
+  const [activeCameraViewFrameId, setActiveCameraViewFrameId] = useState<string | null>(null);
   const [groupSelectionKeys, setGroupSelectionKeys] = useState<string[]>([]);
   const [activeGroupMeta, setActiveGroupMeta] = useState<{
     id: string;
@@ -1184,6 +1315,45 @@ export function UnifiedWorldViewer({
         })),
     [manifest.splats]
   );
+  const cameraPath = manifest.cameraPath ?? null;
+  const activeCameraFrame = cameraPath?.frames[Math.min(activeCameraFrameIndex, Math.max(0, cameraPath.frames.length - 1))] ?? null;
+  const selectedCameraHandle =
+    selectedKind === "camera" && selectedName ? cameraHandlesRef.current.get(selectedName) ?? null : null;
+
+  const updateActiveCameraObject = useCallback((frame: CameraPathFrame | null) => {
+    if (!frame) return;
+    const handle = cameraHandlesRef.current.get("camera-path-active") ?? null;
+    if (!handle) return;
+    handle.object.userData.cameraFrameIndex = frame.index;
+    handle.object.userData.cameraPathFrame = frame;
+    handle.marker.position.copy(vec3Tuple(frame.position));
+    handle.frustum.geometry.dispose();
+    handle.frustum.geometry = createCameraFrustumGeometry(frame, handle.scale);
+    handle.frustum.geometry.computeBoundingSphere();
+    if (selectedKindRef.current === "camera") {
+      setTransformDebug(`Selected camera frame ${frame.index}. Use Enter View to look through it.`);
+    }
+  }, []);
+
+  const applyViewerCameraPathFrame = useCallback((frame: CameraPathFrame | null) => {
+    const camera = cameraRef.current;
+    const orbit = orbitRef.current;
+    if (!camera || !orbit || !frame) return;
+    if (cameraTweenRef.current !== null) {
+      cancelAnimationFrame(cameraTweenRef.current);
+      cameraTweenRef.current = null;
+    }
+    camera.position.copy(vec3Tuple(frame.position));
+    camera.up.copy(vec3Tuple(frame.up).normalize());
+    camera.fov = frame.fov;
+    camera.near = 0.0001;
+    camera.far = 4000;
+    camera.lookAt(vec3Tuple(frame.target));
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    orbit.target.copy(vec3Tuple(frame.target));
+    orbit.update();
+  }, []);
 
   const objectItems = useMemo(() => {
     const merged = [
@@ -1196,6 +1366,11 @@ export function UnifiedWorldViewer({
         id: item.id,
         kind: "splat" as const,
         splatCount: item.splatCount
+      })),
+      ...cameraItems.map((item) => ({
+        id: item.id,
+        kind: "camera" as const,
+        splatCount: undefined
       }))
     ];
     return merged.map((item, index) => {
@@ -1209,7 +1384,7 @@ export function UnifiedWorldViewer({
         label: customLabel && customLabel.length > 0 ? customLabel : autoLabel
       };
     });
-  }, [objectCustomLabels, meshItems, splatItems]);
+  }, [cameraItems, objectCustomLabels, meshItems, splatItems]);
 
   const groupSelectionSet = useMemo(() => new Set(groupSelectionKeys), [groupSelectionKeys]);
   const orderedObjectKeys = useMemo(
@@ -1221,6 +1396,9 @@ export function UnifiedWorldViewer({
     (kind: SelectableSceneObjectKind, id: string): THREE.Object3D | null => {
       if (kind === "mesh") {
         return meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === id) ?? null;
+      }
+      if (kind === "camera") {
+        return cameraHandlesRef.current.get(id)?.object ?? null;
       }
       return [...splatHandlesRef.current].find((entry) => entry.id === id)?.object ?? null;
     },
@@ -1540,6 +1718,25 @@ export function UnifiedWorldViewer({
   useEffect(() => {
     void applyViewerEnvironment(viewerEnvironment);
   }, [applyViewerEnvironment, viewerEnvironment]);
+
+  useEffect(() => {
+    const frameCount = cameraPath?.frames.length ?? 0;
+    setActiveCameraFrameIndex((current) => Math.min(Math.max(0, current), Math.max(0, frameCount - 1)));
+  }, [cameraPath?.artifactId, cameraPath?.frames.length]);
+
+  useEffect(() => {
+    showCameraPathRef.current = showCameraPath;
+    if (cameraPathGroupRef.current) {
+      cameraPathGroupRef.current.visible = showCameraPath;
+    }
+  }, [showCameraPath]);
+
+  useEffect(() => {
+    updateActiveCameraObject(activeCameraFrame);
+    if (activeCameraViewFrameId) {
+      applyViewerCameraPathFrame(activeCameraFrame);
+    }
+  }, [activeCameraFrame, activeCameraViewFrameId, applyViewerCameraPathFrame, updateActiveCameraObject]);
 
   useEffect(() => {
     return () => {
@@ -2330,6 +2527,21 @@ export function UnifiedWorldViewer({
     [styleSelectionHelperMaterial]
   );
 
+  const attachCameraSelectionHelper = useCallback(
+    (target: THREE.Object3D) => {
+      const scene = sceneRef.current;
+      target.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(target);
+      if (box.isEmpty()) return;
+      const helper = new THREE.Box3Helper(box, 0xfbbf24);
+      helper.renderOrder = 9998;
+      styleSelectionHelperMaterial(helper.material as THREE.Material);
+      if (scene) scene.add(helper);
+      selectedBoxRef.current = helper;
+    },
+    [styleSelectionHelperMaterial]
+  );
+
   const setSelectedGroup = useCallback(
     (group: ActiveObjectGroup | null) => {
       detachTransformControlsTarget();
@@ -2357,12 +2569,17 @@ export function UnifiedWorldViewer({
       const splatHandle = object
         ? [...splatHandlesRef.current].find((handle) => handle.object === object) ?? null
         : null;
+      const cameraHandle = object
+        ? [...cameraHandlesRef.current.values()].find((handle) => handle.object === object) ?? null
+        : null;
       const resolvedKind: SelectableSceneObjectKind | null = object
         ? kind ??
           (meshRootsRef.current.includes(object)
             ? "mesh"
             : splatHandle
               ? "splat"
+              : cameraHandle
+                ? "camera"
               : null)
         : null;
 
@@ -2374,6 +2591,8 @@ export function UnifiedWorldViewer({
         object
           ? resolvedKind === "splat"
             ? (splatHandle?.id ?? object.name ?? object.uuid)
+            : resolvedKind === "camera"
+              ? (cameraHandle?.id ?? object.name ?? object.uuid)
             : object.name || object.uuid
           : null
       );
@@ -2396,10 +2615,23 @@ export function UnifiedWorldViewer({
         setTransformDebug("Selected splat.");
         return;
       }
+      if (object && resolvedKind === "camera") {
+        attachCameraSelectionHelper(object);
+        setTransformDraft(null);
+        const handle = cameraHandle ?? cameraHandlesRef.current.get(object.name || object.uuid) ?? null;
+        if (handle) {
+          const frameIndex = Number(handle.object.userData.cameraFrameIndex ?? activeCameraFrameIndex);
+          setActiveCameraFrameIndex(frameIndex);
+          setTransformDebug(`Selected camera frame ${frameIndex}. Use Enter View to look through it.`);
+        } else {
+          setTransformDebug("Selected camera.");
+        }
+        return;
+      }
       setTransformDraft(null);
       setTransformDebug("No object selected");
     },
-    [attachMeshSelectionBox, attachSplatSelectionBox, attachTransformControlsToObject, clearSelectedHelper, detachTransformControlsTarget, syncTransformDraft]
+    [attachCameraSelectionHelper, attachMeshSelectionBox, attachSplatSelectionBox, attachTransformControlsToObject, clearSelectedHelper, detachTransformControlsTarget, syncTransformDraft]
   );
 
   const applyHistorySnapshot = useCallback(
@@ -2625,6 +2857,15 @@ export function UnifiedWorldViewer({
       if (kind === "mesh") {
         const target = meshRootsRef.current.find((entry) => (entry.name || entry.uuid) === itemId) ?? null;
         setSelectedObject(target, "mesh");
+        return;
+      }
+      if (kind === "camera") {
+        const handle = cameraHandlesRef.current.get(itemId) ?? null;
+        setSelectedObject(handle?.object ?? null, "camera");
+        if (handle) {
+          const frameIndex = Number(handle.object.userData.cameraFrameIndex ?? activeCameraFrameIndex);
+          setActiveCameraFrameIndex(frameIndex);
+        }
         return;
       }
       const handle = [...splatHandlesRef.current].find((entry) => entry.id === itemId) ?? null;
@@ -3236,6 +3477,56 @@ export function UnifiedWorldViewer({
     );
   }, [animateCameraTo, applyViewModeProfile, manifest.camera]);
 
+  const enterCameraPathFrame = useCallback(
+    (frame: CameraPathFrame | null) => {
+      const camera = cameraRef.current;
+      const orbit = orbitRef.current;
+      if (!camera || !orbit || !frame) return;
+      if (!cameraViewReturnRef.current) {
+        cameraViewReturnRef.current = {
+          position: camera.position.clone(),
+          target: orbit.target.clone(),
+          up: camera.up.clone(),
+          fov: camera.fov,
+          navMode: navModeRef.current,
+          viewMode: viewModeRef.current
+        };
+      }
+      applyViewerCameraPathFrame(frame);
+      setNavMode("fly");
+      setViewMode("default");
+      setActiveCameraViewFrameId("camera-path-active");
+      setTransformDebug(`camera path frame ${frame.index}`);
+    },
+    [applyViewerCameraPathFrame]
+  );
+
+  const exitCameraPathFrameView = useCallback(() => {
+    const camera = cameraRef.current;
+    const orbit = orbitRef.current;
+    const saved = cameraViewReturnRef.current;
+    if (!camera || !orbit || !saved) return;
+    if (cameraTweenRef.current !== null) {
+      cancelAnimationFrame(cameraTweenRef.current);
+      cameraTweenRef.current = null;
+    }
+    camera.position.copy(saved.position);
+    camera.up.copy(saved.up);
+    camera.fov = saved.fov;
+    camera.near = 0.0001;
+    camera.far = 4000;
+    camera.updateProjectionMatrix();
+    camera.lookAt(saved.target);
+    camera.updateMatrixWorld(true);
+    orbit.target.copy(saved.target);
+    orbit.update();
+    setNavMode(saved.navMode);
+    setViewMode(saved.viewMode);
+    cameraViewReturnRef.current = null;
+    setActiveCameraViewFrameId(null);
+    setTransformDebug("Returned to scene view.");
+  }, []);
+
   const fitSelection = useCallback(() => {
     if (!cameraRef.current || !orbitRef.current) return;
 
@@ -3313,8 +3604,10 @@ export function UnifiedWorldViewer({
         : new THREE.Color(initialEnvironment.backgroundColor);
     sceneRef.current = scene;
     meshRootsRef.current = [];
+    cameraHandlesRef.current.clear();
     setMeshItems([]);
     setSplatItems([]);
+    setCameraItems([]);
     setObjectCustomLabels({});
     setRenamingObjectKey(null);
     setRenamingMeshDraft("");
@@ -3416,6 +3709,25 @@ export function UnifiedWorldViewer({
     grid.visible = showGridRef.current;
     scene.add(grid);
     gridRef.current = grid;
+
+    if (manifest.cameraPath?.frames.length) {
+      const cameraPathVisual = createCameraPathGroup(manifest.cameraPath);
+      cameraPathVisual.group.visible = showCameraPath;
+      scene.add(cameraPathVisual.group);
+      cameraPathGroupRef.current = cameraPathVisual.group;
+      cameraHandlesRef.current = new Map(cameraPathVisual.handles.map((handle) => [handle.id, handle]));
+      setCameraItems(
+        cameraPathVisual.handles.map((handle) => ({
+          id: handle.id,
+          label: handle.label
+        }))
+      );
+      updateActiveCameraObject(manifest.cameraPath.frames[activeCameraFrameIndex] ?? manifest.cameraPath.frames[0] ?? null);
+    } else {
+      cameraPathGroupRef.current = null;
+      cameraHandlesRef.current.clear();
+      setCameraItems([]);
+    }
 
     const orbit = new OrbitControls(camera, renderer.domElement);
     orbit.enableDamping = true;
@@ -3714,7 +4026,8 @@ export function UnifiedWorldViewer({
 
       const roots = [
         ...meshRootsRef.current,
-        ...[...splatHandlesRef.current].map((entry) => entry.object)
+        ...[...splatHandlesRef.current].map((entry) => entry.object),
+        ...(showCameraPathRef.current ? [...cameraHandlesRef.current.values()].map((entry) => entry.object) : [])
       ];
       const intersections = raycaster.intersectObjects(roots, true);
       if (intersections.length === 0) return null;
@@ -3732,6 +4045,11 @@ export function UnifiedWorldViewer({
       for (const handle of splatHandlesRef.current) {
         if (isDescendantOf(hit, handle.object)) {
           return { kind: "splat", id: handle.id, object: handle.object };
+        }
+      }
+      for (const handle of cameraHandlesRef.current.values()) {
+        if (isDescendantOf(hit, handle.object)) {
+          return { kind: "camera", id: handle.id, object: handle.object };
         }
       }
       return null;
@@ -3927,6 +4245,15 @@ export function UnifiedWorldViewer({
       if (hitItem) {
         setSelectedObject(hitItem.object, hitItem.kind);
         objectListSelectionAnchorRef.current = buildObjectItemKey(hitItem.kind, hitItem.id);
+        if (hitItem.kind === "camera") {
+          const handle = cameraHandlesRef.current.get(hitItem.id) ?? null;
+          if (handle) {
+            enterCameraPathFrame(activeCameraFrame);
+            pushShortcutHint(`Entered camera ${activeCameraFrame?.index ?? 0}`);
+            event.preventDefault();
+            return;
+          }
+        }
       }
       fitSelectionRef.current();
       pushShortcutHint("Focused selection");
@@ -4548,8 +4875,14 @@ export function UnifiedWorldViewer({
               disposeObjectTree(gltf.scene);
               continue;
             }
+            const bakedCameraHelpers: THREE.Object3D[] = [];
             gltf.scene.traverse((obj: THREE.Object3D) => {
               obj.matrixAutoUpdate = true;
+              const lineObj = obj as THREE.Object3D & { isLine?: boolean; isLineSegments?: boolean };
+              if (lineObj.isLine || lineObj.isLineSegments) {
+                bakedCameraHelpers.push(obj);
+                return;
+              }
               const meshObj = obj as THREE.Mesh;
               if (!meshObj.isMesh) return;
               meshObj.userData.transformRoot = gltf.scene;
@@ -4560,6 +4893,10 @@ export function UnifiedWorldViewer({
               if (Array.isArray(meshObj.material)) meshObj.material.forEach(applyState);
               else if (meshObj.material) applyState(meshObj.material);
             });
+            for (const helper of bakedCameraHelpers) {
+              helper.parent?.remove(helper);
+              disposeObjectTree(helper);
+            }
             gltf.scene.userData.transformRoot = true;
             gltf.scene.userData.sourceMeshId = mesh.id;
             gltf.scene.userData.sourceMeshKey = normalizeMeshUrlForDedup(mesh.url);
@@ -4726,6 +5063,16 @@ export function UnifiedWorldViewer({
           }
         }
         selectedBoxRef.current.updateMatrixWorld(true);
+      } else if (selectedKindRef.current === "camera" && selectedBoxRef.current instanceof THREE.Box3Helper) {
+        const selectedObject = selectedRef.current;
+        if (selectedObject) {
+          selectedObject.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(selectedObject);
+          if (!box.isEmpty()) {
+            selectedBoxRef.current.box.copy(box);
+          }
+        }
+        selectedBoxRef.current.updateMatrixWorld(true);
       } else if (selectedBoxRef.current instanceof THREE.BoxHelper) {
         selectedBoxRef.current.update();
       }
@@ -4842,6 +5189,7 @@ export function UnifiedWorldViewer({
       disposeObjectTree(root);
       scene.clear();
       gridRef.current = null;
+      cameraPathGroupRef.current = null;
       releaseRenderer(renderer);
       rendererRef.current = null;
       sceneRef.current = null;
@@ -5375,6 +5723,16 @@ export function UnifiedWorldViewer({
           >
             Scene
           </Button>
+          {cameraPath ? (
+            <Button
+              size="sm"
+              variant={openPanel === "cameras" ? "default" : "outline"}
+              className="h-8 rounded-lg px-2.5 text-xs"
+              onClick={() => setOpenPanel((prev) => (prev === "cameras" ? "none" : "cameras"))}
+            >
+              Cams
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant={openPanel === "transform" ? "default" : "outline"}
@@ -5662,6 +6020,98 @@ export function UnifiedWorldViewer({
         </div>
       ) : null}
 
+      {openPanel === "cameras" && cameraPath ? (
+        <div className="absolute right-3 top-[54px] z-30 w-[320px] rounded-xl studio-panel p-3 panel-fade-in">
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Camera Path</div>
+          <div className="mb-2 rounded-md border border-border/50 bg-background/20 p-2 text-xs text-zinc-300">
+            <div>Frames: {cameraPath.frameCount}</div>
+            <div>Model: {cameraPath.modelVariant ?? "unknown"}</div>
+            <div>Scale: {cameraPath.isMetric ? "metric" : "relative"}</div>
+            <div className="truncate">Artifact: {cameraPath.artifactId}</div>
+          </div>
+          <div className="mb-3 grid grid-cols-2 gap-1">
+            <Button
+              size="sm"
+              variant={showCameraPath ? "default" : "outline"}
+              className="h-8 rounded-md text-xs"
+              onClick={() => setShowCameraPath((current) => !current)}
+            >
+              {showCameraPath ? "Path On" : "Path Off"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs"
+              onClick={() => enterCameraPathFrame(activeCameraFrame)}
+              disabled={!activeCameraFrame}
+            >
+              Enter View
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs"
+              onClick={() => {
+                const handle = cameraHandlesRef.current.get("camera-path-active") ?? null;
+                if (handle) {
+                  setSelectedObject(handle.object, "camera");
+                  updateActiveCameraObject(activeCameraFrame);
+                }
+              }}
+              disabled={!activeCameraFrame}
+            >
+              Select
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 rounded-md text-xs"
+              onClick={exitCameraPathFrameView}
+              disabled={!activeCameraViewFrameId}
+            >
+              Back View
+            </Button>
+          </div>
+          <div className="mb-2 flex items-center justify-between text-xs text-zinc-300">
+            <span>Frame</span>
+            <span>{activeCameraFrame?.index ?? 0}/{Math.max(0, cameraPath.frameCount - 1)}</span>
+          </div>
+          <Slider
+            min={0}
+            max={Math.max(0, cameraPath.frames.length - 1)}
+            step={1}
+            value={[Math.min(activeCameraFrameIndex, Math.max(0, cameraPath.frames.length - 1))]}
+            onValueChange={(values) => setActiveCameraFrameIndex(Math.floor(values[0] ?? 0))}
+          />
+          <div className="mt-3 grid grid-cols-2 gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 rounded-md text-xs"
+              onClick={() => setActiveCameraFrameIndex((current) => Math.max(0, current - 1))}
+              disabled={activeCameraFrameIndex <= 0}
+            >
+              Prev
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 rounded-md text-xs"
+              onClick={() => setActiveCameraFrameIndex((current) => Math.min(cameraPath.frames.length - 1, current + 1))}
+              disabled={activeCameraFrameIndex >= cameraPath.frames.length - 1}
+            >
+              Next
+            </Button>
+          </div>
+          {activeCameraFrame ? (
+            <div className="mt-3 rounded-md border border-border/50 bg-background/20 p-2 font-mono text-[10px] text-zinc-400">
+              <div>pos [{activeCameraFrame.position.map((value) => value.toFixed(4)).join(", ")}]</div>
+              <div>fov {activeCameraFrame.fov.toFixed(2)}°</div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {openPanel === "objects" ? (
         <div className="absolute right-3 top-[54px] z-30 w-[300px] rounded-xl studio-panel p-3 panel-fade-in">
           <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Objects</div>
@@ -5717,7 +6167,7 @@ export function UnifiedWorldViewer({
               objectItems.map((item) => {
                 const itemKey = buildObjectItemKey(item.kind, item.id);
                 const isMarkedForGroup = groupSelectionSet.has(itemKey);
-                const isSelected = selectedKind !== "group" && selectedName === item.id;
+                const isSelected = selectedKind === item.kind && selectedName === item.id;
                 const isRenaming = renamingObjectKey === itemKey;
                 return (
                   <div key={item.id} className="flex items-center gap-1">
@@ -5766,6 +6216,10 @@ export function UnifiedWorldViewer({
                         variant={isSelected || isMarkedForGroup ? "default" : "outline"}
                         className="h-8 flex-1 justify-between gap-2 rounded-md"
                         onDoubleClick={() => {
+                          if (item.kind === "camera") {
+                            enterCameraPathFrame(activeCameraFrame);
+                            return;
+                          }
                           const draft = (objectCustomLabels[itemKey] ?? item.label).trim();
                           setRenamingObjectKey(itemKey);
                           setRenamingMeshDraft(draft);
@@ -5792,6 +6246,7 @@ export function UnifiedWorldViewer({
                         onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) => {
                           event.preventDefault();
                           selectObjectItem(item.kind, item.id);
+                          if (item.kind === "camera") return;
                           const menuWidth = 168;
                           const menuHeight = 78;
                           const maxX = typeof window !== "undefined" ? window.innerWidth - menuWidth - 8 : event.clientX;
@@ -5807,7 +6262,7 @@ export function UnifiedWorldViewer({
                       >
                         <span className="truncate text-left text-xs">{item.label}</span>
                         <span className="shrink-0 rounded-full border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px]">
-                          {item.kind === "mesh" ? "mesh" : "splat"}
+                          {item.kind}
                         </span>
                       </Button>
                     )}
@@ -5821,12 +6276,12 @@ export function UnifiedWorldViewer({
             variant="outline"
             className="mt-2 h-8 w-full rounded-md text-xs"
             onClick={() => setOpenPanel("transform")}
-            disabled={!hasActiveSelection}
+            disabled={!hasActiveSelection || selectedKind === "camera"}
           >
             Open Transform
           </Button>
           <div className="mt-1 text-[10px] text-zinc-500">
-            Meshes and splats are editable with gizmo. F2 or double-click an object row to rename. Shift+drag in viewer for box select.
+            Cameras are selectable view anchors. Meshes and splats are editable with gizmo.
           </div>
         </div>
       ) : null}
@@ -6092,6 +6547,33 @@ export function UnifiedWorldViewer({
       {shortcutHint ? (
         <div className="absolute left-1/2 top-[86px] z-40 -translate-x-1/2 rounded-full border border-cyan-300/35 bg-cyan-500/10 px-3 py-1 text-[11px] text-cyan-100 panel-fade-in">
           {shortcutHint}
+        </div>
+      ) : null}
+
+      {selectedCameraHandle || activeCameraViewFrameId ? (
+        <div className="absolute bottom-12 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-amber-300/30 bg-black/70 px-3 py-2 text-xs text-zinc-100 shadow-lg backdrop-blur-md">
+          <span className="max-w-[180px] truncate">
+            {selectedCameraHandle ? `Camera frame ${activeCameraFrame?.index ?? 0}` : "Camera view"}
+          </span>
+          {selectedCameraHandle ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 rounded-md px-2 text-xs"
+              onClick={() => enterCameraPathFrame(activeCameraFrame)}
+            >
+              Enter View
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 rounded-md px-2 text-xs"
+            onClick={exitCameraPathFrameView}
+            disabled={!activeCameraViewFrameId}
+          >
+            Back Scene
+          </Button>
         </div>
       ) : null}
 

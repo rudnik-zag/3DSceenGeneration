@@ -60,6 +60,22 @@ interface WorldManifestEnvironment {
   groundColor: string;
 }
 
+interface WorldManifestCameraPathFrame {
+  index: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  fov: number;
+}
+
+interface WorldManifestCameraPath {
+  artifactId: string;
+  frameCount: number;
+  isMetric: boolean;
+  modelVariant: string | null;
+  frames: WorldManifestCameraPathFrame[];
+}
+
 interface GraphNodeLike {
   id: string;
   type: string;
@@ -214,6 +230,214 @@ function parseTilesetMeta(artifact: Artifact) {
     sourceArtifactId: typeof meta.sourceArtifactId === "string" ? meta.sourceArtifactId : null,
     presetName: typeof meta.presetName === "string" ? meta.presetName : null
   };
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function asNumberMatrix(value: unknown, rows: number, cols: number): number[][] | null {
+  if (!Array.isArray(value) || value.length !== rows) return null;
+  const matrix = value.map((row) => {
+    if (!Array.isArray(row) || row.length !== cols) return null;
+    const values = row.map(asFiniteNumber);
+    return values.every((entry): entry is number => entry !== null) ? values : null;
+  });
+  if (matrix.some((row) => row === null)) return null;
+  return matrix as number[][];
+}
+
+function normalizeVector(value: [number, number, number], fallback: [number, number, number]) {
+  const length = Math.hypot(value[0], value[1], value[2]);
+  if (!Number.isFinite(length) || length <= 1e-8) return fallback;
+  return [value[0] / length, value[1] / length, value[2] / length] as [number, number, number];
+}
+
+function inferFovFromIntrinsics(intrinsic: number[][] | null) {
+  if (!intrinsic) return 50;
+  const fy = Math.abs(intrinsic[1]?.[1] ?? 0);
+  const cy = Math.abs(intrinsic[1]?.[2] ?? 0);
+  const height = cy > 0 ? cy * 2 : 0;
+  if (fy <= 0 || height <= 0) return 50;
+  return clamp((2 * Math.atan(height / (2 * fy)) * 180) / Math.PI, 5, 140);
+}
+
+function transpose3(matrix: number[][]) {
+  return [
+    [matrix[0][0], matrix[1][0], matrix[2][0]],
+    [matrix[0][1], matrix[1][1], matrix[2][1]],
+    [matrix[0][2], matrix[1][2], matrix[2][2]]
+  ];
+}
+
+function mulMat3Vec3(matrix: number[][], vector: [number, number, number]): [number, number, number] {
+  return [
+    matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+    matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+    matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2]
+  ];
+}
+
+function transformPoint4(matrix: number[][], point: [number, number, number]): [number, number, number] {
+  const x = matrix[0][0] * point[0] + matrix[0][1] * point[1] + matrix[0][2] * point[2] + matrix[0][3];
+  const y = matrix[1][0] * point[0] + matrix[1][1] * point[1] + matrix[1][2] * point[2] + matrix[1][3];
+  const z = matrix[2][0] * point[0] + matrix[2][1] * point[1] + matrix[2][2] * point[2] + matrix[2][3];
+  const w = matrix[3][0] * point[0] + matrix[3][1] * point[1] + matrix[3][2] * point[2] + matrix[3][3];
+  if (Math.abs(w) > 1e-8 && Math.abs(w - 1) > 1e-8) {
+    return [x / w, y / w, z / w];
+  }
+  return [x, y, z];
+}
+
+function transformDirection4(matrix: number[][], direction: [number, number, number]): [number, number, number] {
+  return [
+    matrix[0][0] * direction[0] + matrix[0][1] * direction[1] + matrix[0][2] * direction[2],
+    matrix[1][0] * direction[0] + matrix[1][1] * direction[1] + matrix[1][2] * direction[2],
+    matrix[2][0] * direction[0] + matrix[2][1] * direction[1] + matrix[2][2] * direction[2]
+  ];
+}
+
+function frameFromDa3Camera(
+  extrinsic: number[][],
+  intrinsic: number[][] | null,
+  index: number,
+  viewerAlignment: number[][] | null
+): WorldManifestCameraPathFrame {
+  const rotationWorldToCamera = [
+    [extrinsic[0][0], extrinsic[0][1], extrinsic[0][2]],
+    [extrinsic[1][0], extrinsic[1][1], extrinsic[1][2]],
+    [extrinsic[2][0], extrinsic[2][1], extrinsic[2][2]]
+  ];
+  const rotationCameraToWorld = transpose3(rotationWorldToCamera);
+  const translation: [number, number, number] = [extrinsic[0][3], extrinsic[1][3], extrinsic[2][3]];
+  const cameraCenter = mulMat3Vec3(rotationCameraToWorld, translation);
+  const position: [number, number, number] = [-cameraCenter[0], -cameraCenter[1], -cameraCenter[2]];
+  const forward = normalizeVector(mulMat3Vec3(rotationCameraToWorld, [0, 0, 1]), [0, 0, 1]);
+  const up = normalizeVector(mulMat3Vec3(rotationCameraToWorld, [0, -1, 0]), [0, 1, 0]);
+  let target: [number, number, number] = [
+    position[0] + forward[0],
+    position[1] + forward[1],
+    position[2] + forward[2]
+  ];
+  let alignedPosition = position;
+  let alignedUp = up;
+
+  if (viewerAlignment) {
+    alignedPosition = transformPoint4(viewerAlignment, position);
+    target = transformPoint4(viewerAlignment, target);
+    alignedUp = normalizeVector(transformDirection4(viewerAlignment, up), [0, 1, 0]);
+  }
+
+  return {
+    index,
+    position: alignedPosition,
+    target,
+    up: alignedUp,
+    fov: inferFovFromIntrinsics(intrinsic)
+  };
+}
+
+async function readCameraPathFromArtifact(
+  artifact: Artifact,
+  fallbackViewerAlignment: number[][] | null = null
+): Promise<WorldManifestCameraPath | null> {
+  const meta =
+    artifact.meta && typeof artifact.meta === "object" && !Array.isArray(artifact.meta)
+      ? (artifact.meta as Record<string, unknown>)
+      : {};
+  if (meta.outputKey !== "camera" && meta.artifactType !== "Descriptor") return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse((await getObjectBuffer(artifact.storageKey)).toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const extrinsicsRaw = Array.isArray(record.extrinsics) ? record.extrinsics : [];
+  const intrinsicsRaw = Array.isArray(record.intrinsics) ? record.intrinsics : [];
+  const viewerAlignment = asNumberMatrix(record.viewer_alignment, 4, 4) ?? fallbackViewerAlignment;
+  const frames: WorldManifestCameraPathFrame[] = [];
+
+  for (let index = 0; index < extrinsicsRaw.length; index += 1) {
+    const extrinsic = asNumberMatrix(extrinsicsRaw[index], 3, 4);
+    if (!extrinsic) continue;
+    const intrinsic = asNumberMatrix(intrinsicsRaw[index], 3, 3);
+    frames.push(frameFromDa3Camera(extrinsic, intrinsic, index, viewerAlignment));
+  }
+
+  if (frames.length === 0) return null;
+  return {
+    artifactId: artifact.id,
+    frameCount: frames.length,
+    isMetric: record.is_metric === 1 || record.is_metric === true,
+    modelVariant: typeof record.model_variant === "string" ? record.model_variant : null,
+    frames
+  };
+}
+
+function readGlbJsonChunk(buffer: Buffer): Record<string, unknown> | null {
+  if (buffer.length < 20 || buffer.toString("utf8", 0, 4) !== "glTF") return null;
+  const version = buffer.readUInt32LE(4);
+  if (version !== 2) return null;
+  const jsonLength = buffer.readUInt32LE(12);
+  const chunkType = buffer.toString("utf8", 16, 20);
+  if (chunkType !== "JSON" || jsonLength <= 0 || 20 + jsonLength > buffer.length) return null;
+  try {
+    return JSON.parse(buffer.toString("utf8", 20, 20 + jsonLength).trim()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function findViewerAlignmentInGlbJson(json: Record<string, unknown>): number[][] | null {
+  const scenes = Array.isArray(json.scenes) ? json.scenes : [];
+  for (const scene of scenes) {
+    if (!scene || typeof scene !== "object" || Array.isArray(scene)) continue;
+    const extras = (scene as Record<string, unknown>).extras;
+    if (!extras || typeof extras !== "object" || Array.isArray(extras)) continue;
+    const alignment = asNumberMatrix((extras as Record<string, unknown>).hf_alignment, 4, 4);
+    if (alignment) return alignment;
+  }
+  return null;
+}
+
+async function readViewerAlignmentFromGlbArtifact(artifact: Artifact): Promise<number[][] | null> {
+  if (artifact.kind !== "mesh_glb") return null;
+  try {
+    const buffer = await getObjectBuffer(artifact.storageKey);
+    const json = readGlbJsonChunk(buffer);
+    return json ? findViewerAlignmentInGlbJson(json) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCameraPathArtifact(selectedArtifact: Artifact) {
+  const selectedMeta =
+    selectedArtifact.meta && typeof selectedArtifact.meta === "object" && !Array.isArray(selectedArtifact.meta)
+      ? (selectedArtifact.meta as Record<string, unknown>)
+      : {};
+  if (selectedMeta.outputKey === "camera" || selectedMeta.artifactType === "Descriptor") {
+    return selectedArtifact;
+  }
+
+  if (!selectedArtifact.runId || !selectedArtifact.nodeId) return null;
+  return prisma.artifact.findFirst({
+    where: {
+      projectId: selectedArtifact.projectId,
+      runId: selectedArtifact.runId,
+      nodeId: selectedArtifact.nodeId,
+      kind: "json",
+      meta: {
+        path: ["outputKey"],
+        equals: "camera"
+      }
+    },
+    orderBy: { createdAt: "desc" }
+  });
 }
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -428,10 +652,17 @@ export async function GET(req: NextRequest) {
     const splatRunIds = uniqueStrings(splats.map((entry) => entry.runId));
     const selectedRunId = selectedArtifact.runId ?? null;
     const usedCrossRunFallback = false;
+    const selectedArtifactViewerAlignment = await readViewerAlignmentFromGlbArtifact(selectedArtifact);
+    const cameraPathArtifact = await resolveCameraPathArtifact(selectedArtifact);
+    const cameraPath = cameraPathArtifact
+      ? await readCameraPathFromArtifact(cameraPathArtifact, selectedArtifactViewerAlignment)
+      : null;
 
     if (meshes.length === 0 && splats.length === 0) {
       warnings.push(
-        "Selected run/version has no loadable scene artifacts for this viewer node. Rendering empty scene."
+        cameraPath
+          ? "Selected run/version has no loadable scene artifacts. Rendering camera path only."
+          : "Selected run/version has no loadable scene artifacts for this viewer node. Rendering empty scene."
       );
     }
 
@@ -562,6 +793,7 @@ export async function GET(req: NextRequest) {
         target: [0, 0, 0],
         fov: 50
       },
+      cameraPath,
       meshes,
       splats,
       build: {

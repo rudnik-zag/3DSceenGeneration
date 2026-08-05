@@ -7,6 +7,7 @@ import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdin
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
 import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
 import { executeDepthEstimationNode } from "@/lib/execution/executors/depth-estimation";
+import { executePointcloudFromDepthNode } from "@/lib/execution/executors/pointcloud-from-depth";
 import {
   executeComfyQwenDistillNode,
   executeComfyQwenImageEditNode,
@@ -215,20 +216,7 @@ export class MockModelRunner implements NodeExecutor {
         return executeDepthEstimationNode(ctx);
       }
       case "geo.pointcloud_from_depth": {
-        const buffer = createPointCloudPlyBuffer();
-        return {
-          outputs: [
-            {
-              outputId: "pointcloud",
-              kind: "point_ply",
-              mimeType: "application/octet-stream",
-              extension: "ply",
-              buffer,
-              meta: { outputKey: "pointcloud", points: 8, createdAt: now },
-              hidden: false
-            }
-          ]
-        };
+        return executePointcloudFromDepthNode(ctx);
       }
       case "geo.mesh_reconstruction":
       case "geo.uv_unwrap": {

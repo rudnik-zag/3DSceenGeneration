@@ -236,6 +236,8 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
   const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
   const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
+  const isDepthEstimationNode = nodeType === "geo.depth_estimation";
+  const isSceneViewerNode = isSceneGenerationNode || isDepthEstimationNode;
   const isPreviewNode = nodeType === "out.open_in_viewer";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
@@ -430,6 +432,8 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
   const sceneViewerArtifactId = isSceneGenerationPipelineNode
     ? data.outputArtifacts?.generatedScene?.id ?? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
     : isCustomSceneGenNode
+      ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+    : isDepthEstimationNode
       ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
       : data.latestArtifactId;
   const getOutputAvailability = (outputId: string) =>
@@ -1007,15 +1011,21 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
         </div>
       ) : null}
 
-      {isSceneGenerationNode ? (
+      {isSceneViewerNode ? (
         <div className="mb-2 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
           <div className="rounded-md border border-[#565656] bg-[#1f1f1f] px-2 py-1.5">
-            <p className="text-[11px] text-zinc-300">Output format: {sceneFormat}</p>
+            <p className="text-[11px] text-zinc-300">
+              Output format: {isDepthEstimationNode ? "depth + native glb" : sceneFormat}
+            </p>
             {sceneViewerArtifactId ? (
               <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{sceneViewerArtifactId.slice(0, 8)}</p>
             ) : (
               <p className="mt-1 text-[10px] text-zinc-500">
-                {isCustomSceneGenNode ? "Run CustomSceneGen to create scene assets." : "Run SceneGeneration to create scene assets."}
+                {isDepthEstimationNode
+                  ? "Run Depth Estimation to create a native DA3 GLB scene."
+                  : isCustomSceneGenNode
+                    ? "Run CustomSceneGen to create scene assets."
+                    : "Run SceneGeneration to create scene assets."}
               </p>
             )}
           </div>

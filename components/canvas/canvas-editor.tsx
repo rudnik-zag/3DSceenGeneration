@@ -3604,7 +3604,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         null
       : selectedNode.type === "model.sam3d_objects"
         ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
-        : selectedNode.data.latestArtifactId ?? null
+        : selectedNode.type === "geo.depth_estimation"
+          ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
+          : selectedNode.data.latestArtifactId ?? null
     : null;
   const viewerHref = selectedNodeSceneArtifactId
     ? `/app/p/${projectId}/viewer?artifactId=${selectedNodeSceneArtifactId}${selectedNode ? `&nodeId=${selectedNode.id}` : ""}`

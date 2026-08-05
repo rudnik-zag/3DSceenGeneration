@@ -1,6 +1,6 @@
 import { GraphNodeData } from "@/types/workflow";
 
-const DEPTH_OUTPUT_IDS = new Set(["depth", "depthVideo", "sequence", "camera", "confidence", "sky", "meta"]);
+const DEPTH_OUTPUT_IDS = new Set(["depth", "scene", "depthVideo", "sequence", "camera", "confidence", "sky", "meta"]);
 
 function hasDepthRunOutputs(outputArtifacts: GraphNodeData["outputArtifacts"]) {
   return Object.keys(outputArtifacts ?? {}).some((outputId) => DEPTH_OUTPUT_IDS.has(outputId));
@@ -26,6 +26,7 @@ function isPotentialDepthOutput(params: Record<string, unknown>, outputId: strin
   const modelVariant = resolveModelVariant(params);
   const exportConfidence = resolveBooleanParam(params, "exportConfidence", true);
   const exportSky = resolveBooleanParam(params, "exportSky", true);
+  const exportGlb = resolveBooleanParam(params, "exportGlb", true);
 
   if (outputId === "depth" || outputId === "depthVideo" || outputId === "sequence" || outputId === "meta") {
     return true;
@@ -35,6 +36,9 @@ function isPotentialDepthOutput(params: Record<string, unknown>, outputId: strin
   }
   if (outputId === "camera") {
     return modelVariant === "da3-base";
+  }
+  if (outputId === "scene") {
+    return modelVariant === "da3-base" && exportGlb;
   }
   if (outputId === "confidence") {
     return modelVariant === "da3-base" && exportConfidence;
@@ -46,12 +50,19 @@ function unavailableReason(params: Record<string, unknown>, outputId: string) {
   const modelVariant = resolveModelVariant(params);
   const exportConfidence = resolveBooleanParam(params, "exportConfidence", true);
   const exportSky = resolveBooleanParam(params, "exportSky", true);
+  const exportGlb = resolveBooleanParam(params, "exportGlb", true);
 
   if (modelVariant === "da3metric-large" && outputId === "camera") {
     return "Camera output is not produced by da3metric-large.";
   }
   if (modelVariant === "da3metric-large" && outputId === "confidence") {
     return "Confidence output is not produced by da3metric-large.";
+  }
+  if (modelVariant === "da3metric-large" && outputId === "scene") {
+    return "GLB scene export requires DA3 pose, intrinsics, and confidence; use da3-base.";
+  }
+  if (outputId === "scene" && !exportGlb) {
+    return "GLB scene export is disabled.";
   }
   if (outputId === "confidence" && !exportConfidence) {
     return "Confidence export is disabled.";

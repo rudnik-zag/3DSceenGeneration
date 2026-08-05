@@ -117,13 +117,20 @@ const depthParams = z.object({
   exportConfidence: z.boolean().default(true),
   exportSky: z.boolean().default(true),
   saveNpz: z.boolean().default(false),
+  exportGlb: z.boolean().default(true),
+  numMaxPoints: z.number().int().min(1).max(5_000_000).default(1_000_000),
+  confThreshPercentile: z.number().min(0).max(100).default(40),
+  showCameras: z.boolean().default(false),
   useRayPose: z.boolean().default(false),
   refViewStrategy: z.enum(["saddle_balanced", "first"]).default("saddle_balanced"),
   frameStride: z.number().int().min(1).max(120).default(1),
   maxFrames: z.number().int().min(1).max(2048).default(32),
   resizeLongEdge: z.number().int().min(0).max(4096).default(0)
 });
-const pointcloudParams = z.object({ density: z.number().min(0.1).max(2).default(1) });
+const pointcloudParams = z.object({
+  density: z.number().min(0.1).max(2).default(1),
+  depthScale: z.number().min(0.01).max(100).default(1)
+});
 const meshReconstructionParams = z.object({ quality: z.string().max(120).default("balanced") });
 const uvParams = z.object({ padding: z.number().min(1).max(32).default(8) });
 const bakeParams = z.object({ resolution: z.number().min(256).max(4096).default(1024) });
@@ -551,6 +558,7 @@ export const nodeSpecEntries = [
     ],
     outputPorts: [
       { id: "depth", label: "Depth", artifactType: "DepthMap" },
+      { id: "scene", label: "GLB Scene", artifactType: "SceneAsset" },
       { id: "depthVideo", label: "Depth Video", artifactType: "Video" },
       { id: "sequence", label: "Depth Sequence", artifactType: "JsonData", advancedOnly: true },
       { id: "camera", label: "Camera", artifactType: "Descriptor", advancedOnly: true },
@@ -565,6 +573,10 @@ export const nodeSpecEntries = [
       { key: "exportConfidence", label: "Export Confidence", input: "boolean" },
       { key: "exportSky", label: "Export Sky", input: "boolean" },
       { key: "saveNpz", label: "Save Raw NPZ", input: "boolean" },
+      { key: "exportGlb", label: "Export GLB Scene", input: "boolean" },
+      { key: "numMaxPoints", label: "GLB Max Points", input: "number", min: 1, max: 5000000, step: 10000 },
+      { key: "confThreshPercentile", label: "GLB Confidence Percentile", input: "number", min: 0, max: 100, step: 1 },
+      { key: "showCameras", label: "Bake Cameras Into GLB", input: "boolean" },
       { key: "useRayPose", label: "Use Ray Pose", input: "boolean" },
       { key: "refViewStrategy", label: "Ref View Strategy", input: "select", options: ["saddle_balanced", "first"] },
       { key: "frameStride", label: "Frame Stride", input: "number", min: 1, max: 120, step: 1 },
@@ -577,6 +589,10 @@ export const nodeSpecEntries = [
       exportConfidence: true,
       exportSky: true,
       saveNpz: false,
+      exportGlb: true,
+      numMaxPoints: 1000000,
+      confThreshPercentile: 40,
+      showCameras: false,
       useRayPose: false,
       refViewStrategy: "saddle_balanced",
       frameStride: 1,
@@ -584,7 +600,7 @@ export const nodeSpecEntries = [
       resizeLongEdge: 0
     },
     ui: {
-      previewOutputIds: ["depthVideo", "depth"],
+      previewOutputIds: ["scene", "depthVideo", "depth"],
       hiddenOutputIds: ["confidence", "sky", "meta"],
       advancedOutputIds: ["sequence", "camera", "confidence", "sky", "meta"],
       nodeRunEnabled: true
@@ -598,12 +614,20 @@ export const nodeSpecEntries = [
     description: "Back-project depth map into point cloud.",
     inputPorts: [
       { id: "depth", label: "Depth", artifactType: "DepthMap", required: true },
-      { id: "image", label: "Color", artifactType: "Image" }
+      { id: "image", label: "Color", artifactType: "Image" },
+      { id: "camera", label: "Camera", artifactType: "Descriptor" }
     ],
     outputPorts: [{ id: "pointcloud", label: "Point Cloud", artifactType: "PointCloud" }],
     paramSchema: pointcloudParams,
-    paramFields: [{ key: "density", label: "Density", input: "number" }],
-    defaultParams: { density: 1 }
+    paramFields: [
+      { key: "density", label: "Density", input: "number" },
+      { key: "depthScale", label: "Depth Scale", input: "number" }
+    ],
+    defaultParams: { density: 1, depthScale: 1 },
+    ui: {
+      previewOutputIds: ["pointcloud"],
+      nodeRunEnabled: true
+    }
   }),
   makeSpec("geo.mesh_reconstruction", {
     type: "geo.mesh_reconstruction",

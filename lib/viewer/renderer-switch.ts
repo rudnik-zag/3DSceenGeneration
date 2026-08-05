@@ -63,10 +63,14 @@ function getArtifactExtension(artifact: ViewerArtifactLike) {
 export function selectViewerRenderer(artifact: ViewerArtifactLike): ViewerRenderer {
   const kind = (artifact.kind ?? "").toLowerCase();
   const ext = getArtifactExtension(artifact);
+  const meta = artifact.meta ?? null;
+  const outputKey = typeof meta?.outputKey === "string" ? meta.outputKey : null;
+  const artifactType = typeof meta?.artifactType === "string" ? meta.artifactType : null;
   const preference = getSplatRuntimePreference();
   const preferSpark = isSparkRuntimeEnabled() && (preference === "auto" || preference === "spark");
   const gsRenderer: ViewerRenderer = preferSpark ? "spark-gs" : "babylon-gs";
 
+  if (kind === "json" && (outputKey === "camera" || artifactType === "Descriptor")) return "three";
   if (GS_KINDS.has(kind)) return gsRenderer;
   if (MESH_KINDS.has(kind)) return "three";
   if (POINT_KINDS.has(kind)) {

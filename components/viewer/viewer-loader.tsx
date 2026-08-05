@@ -62,6 +62,23 @@ interface WorldManifestResponse {
     sunColor: string;
     groundColor: string;
   } | null;
+  cameraPath?: CameraPathManifest | null;
+}
+
+interface CameraPathFrame {
+  index: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  fov: number;
+}
+
+interface CameraPathManifest {
+  artifactId: string;
+  frameCount: number;
+  isMetric: boolean;
+  modelVariant: string | null;
+  frames: CameraPathFrame[];
 }
 
 interface UnifiedManifest {
@@ -86,6 +103,7 @@ interface UnifiedManifest {
     sunColor: string;
     groundColor: string;
   } | null;
+  cameraPath?: CameraPathManifest | null;
   meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{ id: string; tilesetUrl: string | null; sourceUrl: string | null; formatHint?: SplatFormatHint }>;
 }
@@ -376,6 +394,7 @@ export function ViewerLoader({
         artifactId: worldManifest.artifactId,
         camera: DEFAULT_CAMERA,
         environment: worldManifest.environment ?? null,
+        cameraPath: worldManifest.cameraPath ?? null,
         meshes: mergedMeshes,
         splats: worldManifest.splats.map((entry) => ({
           id: entry.id,

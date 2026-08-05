@@ -28,6 +28,8 @@ interface DepthResultManifest {
   camera_json_path?: string | null;
   sequence_manifest_path?: string | null;
   npz_path?: string | null;
+  scene_glb_path?: string | null;
+  scene_preview_path?: string | null;
 }
 
 interface DepthSequenceManifest {
@@ -251,6 +253,8 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
   const exportConfidence = resolveBooleanParam(ctx.params.exportConfidence, true);
   const exportSky = resolveBooleanParam(ctx.params.exportSky, true);
   const saveNpz = resolveBooleanParam(ctx.params.saveNpz, false);
+  const exportGlb = resolveBooleanParam(ctx.params.exportGlb, true);
+  const showCameras = resolveBooleanParam(ctx.params.showCameras, false);
   const useRayPose = resolveBooleanParam(ctx.params.useRayPose, false);
   const refViewStrategy =
     typeof ctx.params.refViewStrategy === "string" && ctx.params.refViewStrategy.trim().length > 0
@@ -259,6 +263,8 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
   const frameStride = resolveNumberParam(ctx.params.frameStride, 1, 1);
   const maxFrames = resolveNumberParam(ctx.params.maxFrames, 32, 1);
   const resizeLongEdge = resolveNumberParam(ctx.params.resizeLongEdge, 0, 0);
+  const numMaxPoints = resolveNumberParam(ctx.params.numMaxPoints, 1_000_000, 1);
+  const confThreshPercentile = Math.max(0, Math.min(100, Number(ctx.params.confThreshPercentile ?? 40)));
 
   const runFolderSegment = ctx.runFolderLabel ?? ctx.runId;
   const stepFolderSegment = ctx.stepFolderLabel ?? ctx.nodeId;
@@ -314,6 +320,16 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
   if (exportConfidence) args.push("--export-confidence");
   if (exportSky) args.push("--export-sky");
   if (saveNpz) args.push("--save-npz");
+  if (modelVariant === "da3-base") {
+    args.push(
+      exportGlb ? "--export-glb" : "--no-export-glb",
+      "--num-max-points",
+      String(numMaxPoints),
+      "--conf-thresh-percentile",
+      String(confThreshPercentile),
+      showCameras ? "--show-cameras" : "--no-show-cameras"
+    );
+  }
   if (useRayPose) args.push("--use-ray-pose");
 
   await runProcess(command, args, getDepthAnythingRepoRoot(), ctx.isCancellationRequested);
@@ -380,6 +396,40 @@ export async function executeDepthEstimationNode(ctx: NodeExecutionContext): Pro
         fps: manifest.fps ?? 0,
         modelVariant,
         contentHash: hashBuffer(depthVideoBuffer)
+      }
+    });
+  }
+
+  if (manifest.scene_glb_path) {
+    const scenePath = path.join(outputDir, manifest.scene_glb_path);
+    const sceneBuffer = await fs.readFile(scenePath);
+    const scenePreviewPath = manifest.scene_preview_path ? path.join(outputDir, manifest.scene_preview_path) : null;
+    const scenePreviewBuffer = scenePreviewPath ? await fs.readFile(scenePreviewPath).catch(() => null) : null;
+    outputs.push({
+      outputId: "scene",
+      kind: "mesh_glb",
+      artifactType: "SceneAsset",
+      mimeType: "model/gltf-binary",
+      extension: "glb",
+      buffer: sceneBuffer,
+      preview: scenePreviewBuffer
+        ? {
+            extension: path.extname(scenePreviewPath ?? "").replace(".", "") || "jpg",
+            mimeType: resolveDepthPreviewMime(scenePreviewPath ?? ""),
+            buffer: scenePreviewBuffer
+          }
+        : undefined,
+      meta: {
+        outputKey: "scene",
+        artifactType: "SceneAsset",
+        semantic: "da3_native_glb",
+        mediaType: manifest.media_type ?? (videoInput ? "video" : "image"),
+        frameCount: manifest.frame_count ?? 1,
+        modelVariant,
+        showCameras,
+        numMaxPoints,
+        confThreshPercentile,
+        contentHash: hashBuffer(sceneBuffer)
       }
     });
   }
