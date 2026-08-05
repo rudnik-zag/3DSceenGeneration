@@ -20,9 +20,9 @@ export const createProjectPayloadSchema = z.object({
 export const graphSavePayloadSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   graphJson: z.object({
-    nodes: z.array(z.unknown()),
-    edges: z.array(z.unknown()),
-    viewport: z.unknown().optional()
+    nodes: z.array(z.unknown()).max(250),
+    edges: z.array(z.unknown()).max(1000),
+    viewport: z.unknown()
   })
 });
 
@@ -39,6 +39,7 @@ export const nodeRunPayloadSchema = z.object({
 export const uploadInitPayloadSchema = z.object({
   projectId: z.string().cuid(),
   nodeId: z.string().min(1).max(180).nullable().optional(),
+  category: z.string().min(1).max(80).optional(),
   filename: z.string().min(1).max(260),
   contentType: z.string().min(1).max(140),
   byteSize: z.number().int().min(1).max(1024 * 1024 * 100)

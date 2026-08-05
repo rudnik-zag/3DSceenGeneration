@@ -1,0 +1,2 @@
+-- Intentionally empty.
+-- Project previews are derived from Artifact.storageKey/previewStorageKey and require no Project columns.

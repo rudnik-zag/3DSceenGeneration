@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,7 +42,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
 
   const hasActive = useMemo(() => runs.some((r) => r.status === "queued" || r.status === "running"), [runs]);
 
-  const refreshRuns = async () => {
+  const refreshRuns = useCallback(async () => {
     const res = await fetch(`/api/projects/${projectId}/runs`, { cache: "no-store" });
     if (!res.ok) {
       return;
@@ -57,7 +57,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
         finishedAt: run.finishedAt
       }))
     );
-  };
+  }, [projectId]);
 
   useEffect(() => {
     if (!autoRefresh) {
@@ -71,7 +71,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
     }, 2000);
 
     return () => clearInterval(timer);
-  }, [autoRefresh, hasActive]);
+  }, [autoRefresh, hasActive, refreshRuns]);
 
   return (
     <div className="space-y-4">

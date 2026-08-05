@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { env } from "@/lib/env";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
+import { readJsonRequest } from "@/lib/security/request";
 import { slugifyProjectName } from "@/lib/storage/project-path";
 import { createProjectPayloadSchema } from "@/lib/validation/schemas";
 
@@ -24,6 +25,7 @@ export async function GET() {
         ]
       },
       orderBy: { updatedAt: "desc" },
+      take: 100,
       include: {
         _count: {
           select: {
@@ -46,7 +48,7 @@ export async function POST(req: NextRequest) {
     if (env.BILLING_ENFORCEMENT_ENABLED) {
       await assertProjectCreationEntitlement(user.id);
     }
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 16 * 1024);
     const parsed = createProjectPayloadSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(

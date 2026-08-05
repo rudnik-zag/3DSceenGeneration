@@ -11,7 +11,6 @@ __pycache__/
 build/
 develop-eggs/
 node_modules/
-prisma/
 checkpoints/
 my_test_image/
 my_data_test/
@@ -25,9 +24,11 @@ outputs/
 weights/
 .run/
 .next/
+tsconfig.tsbuildinfo
 dist/
 downloads/
 test_data/
+python_script/
 eggs/
 .eggs/
 lib64/

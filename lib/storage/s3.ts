@@ -40,7 +40,9 @@ function getClient() {
 }
 
 let bucketReady = false;
-const LOCAL_STORAGE_ROOT = path.join(process.cwd(), ".local-storage");
+const LOCAL_STORAGE_ROOT = env.LOCAL_STORAGE_ROOT
+  ? path.resolve(env.LOCAL_STORAGE_ROOT)
+  : path.join(process.cwd(), ".local-storage");
 const S3_DISABLE_TTL_MS = 120_000;
 const FALLBACK_LOG_THROTTLE_MS = 30_000;
 
@@ -145,8 +147,15 @@ function markS3TemporarilyUnavailable(error: unknown, operation: string) {
 }
 
 function toSafeStoragePath(key: string) {
-  const normalized = key.replace(/^\/+/, "").replace(/\.\./g, "_");
-  const filePath = path.join(LOCAL_STORAGE_ROOT, normalized);
+  const normalized = normalizeStoragePrefix(key);
+  if (!normalized) {
+    throw new Error("Invalid empty storage key");
+  }
+  const filePath = path.resolve(LOCAL_STORAGE_ROOT, normalized);
+  const root = path.resolve(LOCAL_STORAGE_ROOT);
+  if (!filePath.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Storage key escapes local storage root");
+  }
   return {
     filePath,
     metaPath: `${filePath}.meta.json`
@@ -244,6 +253,9 @@ export async function putObjectToStorage(params: {
       })
     );
   } catch (error) {
+    if (!shouldTemporarilyDisableS3(error)) {
+      throw error;
+    }
     markS3TemporarilyUnavailable(error, "putObject");
     throttledLog("fallback-write", "warn", `[storage] Falling back to local write for key "${params.key}"${describeStorageError(error)}`);
     await writeLocalObject(params);
@@ -304,6 +316,9 @@ export async function storageObjectExists(key: string): Promise<boolean> {
     );
     return true;
   } catch (error) {
+    if (!shouldTemporarilyDisableS3(error)) {
+      throw error;
+    }
     markS3TemporarilyUnavailable(error, "headObject");
     return localObjectExists(key);
   }
@@ -312,6 +327,7 @@ export async function storageObjectExists(key: string): Promise<boolean> {
 export async function getSignedUploadUrl(
   key: string,
   contentType: string,
+  byteSize: number,
   expiresIn?: number
 ) {
   await ensureBucket();
@@ -321,7 +337,8 @@ export async function getSignedUploadUrl(
     new PutObjectCommand({
       Bucket: env.S3_BUCKET,
       Key: key,
-      ContentType: contentType
+      ContentType: contentType,
+      ContentLength: byteSize
     }),
     { expiresIn: resolveSignedUrlTtl(expiresIn, 120) }
   );
@@ -330,6 +347,7 @@ export async function getSignedUploadUrl(
 export async function safeGetSignedUploadUrl(
   key: string,
   contentType: string,
+  byteSize: number,
   expiresIn?: number
 ): Promise<string | null> {
   if (isS3TemporarilyDisabled()) {
@@ -337,7 +355,7 @@ export async function safeGetSignedUploadUrl(
   }
 
   try {
-    return await getSignedUploadUrl(key, contentType, expiresIn);
+    return await getSignedUploadUrl(key, contentType, byteSize, expiresIn);
   } catch (error) {
     markS3TemporarilyUnavailable(error, "signUpload");
     throttledLog("fallback-sign-upload", "warn", `[storage] S3 sign upload failed; using direct local upload${describeStorageError(error)}`);
@@ -371,6 +389,9 @@ export async function getObjectBuffer(key: string) {
     }
     return Buffer.concat(chunks);
   } catch (error) {
+    if (!shouldTemporarilyDisableS3(error)) {
+      throw error;
+    }
     markS3TemporarilyUnavailable(error, "getObject");
     throttledLog("fallback-read", "warn", `[storage] Falling back to local read for key "${key}"${describeStorageError(error)}`);
     return readLocalObject(key);
@@ -393,13 +414,20 @@ export async function getStorageObjectContentType(key: string): Promise<string |
     );
     return output.ContentType ?? null;
   } catch (error) {
+    if (!shouldTemporarilyDisableS3(error)) {
+      throw error;
+    }
     markS3TemporarilyUnavailable(error, "headObjectContentType");
     return readLocalContentType(key);
   }
 }
 
 function normalizeStoragePrefix(prefix: string) {
-  return prefix.replace(/^\/+/, "").replace(/\.\./g, "_");
+  const normalized = prefix.trim().replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) return "";
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === ".." || segment === "." || segment.length === 0)) return "";
+  return segments.join("/");
 }
 
 async function deleteLocalPrefix(prefix: string) {

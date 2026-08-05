@@ -11,6 +11,18 @@ function hasSessionCookie(req: NextRequest) {
 
 export function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
+  const isUnsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+  const isWebhook = pathname === "/api/billing/webhook";
+  if (pathname.startsWith("/api/") && isUnsafeMethod && !isWebhook) {
+    const origin = req.headers.get("origin");
+    const fetchSite = req.headers.get("sec-fetch-site");
+    if ((origin && origin !== req.nextUrl.origin) || fetchSite === "cross-site") {
+      return NextResponse.json(
+        { error: "invalid_origin", message: "Cross-site request rejected" },
+        { status: 403 }
+      );
+    }
+  }
   const authenticated = hasSessionCookie(req);
   const protectedPrefixes = ["/app", "/billing", "/settings"];
 
@@ -30,5 +42,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/app/:path*", "/billing/:path*", "/settings/:path*", "/login", "/register"]
+  matcher: ["/api/:path*", "/app/:path*", "/billing/:path*", "/settings/:path*", "/login", "/register"]
 };

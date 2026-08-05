@@ -6,6 +6,8 @@ import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, Node
 import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdino";
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
 import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
+import { executeDepthEstimationNode } from "@/lib/execution/executors/depth-estimation";
+import { executePointcloudFromDepthNode } from "@/lib/execution/executors/pointcloud-from-depth";
 import {
   executeComfyQwenDistillNode,
   executeComfyQwenImageEditNode,
@@ -19,7 +21,6 @@ import {
   ONE_PIXEL_PNG
 } from "@/lib/execution/mock-assets";
 import { getObjectBuffer } from "@/lib/storage/s3";
-import { WorkflowNodeType } from "@/types/workflow";
 
 function hashBuffer(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
@@ -146,6 +147,30 @@ export class MockModelRunner implements NodeExecutor {
         return {
           outputs: [jsonOutput("text", { type: "text", value: ctx.params.value ?? "", createdAt: now })]
         };
+      case "input.video": {
+        const sourceKey = typeof ctx.params.storageKey === "string" ? ctx.params.storageKey : "";
+        return {
+          outputs: [
+            {
+              outputId: "video",
+              kind: "json",
+              artifactType: "Video",
+              mimeType: "video/mp4",
+              extension: "mp4",
+              buffer: Buffer.from(sourceKey, "utf8"),
+              meta: {
+                outputKey: "video",
+                artifactType: "Video",
+                source: "mock-upload",
+                createdAt: now,
+                filename: ctx.params.filename ?? "input.mp4",
+                sourceStorageKey: sourceKey
+              },
+              hidden: false
+            }
+          ]
+        };
+      }
       case "input.cameraPath":
         return {
           outputs: [jsonOutput("path", { type: "camera_path", value: ctx.params.json ?? "[]", createdAt: now })]
@@ -188,41 +213,10 @@ export class MockModelRunner implements NodeExecutor {
         return executeComfyQwenImageEditNode(ctx);
       }
       case "geo.depth_estimation": {
-        const hash = hashBuffer(ONE_PIXEL_PNG);
-        return {
-          outputs: [
-            {
-              outputId: "depth",
-              kind: "image",
-              mimeType: "image/png",
-              extension: "png",
-              buffer: ONE_PIXEL_PNG,
-              preview: {
-                extension: "png",
-                mimeType: "image/png",
-                buffer: ONE_PIXEL_PNG
-              },
-              meta: { outputKey: "depth", semantic: "depth", createdAt: now, hash },
-              hidden: false
-            }
-          ]
-        };
+        return executeDepthEstimationNode(ctx);
       }
       case "geo.pointcloud_from_depth": {
-        const buffer = createPointCloudPlyBuffer();
-        return {
-          outputs: [
-            {
-              outputId: "pointcloud",
-              kind: "point_ply",
-              mimeType: "application/octet-stream",
-              extension: "ply",
-              buffer,
-              meta: { outputKey: "pointcloud", points: 8, createdAt: now },
-              hidden: false
-            }
-          ]
-        };
+        return executePointcloudFromDepthNode(ctx);
       }
       case "geo.mesh_reconstruction":
       case "geo.uv_unwrap": {

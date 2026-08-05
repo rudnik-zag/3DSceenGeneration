@@ -23,9 +23,9 @@ OPEX,total_opex_usd,=B19+B20+B21,=C19+C20+C21,=D19+D20+D21,=E19+E20+E21,=F19+F20
 ,,,,,,,
 PROFITABILITY,ebitda_usd,=B16-B22,=C16-C22,=D16-D22,=E16-E22,=F16-F22,Earnings before interest taxes depreciation amortization
 PROFITABILITY,ebitda_margin_percent,=B24/B10,=C24/C10,=D24/D10,=E24/E10,=F24/F10,Operating efficiency
-PROFITABILITY,burn_multiple_if_negative,=IF(B24<0,ABS(B24)/(B10-B16),0),=IF(C24<0,ABS(C24)/(C10-C16),0),=IF(D24<0,ABS(D24)/(D10-D16),0),=IF(E24<0,ABS(E24)/(E10-E16),0),=IF(F24<0,ABS(F24)/(F10-F16),0),Net burn divided by net new ARR proxy
+PROFITABILITY,operating_burn_to_revenue_ratio,=IF(B24<0,ABS(B24)/B10,0),=IF(C24<0,ABS(C24)/C10,0),=IF(D24<0,ABS(D24)/D10,0),=IF(E24<0,ABS(E24)/E10,0),=IF(F24<0,ABS(F24)/F10,0),Operating burn divided by annual revenue; add an ARR bridge before using a true burn multiple
 ,,,,,,,
-CASH_FLOW,starting_cash_usd,2500000,=B29,=C29,=D29,=E29,Seed raise assumption in Y1
+CASH_FLOW,starting_cash_usd,2500000,=B30,=C30,=D30,=E30,Seed raise assumption in Y1; later years begin with prior ending cash
 CASH_FLOW,net_cash_flow_usd,=B24,=C24,=D24,=E24,=F24,Simplified approximation; replace with full cash model
 CASH_FLOW,ending_cash_usd,=B28+B29,=C28+C29,=D28+D29,=E28+E29,=F28+F29,Track runway and financing needs
-CASH_FLOW,months_of_runway_end_of_year,=IF(B29<0,0,(B29/ABS(B22-B16))*12),=IF(C29<0,0,(C29/ABS(C22-C16))*12),=IF(D29<0,0,(D29/ABS(D22-D16))*12),=IF(E29<0,0,(E29/ABS(E22-E16))*12),=IF(F29<0,0,(F29/ABS(F22-F16))*12),Approximate runway based on operating burn
+CASH_FLOW,months_of_runway_end_of_year,=IF(B30<=0,0,IF(B22>B16,(B30/(B22-B16))*12,999)),=IF(C30<=0,0,IF(C22>C16,(C30/(C22-C16))*12,999)),=IF(D30<=0,0,IF(D22>D16,(D30/(D22-D16))*12,999)),=IF(E30<=0,0,IF(E22>E16,(E30/(E22-E16))*12,999)),=IF(F30<=0,0,IF(F22>F16,(F30/(F22-F16))*12,999)),Approximate runway from ending cash and annual operating burn; 999 means cash-generative

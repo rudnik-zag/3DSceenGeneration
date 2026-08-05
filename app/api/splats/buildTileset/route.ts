@@ -8,11 +8,12 @@ import { parseSplatTilesetPresetName } from "@/lib/splats/presets";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { buildTilesetPayloadSchema } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 16 * 1024);
     const parsed = buildTilesetPayloadSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(

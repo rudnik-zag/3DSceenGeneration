@@ -1,4 +1,3 @@
-import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -7,6 +6,7 @@ import { env } from "@/lib/env";
 import { NodeExecutionContext, NodeExecutionResult, ResolvedArtifactInput } from "@/lib/execution/contracts";
 import { createJsonBuffer } from "@/lib/execution/mock-assets";
 import { buildDetectionOverlaySvg, NormalizedBox } from "@/lib/execution/executors/svg";
+import { runManagedProcess } from "@/lib/execution/process";
 import { getDefaultSam2Config, resolveSam2ConfigPath } from "@/lib/sam2/configs";
 
 type Sam2Mode = "guided" | "full";
@@ -167,33 +167,19 @@ function parseBoxes(payload: unknown): NormalizedBox[] {
   return boxes;
 }
 
-async function runProcess(command: string, args: string[], cwd: string) {
-  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: process.env });
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(
-          new Error(
-            `SAM2 process failed (exit=${code})\n` +
-              `cmd: ${command} ${args.join(" ")}\n` +
-              `stderr: ${stderr.slice(-8000)}`
-          )
-        );
-      }
-    });
+async function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  isCancellationRequested?: () => Promise<boolean>
+) {
+  return runManagedProcess({
+    command,
+    args,
+    cwd,
+    label: "SAM2 process",
+    timeoutMs: Number(process.env.SAM2_TIMEOUT_MS ?? 600_000),
+    isCancellationRequested
   });
 }
 
@@ -842,7 +828,7 @@ export async function executeSam2Node(ctx: NodeExecutionContext): Promise<NodeEx
     );
 
     try {
-      await runProcess(command.command, command.args, getSam2RepoRoot());
+      await runProcess(command.command, command.args, getSam2RepoRoot(), ctx.isCancellationRequested);
       const outputs = await collectRealOutputs({
         mode,
         outputDir: nodeOutputRoot,

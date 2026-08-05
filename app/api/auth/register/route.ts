@@ -6,7 +6,7 @@ import { resolveBillingStateForUser } from "@/lib/billing/entitlements";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse, HttpError } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { getRequestIp } from "@/lib/security/request";
+import { getRequestIp, readJsonRequest } from "@/lib/security/request";
 import { registerPayloadSchema } from "@/lib/validation/schemas";
 
 function normalizedEmail(value: string) {
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
       message: "Too many registration attempts"
     });
 
-    const rawBody = await req.json().catch(() => ({}));
+    const rawBody = await readJsonRequest(req, 16 * 1024);
     const parsed = registerPayloadSchema.safeParse(rawBody);
     if (!parsed.success) {
       throw new HttpError(400, "Invalid registration payload", "validation_error", parsed.error.flatten());

@@ -3,6 +3,7 @@ import { WorkflowNodeType } from "@/types/workflow";
 
 const baseNodeCost: Record<WorkflowNodeType, number> = {
   "input.image": 1,
+  "input.video": 1,
   "input.text": 1,
   "input.cameraPath": 1,
   "viewer.environment": 2,

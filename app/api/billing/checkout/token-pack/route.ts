@@ -8,6 +8,7 @@ import { env } from "@/lib/env";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { HttpError, toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { createTokenPackCheckoutSchema } from "@/lib/validation/schemas";
 
 export async function POST(req: NextRequest) {
@@ -21,7 +22,7 @@ export async function POST(req: NextRequest) {
       message: "Token-pack checkout rate limit exceeded"
     });
 
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 16 * 1024);
     const parsed = createTokenPackCheckoutSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(

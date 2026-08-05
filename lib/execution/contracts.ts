@@ -46,6 +46,7 @@ export interface NodeExecutionContext {
   mode?: string;
   warnings?: string[];
   loadInputBuffer: (input: ResolvedArtifactInput) => Promise<Buffer>;
+  isCancellationRequested?: () => Promise<boolean>;
 }
 
 export interface NodeExecutionResult {

@@ -20,6 +20,7 @@ import { buildExecutionPlan, parseGraphDocument } from "@/lib/graph/plan";
 import { artifactPreviewStorageKey, artifactStorageKey } from "@/lib/storage/keys";
 import { resolveProjectStorageSlug } from "@/lib/storage/project-path";
 import { getObjectBuffer, putObjectToStorage } from "@/lib/storage/s3";
+import { assertProjectStorageKeyAccess } from "@/lib/storage/access";
 import { formatRunFolderLabel } from "@/lib/runs/numbering";
 import { ArtifactType, GraphNode, NodeArtifactRef, WorkflowNodeType } from "@/types/workflow";
 
@@ -46,6 +47,12 @@ function inferImageMimeTypeFromPath(value: string) {
   return "image/jpeg";
 }
 
+function inferMimeTypeFromPath(value: string) {
+  const lowered = value.toLowerCase();
+  if (lowered.endsWith(".mp4")) return "video/mp4";
+  return inferImageMimeTypeFromPath(value);
+}
+
 function inferArtifactKindFromMime(mimeType: string): ArtifactKind {
   if (mimeType.includes("png") || mimeType.includes("jpeg") || mimeType.includes("jpg") || mimeType.includes("webp") || mimeType.includes("svg")) {
     return "image";
@@ -59,6 +66,7 @@ function appendLog(prev: string, line: string) {
 
 const STEP_CODE_MAP: Partial<Record<WorkflowNodeType, string>> = {
   "input.image": "INPUT_IMAGE",
+  "input.video": "INPUT_VIDEO",
   "input.text": "INPUT_TEXT",
   "input.cameraPath": "INPUT_CAMERA_PATH",
   "viewer.environment": "VIEWER_ENVIRONMENT",
@@ -177,6 +185,41 @@ function mapArtifact(artifact: {
     createdAt: artifact.createdAt,
     previewStorageKey: artifact.previewStorageKey
   };
+}
+
+async function createArtifactAlias(input: {
+  source: RuntimeArtifactRef;
+  runId: string;
+  projectId: string;
+  ownerId: string | null;
+  nodeId: string;
+  outputId: string;
+  hidden: boolean;
+  extraMeta?: Record<string, unknown>;
+}) {
+  const artifact = await prisma.artifact.create({
+    data: {
+      runId: input.runId,
+      projectId: input.projectId,
+      ownerId: input.ownerId,
+      nodeId: input.nodeId,
+      kind: input.source.kind,
+      mimeType: input.source.mimeType,
+      byteSize: input.source.byteSize,
+      hash: input.source.hash,
+      storageKey: input.source.storageKey,
+      previewStorageKey: input.source.previewStorageKey,
+      meta: {
+        ...input.source.meta,
+        ...input.extraMeta,
+        outputKey: input.outputId,
+        artifactType: input.source.artifactType,
+        hidden: input.hidden,
+        cacheSourceArtifactId: input.source.artifactId
+      } as Prisma.InputJsonValue
+    }
+  });
+  return mapArtifact(artifact);
 }
 
 function mapKey(nodeId: string, outputId: string) {
@@ -303,9 +346,9 @@ async function createRuntimeArtifactFromLocalPath(params: {
 }) {
   const buffer = await fs.readFile(params.filePath);
   const hash = stableHashForOutput(buffer);
-  const mimeType = inferImageMimeTypeFromPath(params.filePath);
+  const mimeType = inferMimeTypeFromPath(params.filePath);
   const kind = inferArtifactKindFromMime(mimeType);
-  const artifactType: ArtifactType = kind === "image" ? "Image" : "JsonData";
+  const artifactType: ArtifactType = mimeType === "video/mp4" ? "Video" : kind === "image" ? "Image" : "JsonData";
   return {
     artifactId: `${params.fallbackArtifactIdPrefix}-${hash.slice(0, 10)}`,
     nodeId: params.nodeId,
@@ -331,6 +374,53 @@ async function createRuntimeArtifactFromLocalPath(params: {
         outputKey: params.outputId,
         artifactType,
         sourcePath: params.filePath
+      },
+      producerNodeId: params.nodeId,
+      createdAt: new Date().toISOString()
+    },
+    createdAt: new Date(),
+    previewStorageKey: null
+  } as RuntimeArtifactRef;
+}
+
+function buildSourceRuntimeArtifact(params: {
+  nodeId: string;
+  outputId: string;
+  storageKey: string;
+  buffer: Buffer;
+  artifactType: ArtifactType;
+  mimeType: string;
+  filename: string;
+}) {
+  const hash = stableHashForOutput(params.buffer);
+  const kind = params.artifactType === "Image" ? "image" : inferArtifactKindFromMime(params.mimeType);
+  return {
+    artifactId: `source-${params.nodeId}-${hash.slice(0, 10)}`,
+    nodeId: params.nodeId,
+    outputId: params.outputId,
+    kind,
+    artifactType: params.artifactType,
+    hash,
+    mimeType: params.mimeType,
+    storageKey: params.storageKey,
+    byteSize: params.buffer.length,
+    meta: {
+      outputKey: params.outputId,
+      artifactType: params.artifactType,
+      filename: params.filename,
+      sourceStorageKey: params.storageKey
+    },
+    ref: {
+      id: `source-${params.nodeId}-${hash.slice(0, 10)}`,
+      type: params.artifactType,
+      name: params.outputId,
+      mimeType: params.mimeType,
+      storageKey: params.storageKey,
+      metadata: {
+        outputKey: params.outputId,
+        artifactType: params.artifactType,
+        filename: params.filename,
+        sourceStorageKey: params.storageKey
       },
       producerNodeId: params.nodeId,
       createdAt: new Date().toISOString()
@@ -462,18 +552,32 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     });
     return;
   }
+  if (run.projectId !== input.projectId || run.graphId !== input.graphId) {
+    throw new Error(`Queue payload does not match run ${input.runId}`);
+  }
 
   let projectSlug = resolveProjectStorageSlug({
     projectId: input.projectId
   });
   const runFolderLabel = formatRunFolderLabel(run.runNumber);
 
-  await updateRun(input.runId, {
-    status: "running",
-    startedAt: new Date(),
-    logs: appendLog(run.logs, `[${new Date().toISOString()}] Run started`),
-    progress: 0
+  const started = await prisma.run.updateMany({
+    where: { id: input.runId, status: "queued" },
+    data: {
+      status: "running",
+      startedAt: new Date(),
+      logs: appendLog(run.logs, `[${new Date().toISOString()}] Run started`),
+      progress: 0
+    }
   });
+  if (started.count !== 1) {
+    const current = await prisma.run.findUnique({ where: { id: input.runId }, select: { status: true } });
+    if (current?.status === "canceled") {
+      await finalizeRunUsage({ runId: input.runId, status: "canceled" });
+      return;
+    }
+    throw new Error(`Run ${input.runId} is no longer queued`);
+  }
   await recordRunEvent({
     runId: input.runId,
     projectId: input.projectId,
@@ -553,55 +657,34 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         }
 
         if (!resolved) {
+          const isInputSourceNode = sourceNode?.type === "input.image" || sourceNode?.type === "input.video";
           const sourceStorageKey =
-            sourceNode?.type === "input.image" &&
+            isInputSourceNode &&
             sourceNode?.data?.params &&
             typeof sourceNode.data.params.storageKey === "string"
               ? sourceNode.data.params.storageKey
               : "";
 
-          if (sourceNode?.type === "input.image" && binding.sourceOutputId === "image" && sourceStorageKey) {
+          const expectsImageSource = sourceNode?.type === "input.image" && binding.sourceOutputId === "image";
+          const expectsVideoSource = sourceNode?.type === "input.video" && binding.sourceOutputId === "video";
+
+          if ((expectsImageSource || expectsVideoSource) && sourceStorageKey) {
+            await assertProjectStorageKeyAccess(input.projectId, sourceStorageKey);
             const sourceBuffer = await getObjectBuffer(sourceStorageKey);
-            const sourceHash = stableHashForOutput(sourceBuffer);
             const filename =
-              typeof sourceNode.data?.params?.filename === "string" && sourceNode.data.params.filename.length > 0
+              typeof sourceNode?.data?.params?.filename === "string" && sourceNode.data.params.filename.length > 0
                 ? sourceNode.data.params.filename
-                : sourceStorageKey.split("/").pop() ?? "image.jpg";
-            resolved = {
-              artifactId: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
+                : sourceStorageKey.split("/").pop() ?? (expectsVideoSource ? "input.mp4" : "image.jpg");
+            resolved = buildSourceRuntimeArtifact({
               nodeId: binding.sourceNodeId,
-              outputId: "image",
-              kind: "image",
-              artifactType: "Image",
-              hash: sourceHash,
-              mimeType: inferImageMimeTypeFromPath(filename),
+              outputId: expectsVideoSource ? "video" : "image",
               storageKey: sourceStorageKey,
-              byteSize: sourceBuffer.length,
-              meta: {
-                outputKey: "image",
-                artifactType: "Image",
-                filename,
-                sourceStorageKey
-              },
-              ref: {
-                id: `source-${binding.sourceNodeId}-${sourceHash.slice(0, 10)}`,
-                type: "Image",
-                name: "image",
-                mimeType: inferImageMimeTypeFromPath(filename),
-                storageKey: sourceStorageKey,
-                metadata: {
-                  outputKey: "image",
-                  artifactType: "Image",
-                  filename,
-                  sourceStorageKey
-                },
-                producerNodeId: binding.sourceNodeId,
-                createdAt: new Date().toISOString()
-              },
-              createdAt: new Date(),
-              previewStorageKey: null
-            };
-            producedByOutput.set(mapKey(binding.sourceNodeId, "image"), resolved);
+              buffer: sourceBuffer,
+              artifactType: expectsVideoSource ? "Video" : "Image",
+              mimeType: expectsVideoSource ? inferMimeTypeFromPath(filename) : inferImageMimeTypeFromPath(filename),
+              filename
+            });
+            producedByOutput.set(mapKey(binding.sourceNodeId, expectsVideoSource ? "video" : "image"), resolved);
             producedByArtifactId.set(resolved.artifactId, resolved);
           }
         }
@@ -640,6 +723,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
           if (!effectiveImage && descriptorMeta.sourceImageStorageKey) {
             try {
+              await assertProjectStorageKeyAccess(input.projectId, descriptorMeta.sourceImageStorageKey);
               const sourceBuffer = await getObjectBuffer(descriptorMeta.sourceImageStorageKey);
               const sourceHash = stableHashForOutput(sourceBuffer);
               effectiveImage = {
@@ -788,53 +872,30 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         } as Prisma.InputJsonValue
       });
 
-      if (task.nodeType === "input.image") {
+      if (task.nodeType === "input.image" || task.nodeType === "input.video") {
         const storageKey = typeof resolvedParams.storageKey === "string" ? resolvedParams.storageKey : "";
         if (storageKey) {
+          await assertProjectStorageKeyAccess(input.projectId, storageKey);
           const sourceBuffer = await getObjectBuffer(storageKey);
-          const sourceHash = stableHashForOutput(sourceBuffer);
           const filename =
             typeof resolvedParams.filename === "string" && resolvedParams.filename.length > 0
               ? resolvedParams.filename
-              : storageKey.split("/").pop() ?? "image.jpg";
-          const sourceArtifact: RuntimeArtifactRef = {
-            artifactId: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
+              : storageKey.split("/").pop() ?? (task.nodeType === "input.video" ? "input.mp4" : "image.jpg");
+          const outputId = task.nodeType === "input.video" ? "video" : "image";
+          const artifactType: ArtifactType = task.nodeType === "input.video" ? "Video" : "Image";
+          const sourceArtifact = buildSourceRuntimeArtifact({
             nodeId: task.nodeId,
-            outputId: "image",
-            kind: "image",
-            artifactType: "Image",
-            hash: sourceHash,
-            mimeType: inferImageMimeTypeFromPath(filename),
+            outputId,
             storageKey,
-            byteSize: sourceBuffer.length,
-            meta: {
-              outputKey: "image",
-              artifactType: "Image",
-              filename,
-              sourceStorageKey: storageKey
-            },
-            ref: {
-              id: `source-${task.nodeId}-${sourceHash.slice(0, 10)}`,
-              type: "Image",
-              name: "image",
-              mimeType: inferImageMimeTypeFromPath(filename),
-              storageKey,
-              metadata: {
-                outputKey: "image",
-                artifactType: "Image",
-                filename,
-                sourceStorageKey: storageKey
-              },
-              producerNodeId: task.nodeId,
-              createdAt: new Date().toISOString()
-            },
-            createdAt: new Date(),
-            previewStorageKey: null
-          };
-          producedByOutput.set(mapKey(task.nodeId, "image"), sourceArtifact);
+            buffer: sourceBuffer,
+            artifactType,
+            mimeType: task.nodeType === "input.video" ? inferMimeTypeFromPath(filename) : inferImageMimeTypeFromPath(filename),
+            filename
+          });
+          producedByOutput.set(mapKey(task.nodeId, outputId), sourceArtifact);
           producedByArtifactId.set(sourceArtifact.artifactId, sourceArtifact);
           console.log(
-            `[worker] node=${task.nodeId} outputs image:image:${storageKey}`
+            `[worker] node=${task.nodeId} outputs ${outputId}:${artifactType.toLowerCase()}:${storageKey}`
           );
 
           const progress = Math.round(((i + 1) / total) * 100);
@@ -849,10 +910,10 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             step,
             status: "success",
             cacheHit: false,
-            outputSummary: `image:${storageKey}`,
+            outputSummary: `${outputId}:${storageKey}`,
             metadata: {
               mode: runtimeMode ?? null,
-              outputs: ["image"]
+              outputs: [outputId]
             } as Prisma.InputJsonValue
           });
           await recordRunEvent({
@@ -867,7 +928,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             message: "Node completed from source input",
             metadata: {
               cacheHit: false,
-              outputs: ["image"]
+              outputs: [outputId]
             } as Prisma.InputJsonValue
           });
           activeNodeContext = null;
@@ -888,7 +949,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
         for (const outputPort of spec.outputPorts) {
           const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, outputPort.id);
           const hit = await prisma.cacheEntry.findUnique({
-            where: { cacheKey: outputCacheKey },
+            where: {
+              projectId_cacheKey: {
+                projectId: input.projectId,
+                cacheKey: outputCacheKey
+              }
+            },
             include: { artifact: true }
           });
           if (!hit?.artifact) {
@@ -901,7 +967,17 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
       if (allOutputsCached && outputCacheHits.size > 0 && !shouldBypassCache) {
         const cacheOutputs: string[] = [];
-        for (const [outputId, artifact] of outputCacheHits.entries()) {
+        for (const [outputId, sourceArtifact] of outputCacheHits.entries()) {
+          const artifact = await createArtifactAlias({
+            source: sourceArtifact,
+            runId: input.runId,
+            projectId: input.projectId,
+            ownerId: run.createdBy ?? null,
+            nodeId: task.nodeId,
+            outputId,
+            hidden: false,
+            extraMeta: { mode: runtimeMode ?? null }
+          });
           producedByOutput.set(mapKey(task.nodeId, outputId), artifact);
           producedByArtifactId.set(artifact.artifactId, artifact);
           cacheOutputs.push(`${outputId}:${artifact.kind}:${artifact.storageKey}`);
@@ -1062,7 +1138,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             for (const outputPort of internalSpec.outputPorts) {
               const outputCacheKey = makeOutputCacheKey(internalCacheBaseKey, outputPort.id);
               const hit = await prisma.cacheEntry.findUnique({
-                where: { cacheKey: outputCacheKey },
+                where: {
+                  projectId_cacheKey: {
+                    projectId: input.projectId,
+                    cacheKey: outputCacheKey
+                  }
+                },
                 include: { artifact: true }
               });
               if (!hit?.artifact) {
@@ -1074,7 +1155,22 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           }
 
           if (internalAllCached && internalCacheHits.size > 0 && !shouldBypassCache) {
-            for (const [outputId, artifact] of internalCacheHits.entries()) {
+            for (const [outputId, sourceArtifact] of internalCacheHits.entries()) {
+              const artifact = await createArtifactAlias({
+                source: sourceArtifact,
+                runId: input.runId,
+                projectId: input.projectId,
+                ownerId: run.createdBy ?? null,
+                nodeId: internalNodeRuntimeId,
+                outputId,
+                hidden: true,
+                extraMeta: {
+                  templateId: template.id,
+                  templateHostNodeId: task.nodeId,
+                  templateNodeId: internalNodeId,
+                  mode: internalRuntimeMode ?? null
+                }
+              });
               internalProduced.set(`${internalNodeId}:${outputId}`, artifact);
               producedByArtifactId.set(artifact.artifactId, artifact);
             }
@@ -1120,8 +1216,18 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
                 }
               }
               return getObjectBuffer(artifact.storageKey);
+            },
+            isCancellationRequested: async () => {
+              const current = await prisma.run.findUnique({ where: { id: input.runId }, select: { status: true } });
+              return current?.status === "canceled";
             }
           });
+          if (await (async () => {
+            const current = await prisma.run.findUnique({ where: { id: input.runId }, select: { status: true } });
+            return current?.status === "canceled";
+          })()) {
+            throw new Error("Run canceled by user");
+          }
 
           const internalOutputs = internalResult.outputs.filter((output) =>
             internalSpec.outputPorts.some((port) => port.id === output.outputId)
@@ -1142,6 +1248,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
               data: {
                 runId: input.runId,
                 projectId: input.projectId,
+                ownerId: run.createdBy ?? null,
                 nodeId: internalNodeRuntimeId,
                 kind: output.kind,
                 mimeType: output.mimeType,
@@ -1212,7 +1319,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
             const internalOutputCacheKey = makeOutputCacheKey(internalCacheBaseKey, output.outputId);
             await prisma.cacheEntry.upsert({
-              where: { cacheKey: internalOutputCacheKey },
+              where: {
+                projectId_cacheKey: {
+                  projectId: input.projectId,
+                  cacheKey: internalOutputCacheKey
+                }
+              },
               create: {
                 projectId: input.projectId,
                 cacheKey: internalOutputCacheKey,
@@ -1256,6 +1368,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             data: {
               runId: input.runId,
               projectId: input.projectId,
+              ownerId: run.createdBy ?? null,
               nodeId: task.nodeId,
               kind: internalOutput.kind,
               mimeType: internalOutput.mimeType,
@@ -1282,7 +1395,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
           const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, outputBinding.exposedOutputId);
           await prisma.cacheEntry.upsert({
-            where: { cacheKey: outputCacheKey },
+            where: {
+              projectId_cacheKey: {
+                projectId: input.projectId,
+                cacheKey: outputCacheKey
+              }
+            },
             create: {
               projectId: input.projectId,
               cacheKey: outputCacheKey,
@@ -1359,8 +1477,18 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
             }
           }
           return getObjectBuffer(artifact.storageKey);
+        },
+        isCancellationRequested: async () => {
+          const current = await prisma.run.findUnique({ where: { id: input.runId }, select: { status: true } });
+          return current?.status === "canceled";
         }
       });
+      if (await (async () => {
+        const current = await prisma.run.findUnique({ where: { id: input.runId }, select: { status: true } });
+        return current?.status === "canceled";
+      })()) {
+        throw new Error("Run canceled by user");
+      }
 
       const outputs = result.outputs.filter((output) => spec.outputPorts.some((port) => port.id === output.outputId));
       if (outputs.length === 0) {
@@ -1380,6 +1508,7 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
           data: {
             runId: input.runId,
             projectId: input.projectId,
+            ownerId: run.createdBy ?? null,
             nodeId: task.nodeId,
             kind: output.kind,
             mimeType: output.mimeType,
@@ -1449,7 +1578,12 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
         const outputCacheKey = makeOutputCacheKey(nodeBaseCacheKey, output.outputId);
         await prisma.cacheEntry.upsert({
-          where: { cacheKey: outputCacheKey },
+          where: {
+            projectId_cacheKey: {
+              projectId: input.projectId,
+              cacheKey: outputCacheKey
+            }
+          },
           create: {
             projectId: input.projectId,
             cacheKey: outputCacheKey,
@@ -1508,12 +1642,18 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
     }
 
     const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
-    await updateRun(input.runId, {
-      status: "success",
-      progress: 100,
-      finishedAt: new Date(),
-      logs: appendLog(latestRun?.logs ?? "", `[${new Date().toISOString()}] Run finished`)
+    const completed = await prisma.run.updateMany({
+      where: { id: input.runId, status: "running" },
+      data: {
+        status: "success",
+        progress: 100,
+        finishedAt: new Date(),
+        logs: appendLog(latestRun?.logs ?? "", `[${new Date().toISOString()}] Run finished`)
+      }
     });
+    if (completed.count !== 1) {
+      throw new Error("Run canceled by user before completion");
+    }
     await recordRunEvent({
       runId: input.runId,
       projectId: input.projectId,
@@ -1536,7 +1676,8 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown execution error";
     const latestRun = await prisma.run.findUnique({ where: { id: input.runId } });
-    const status: RunStatus = message.toLowerCase().includes("canceled") ? "canceled" : "error";
+    const status: RunStatus =
+      latestRun?.status === "canceled" || message.toLowerCase().includes("canceled") ? "canceled" : "error";
     await closeOpenRunSteps({
       runId: input.runId,
       status: status === "canceled" ? "canceled" : "error",

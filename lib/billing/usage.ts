@@ -126,6 +126,19 @@ export async function createRunWithTokenReservation(input: {
 
   const result = await prisma.$transaction(async (tx) => {
     await lockWalletRow(tx, input.userId);
+    const inFlight = await tx.run.count({
+      where: {
+        createdBy: input.userId,
+        status: { in: ["queued", "running"] }
+      }
+    });
+    if (inFlight >= state.entitlements.maxConcurrentRuns) {
+      throw new HttpError(
+        429,
+        `Concurrent run limit reached (${state.entitlements.maxConcurrentRuns}).`,
+        "run_limit_reached"
+      );
+    }
     const wallet = await tx.tokenWallet.findUnique({
       where: { userId: input.userId }
     });
@@ -222,24 +235,28 @@ export async function finalizeRunUsage(input: {
   status: "success" | "error" | "canceled";
   actualTokenCost?: number;
 }) {
-  const usageEvent = await prisma.usageEvent.findUnique({
+  const initialUsageEvent = await prisma.usageEvent.findUnique({
     where: { runId: input.runId }
   });
-  if (!usageEvent) return null;
-  if (usageEvent.status !== "reserved") {
-    return usageEvent;
-  }
+  if (!initialUsageEvent) return null;
 
-  const estimated = clampInt(usageEvent.estimatedTokenCost);
-  const actual =
-    input.status === "success"
-      ? Math.min(estimated, clampInt(input.actualTokenCost ?? estimated))
-      : 0;
-  const refundAmount = Math.max(0, estimated - actual);
-  const reservationSplit = parseReservationSplit(usageEvent.metadata);
+  return prisma.$transaction(async (tx) => {
+    await lockWalletRow(tx, initialUsageEvent.userId);
+    const usageEvent = await tx.usageEvent.findUnique({
+      where: { id: initialUsageEvent.id }
+    });
+    if (!usageEvent) return null;
+    if (usageEvent.status !== "reserved") {
+      return usageEvent;
+    }
 
-  await prisma.$transaction(async (tx) => {
-    await lockWalletRow(tx, usageEvent.userId);
+    const estimated = clampInt(usageEvent.estimatedTokenCost);
+    const actual =
+      input.status === "success"
+        ? Math.min(estimated, clampInt(input.actualTokenCost ?? estimated))
+        : 0;
+    const refundAmount = Math.max(0, estimated - actual);
+    const reservationSplit = parseReservationSplit(usageEvent.metadata);
     const wallet = await tx.tokenWallet.findUnique({
       where: { userId: usageEvent.userId }
     });
@@ -294,13 +311,13 @@ export async function finalizeRunUsage(input: {
         } as Prisma.InputJsonValue
       }
     });
-  });
 
-  return {
-    estimated,
-    actual,
-    refundAmount
-  };
+    return {
+      estimated,
+      actual,
+      refundAmount
+    };
+  });
 }
 
 export async function creditTokenPack(input: {
@@ -308,6 +325,7 @@ export async function creditTokenPack(input: {
   tokenAmount: number;
   description: string;
   metadata?: Record<string, unknown>;
+  idempotencyKey?: string;
 }) {
   const amount = clampInt(input.tokenAmount);
   if (amount <= 0) {
@@ -317,6 +335,12 @@ export async function creditTokenPack(input: {
   await resolveBillingStateForUser(input.userId);
   await prisma.$transaction(async (tx) => {
     await lockWalletRow(tx, input.userId);
+    if (input.idempotencyKey) {
+      const existing = await tx.tokenTransaction.findUnique({
+        where: { idempotencyKey: input.idempotencyKey }
+      });
+      if (existing) return;
+    }
     const wallet = await tx.tokenWallet.findUnique({
       where: { userId: input.userId }
     });
@@ -336,6 +360,7 @@ export async function creditTokenPack(input: {
         source: "token_pack",
         amount,
         description: input.description,
+        idempotencyKey: input.idempotencyKey,
         metadata: (input.metadata ?? {}) as Prisma.InputJsonValue
       }
     });
@@ -353,6 +378,7 @@ export async function syncSubscriptionFromBilling(input: {
   currentPeriodEnd?: Date | null;
   cancelAtPeriodEnd?: boolean;
   resetMonthlyAllowance?: boolean;
+  idempotencyKey?: string;
 }) {
   if (!isSubscriptionPlanKey(input.plan)) {
     throw new HttpError(400, "Invalid subscription plan.", "validation_error");
@@ -388,6 +414,12 @@ export async function syncSubscriptionFromBilling(input: {
     await resolveBillingStateForUser(input.userId);
     await prisma.$transaction(async (tx) => {
       await lockWalletRow(tx, input.userId);
+      if (input.idempotencyKey) {
+        const existing = await tx.tokenTransaction.findUnique({
+          where: { idempotencyKey: input.idempotencyKey }
+        });
+        if (existing) return;
+      }
       const wallet = await tx.tokenWallet.findUnique({
         where: { userId: input.userId }
       });
@@ -410,6 +442,7 @@ export async function syncSubscriptionFromBilling(input: {
           source: "subscription",
           amount: allowance,
           description: `Monthly allowance reset (${input.plan})`,
+          idempotencyKey: input.idempotencyKey,
           metadata: {
             source: "billing_sync"
           } as Prisma.InputJsonValue

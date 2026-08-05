@@ -1,17 +1,107 @@
 import { GraphDocument, GraphEdge, GraphNode, WorkflowNodeType, ExecutionPlan } from "@/types/workflow";
 import { validateConnectionForEdge } from "@/lib/graph/connection-rules";
 import { migrateGraphDocument } from "@/lib/graph/migrations";
-import { nodeSpecRegistry } from "@/lib/graph/node-specs";
+import { mergeNodeParamsWithDefaults, nodeSpecRegistry } from "@/lib/graph/node-specs";
 
 function byId<T extends { id: string }>(items: T[]) {
   return new Map(items.map((item) => [item.id, item]));
 }
 
 export function parseGraphDocument(raw: unknown): GraphDocument {
-  const doc = raw as GraphDocument;
-  if (!doc || !Array.isArray(doc.nodes) || !Array.isArray(doc.edges) || !doc.viewport) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Invalid graph document");
   }
+  const input = raw as Record<string, unknown>;
+  if (!Array.isArray(input.nodes) || !Array.isArray(input.edges)) {
+    throw new Error("Invalid graph document");
+  }
+  if (input.nodes.length > 250 || input.edges.length > 1000) {
+    throw new Error("Graph exceeds node or edge limits");
+  }
+  if (!input.viewport || typeof input.viewport !== "object" || Array.isArray(input.viewport)) {
+    throw new Error("Invalid graph viewport");
+  }
+  const viewportInput = input.viewport as Record<string, unknown>;
+  const viewport = {
+    x: Number(viewportInput.x),
+    y: Number(viewportInput.y),
+    zoom: Number(viewportInput.zoom)
+  };
+  if (![viewport.x, viewport.y, viewport.zoom].every(Number.isFinite) || viewport.zoom <= 0 || viewport.zoom > 8) {
+    throw new Error("Invalid graph viewport");
+  }
+
+  const nodeIds = new Set<string>();
+  const nodes = input.nodes.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`Invalid graph node at index ${index}`);
+    }
+    const node = entry as Record<string, unknown>;
+    const id = typeof node.id === "string" ? node.id.trim() : "";
+    const rawType = typeof node.type === "string" ? node.type : "";
+    const nodeType = rawType === "model.scene_generation" ? "model.sam3d_objects" : rawType;
+    if (!id || id.length > 180 || nodeIds.has(id)) {
+      throw new Error(`Invalid or duplicate graph node id at index ${index}`);
+    }
+    if (!(nodeType in nodeSpecRegistry)) {
+      throw new Error(`Unsupported graph node type: ${rawType || "unknown"}`);
+    }
+    const positionInput =
+      node.position && typeof node.position === "object" && !Array.isArray(node.position)
+        ? (node.position as Record<string, unknown>)
+        : null;
+    const position = {
+      x: Number(positionInput?.x),
+      y: Number(positionInput?.y)
+    };
+    if (![position.x, position.y].every(Number.isFinite)) {
+      throw new Error(`Invalid graph node position: ${id}`);
+    }
+    const dataInput =
+      node.data && typeof node.data === "object" && !Array.isArray(node.data)
+        ? (node.data as Record<string, unknown>)
+        : {};
+    const label = typeof dataInput.label === "string" ? dataInput.label.trim() : "";
+    if (label.length > 120) {
+      throw new Error(`Graph node label is too long: ${id}`);
+    }
+    const params = mergeNodeParamsWithDefaults(
+      nodeType as WorkflowNodeType,
+      dataInput.params
+    );
+    nodeIds.add(id);
+    return {
+      id,
+      type: nodeType as WorkflowNodeType,
+      position,
+      data: {
+        ...dataInput,
+        label: label || nodeSpecRegistry[nodeType as WorkflowNodeType].title,
+        params
+      }
+    } as GraphNode;
+  });
+
+  const edges = input.edges.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`Invalid graph edge at index ${index}`);
+    }
+    const edge = entry as Record<string, unknown>;
+    const id = typeof edge.id === "string" ? edge.id.trim() : "";
+    const source = typeof edge.source === "string" ? edge.source.trim() : "";
+    const target = typeof edge.target === "string" ? edge.target.trim() : "";
+    const sourceHandle = typeof edge.sourceHandle === "string" ? edge.sourceHandle.trim() : undefined;
+    const targetHandle = typeof edge.targetHandle === "string" ? edge.targetHandle.trim() : undefined;
+    if (!id || id.length > 180 || !nodeIds.has(source) || !nodeIds.has(target)) {
+      throw new Error(`Invalid graph edge at index ${index}`);
+    }
+    if ((sourceHandle?.length ?? 0) > 120 || (targetHandle?.length ?? 0) > 120) {
+      throw new Error(`Invalid graph edge handles at index ${index}`);
+    }
+    return { id, source, target, sourceHandle, targetHandle } as GraphEdge;
+  });
+
+  const doc: GraphDocument = { nodes, edges, viewport };
   const migrated = migrateGraphDocument(doc);
   const nodesById = byId(migrated.nodes);
   const validEdges = migrated.edges.reduce<GraphEdge[]>((acc, edge) => {
@@ -33,10 +123,12 @@ export function parseGraphDocument(raw: unknown): GraphDocument {
     return acc;
   }, []);
 
-  return {
+  const normalized = {
     ...migrated,
     edges: validEdges
   };
+  buildExecutionPlan(normalized);
+  return normalized;
 }
 
 function buildOutgoing(edges: GraphEdge[]) {
@@ -57,23 +149,6 @@ function buildIncoming(edges: GraphEdge[]) {
     map.set(edge.target, list);
   }
   return map;
-}
-
-function collectDownstream(startNodeId: string, outgoing: Map<string, string[]>) {
-  const visited = new Set<string>();
-  const stack = [startNodeId];
-  while (stack.length) {
-    const nodeId = stack.pop()!;
-    if (visited.has(nodeId)) {
-      continue;
-    }
-    visited.add(nodeId);
-    const next = outgoing.get(nodeId) ?? [];
-    for (const target of next) {
-      stack.push(target);
-    }
-  }
-  return visited;
 }
 
 function collectAncestors(nodeId: string, incoming: Map<string, string[]>, sink: Set<string>) {

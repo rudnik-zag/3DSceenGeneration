@@ -3,7 +3,9 @@ import { z } from "zod";
 export type NodeCategory = "Inputs" | "Models" | "Geometry" | "Outputs";
 
 export type ArtifactType =
+  | "AnyArtifact"
   | "Image"
+  | "Video"
   | "Descriptor"
   | "MaskSet"
   | "SceneAsset"
@@ -19,6 +21,7 @@ export type PayloadKind = ArtifactType;
 
 export type WorkflowNodeType =
   | "input.image"
+  | "input.video"
   | "input.text"
   | "input.cameraPath"
   | "viewer.environment"
@@ -85,8 +88,11 @@ export interface GraphNodeData {
   label: string;
   params: Record<string, unknown>;
   status?: NodeRuntimeStatus;
+  isLockedByRun?: boolean;
   latestArtifactId?: string;
   latestArtifactKind?: string;
+  latestArtifactMimeType?: string | null;
+  latestArtifactType?: ArtifactType | null;
   uiScale?: NodeUiScale;
   runProgress?: number;
   isCacheHit?: boolean;
@@ -101,10 +107,13 @@ export interface GraphNodeData {
     {
       id: string;
       kind: string;
+      mimeType?: string | null;
+      artifactType?: ArtifactType | null;
       hidden?: boolean;
       url?: string | null;
       previewUrl?: string | null;
       createdAt?: string;
+      meta?: Record<string, unknown> | null;
     }
   >;
   outputArtifactHistory?: Record<
@@ -112,10 +121,13 @@ export interface GraphNodeData {
     Array<{
       id: string;
       kind: string;
+      mimeType?: string | null;
+      artifactType?: ArtifactType | null;
       hidden?: boolean;
       url?: string | null;
       previewUrl?: string | null;
       createdAt?: string;
+      meta?: Record<string, unknown> | null;
     }>
   >;
   scenePreviewStages?: Record<
@@ -123,12 +135,15 @@ export interface GraphNodeData {
     {
       id: string;
       kind: string;
+      mimeType?: string | null;
+      artifactType?: ArtifactType | null;
       label: string;
       hidden?: boolean;
       outputKey?: string;
       url?: string | null;
       previewUrl?: string | null;
       createdAt?: string;
+      meta?: Record<string, unknown> | null;
     }
   >;
   onRunNode?: (nodeId: string) => void;

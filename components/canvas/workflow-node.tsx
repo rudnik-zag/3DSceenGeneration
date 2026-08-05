@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from "react";
 import { Handle, NodeProps, NodeResizer, Position } from "reactflow";
 import {
   Boxes,
   Camera,
   Clock3,
   FileCode2,
+  Film,
   Image as ImageIcon,
   Layers,
+  Pause,
   Play,
   Sparkles,
   Type as TypeIcon,
@@ -20,6 +22,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { getSceneGenerationPresetNames } from "@/lib/graph/scene-generation-presets";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { cn } from "@/lib/utils";
@@ -44,6 +47,7 @@ const previewTint: Record<string, string> = {
 
 const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: string }>>> = {
   "input.image": ImageIcon,
+  "input.video": Film,
   "input.text": TypeIcon,
   "input.cameraPath": Camera,
   "viewer.environment": Sparkles,
@@ -66,6 +70,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
 const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "GPT-5.2",
   "input.image": "Reference",
+  "input.video": "Reference",
   "viewer.environment": "Lighting",
   "model.groundingdino": "ObjectDetection",
   "model.sam2": "SegmentScene",
@@ -97,6 +102,69 @@ function formatArtifactVersionLabel(artifact: {
   const ts = artifact.createdAt ? new Date(artifact.createdAt) : null;
   const timeLabel = ts && !Number.isNaN(ts.getTime()) ? ts.toLocaleTimeString() : "unknown time";
   return `${artifact.id.slice(0, 8)} · ${artifact.kind} · ${timeLabel}`;
+}
+
+type PreviewSequenceManifest = {
+  media_type: "image" | "video";
+  frame_count: number;
+  fps: number;
+  frames: Array<{
+    index: number;
+    depth_storage_key: string;
+    source_frame_index: number;
+    timestamp_sec: number;
+  }>;
+};
+
+function buildStorageObjectUrl(storageKey: string) {
+  return `/api/storage/object?key=${encodeURIComponent(storageKey)}`;
+}
+
+function looksLikeVideoUrl(value: string | null | undefined) {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value, "http://localhost");
+    const key = parsed.searchParams.get("key");
+    return parsed.pathname.toLowerCase().endsWith(".mp4") || key?.toLowerCase().endsWith(".mp4") === true;
+  } catch {
+    return value.toLowerCase().includes(".mp4");
+  }
+}
+
+function normalizeSequenceManifest(raw: unknown): PreviewSequenceManifest | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const candidate = raw as Record<string, unknown>;
+  const mediaType = candidate.media_type === "video" ? "video" : "image";
+  const fps = Number.isFinite(Number(candidate.fps)) ? Math.max(1, Math.floor(Number(candidate.fps))) : 12;
+  const framesRaw = Array.isArray(candidate.frames) ? candidate.frames : [];
+  const frames = framesRaw
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const frame = entry as Record<string, unknown>;
+      const depthStorageKey =
+        typeof frame.depth_storage_key === "string" && frame.depth_storage_key.trim().length > 0
+          ? frame.depth_storage_key.trim()
+          : null;
+      if (!depthStorageKey) return null;
+      return {
+        index: Number.isFinite(Number(frame.index)) ? Math.max(0, Math.floor(Number(frame.index))) : index,
+        depth_storage_key: depthStorageKey,
+        source_frame_index: Number.isFinite(Number(frame.source_frame_index))
+          ? Math.max(0, Math.floor(Number(frame.source_frame_index)))
+          : index,
+        timestamp_sec: Number.isFinite(Number(frame.timestamp_sec)) ? Math.max(0, Number(frame.timestamp_sec)) : 0
+      };
+    })
+    .filter((value): value is PreviewSequenceManifest["frames"][number] => Boolean(value));
+
+  if (frames.length === 0) return null;
+
+  return {
+    media_type: mediaType,
+    frame_count: Number.isFinite(Number(candidate.frame_count)) ? Math.max(1, Math.floor(Number(candidate.frame_count))) : frames.length,
+    fps,
+    frames
+  };
 }
 
 let sam2ConfigCache: string[] | null = null;
@@ -156,7 +224,7 @@ async function fetchSam3dConfigs() {
   return sam3dConfigCache;
 }
 
-export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeData>) {
+function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>) {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [hasCustomImageWidth, setHasCustomImageWidth] = useState(false);
   const nodeType = type as WorkflowNodeType;
@@ -168,10 +236,14 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const isCustomSceneGenNode = nodeType === "model.sam3d_objects";
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
   const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
+  const isDepthEstimationNode = nodeType === "geo.depth_estimation";
+  const isSceneViewerNode = isSceneGenerationNode || isDepthEstimationNode;
   const isPreviewNode = nodeType === "out.open_in_viewer";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
   const [sam3dCfgOptions, setSam3dCfgOptions] = useState<string[]>(["hf"]);
   const isInputImageNode = nodeType === "input.image";
+  const isInputVideoNode = nodeType === "input.video";
+  const isInputMediaNode = isInputImageNode || isInputVideoNode;
   const inputImageSourceMode =
     isInputImageNode && data.params?.sourceMode === "generate" ? "generate" : "upload";
   const inputImageModel =
@@ -186,10 +258,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       : "";
   const isImageGenerationNode = isInputImageNode && inputImageSourceMode === "generate";
   const isTextNode = nodeType === "input.text";
-  const effectivePreviewUrl = data.previewUrl ?? null;
   const effectiveArtifactKind = data.latestArtifactKind;
-  const isImageNode = isInputImageNode || isPreviewNode;
-  const usesImageSizing = isInputImageNode || isPreviewNode;
+  const effectiveArtifactMimeType = data.latestArtifactMimeType ?? null;
+  const effectiveArtifactType = data.latestArtifactType ?? null;
+  const isImageNode = isInputMediaNode || isPreviewNode;
+  const usesImageSizing = isInputMediaNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
@@ -245,7 +318,69 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
   const dinoHasOutput = isGroundingDinoNode && Boolean(data.latestArtifactId);
   const qwenImageEditPrompt =
     isQwenImageEditNode && typeof data.params?.prompt === "string" ? data.params.prompt : "";
-  const hasOpenablePreview = Boolean(effectivePreviewUrl) && (isPreviewNode || isInputImageNode);
+  const previewMode =
+    isPreviewNode && typeof data.params?.previewMode === "string" && ["auto", "single", "sequence"].includes(data.params.previewMode)
+      ? data.params.previewMode
+      : "auto";
+  const previewFit =
+    isPreviewNode && data.params?.previewFit === "cover"
+      ? "cover"
+      : "contain";
+  const sequenceFps =
+    isPreviewNode && Number.isFinite(Number(data.params?.sequenceFps))
+      ? Math.max(1, Math.min(60, Math.floor(Number(data.params.sequenceFps))))
+      : 12;
+  const sequenceLoop = isPreviewNode ? data.params?.sequenceLoop !== false : true;
+  const sequenceAutoplay = isPreviewNode ? data.params?.sequenceAutoplay === true : true;
+  const previewSourceArtifact = isPreviewNode ? data.outputArtifacts?.artifact ?? null : null;
+  const effectivePreviewUrl = data.previewUrl ?? previewSourceArtifact?.previewUrl ?? previewSourceArtifact?.url ?? null;
+  const previewSourceSemantic =
+    previewSourceArtifact?.meta && typeof previewSourceArtifact.meta.semantic === "string"
+      ? previewSourceArtifact.meta.semantic
+      : null;
+  const isVideoPreview =
+    isInputVideoNode ||
+    effectiveArtifactMimeType === "video/mp4" ||
+    effectiveArtifactType === "Video" ||
+    previewSourceArtifact?.mimeType === "video/mp4" ||
+    previewSourceArtifact?.artifactType === "Video" ||
+    previewSourceSemantic === "depth_video" ||
+    looksLikeVideoUrl(effectivePreviewUrl);
+  const shouldPreferVideoPreview = Boolean(isPreviewNode && effectivePreviewUrl && isVideoPreview);
+  const previewSourceMeta = previewSourceArtifact?.meta ?? null;
+  const hasSequenceManifestArtifact =
+    isPreviewNode &&
+    previewSourceArtifact?.kind === "json" &&
+    previewSourceMeta &&
+    ((typeof previewSourceMeta.outputKey === "string" && previewSourceMeta.outputKey === "sequence") ||
+      (typeof previewSourceMeta.semantic === "string" && previewSourceMeta.semantic === "image_sequence")) &&
+    typeof previewSourceArtifact.url === "string" &&
+    previewSourceArtifact.url.length > 0;
+  const [sequenceManifest, setSequenceManifest] = useState<PreviewSequenceManifest | null>(null);
+  const [sequenceLoading, setSequenceLoading] = useState(false);
+  const [sequenceError, setSequenceError] = useState<string | null>(null);
+  const [sequenceFrameIndex, setSequenceFrameIndex] = useState(0);
+  const [sequencePlaying, setSequencePlaying] = useState(false);
+  const [sequenceFrameUrls, setSequenceFrameUrls] = useState<Record<string, string>>({});
+  const sequenceFrameUrlRegistryRef = useRef<Record<string, string>>({});
+  const shouldLoadSequenceManifest = Boolean(
+    hasSequenceManifestArtifact &&
+    !shouldPreferVideoPreview &&
+    ["auto", "single", "sequence"].includes(previewMode)
+  );
+  const shouldRenderSequence = Boolean(
+    shouldLoadSequenceManifest &&
+    sequenceManifest
+  );
+  const sequenceFrames = sequenceManifest?.frames ?? [];
+  const clampedSequenceFrameIndex =
+    sequenceFrames.length > 0 ? Math.min(sequenceFrameIndex, sequenceFrames.length - 1) : 0;
+  const activeSequenceFrame = sequenceFrames[clampedSequenceFrameIndex] ?? null;
+  const activeSequenceFrameUrl = activeSequenceFrame
+    ? sequenceFrameUrls[activeSequenceFrame.depth_storage_key] ?? null
+    : null;
+  const shouldAutoPlaySequence = Boolean(shouldRenderSequence && previewMode !== "single" && sequenceAutoplay);
+  const hasOpenablePreview = (Boolean(effectivePreviewUrl) || Boolean(activeSequenceFrameUrl)) && (isPreviewNode || isInputMediaNode);
   const hasSam2BoxesConfig = isSam2Node ? Boolean(data.hasBoxesConfigConnection) : false;
   const sam2ModeParam =
     isSam2Node && typeof data.params?.mode === "string" ? data.params.mode : "auto";
@@ -298,12 +433,19 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     ? data.outputArtifacts?.generatedScene?.id ?? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
     : isCustomSceneGenNode
       ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
+    : isDepthEstimationNode
+      ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
       : data.latestArtifactId;
+  const getOutputAvailability = (outputId: string) =>
+    nodeType === "geo.depth_estimation"
+      ? getDepthEstimationOutputAvailability(data.params ?? {}, data.outputArtifacts, outputId)
+      : { available: true, reason: null };
   const outputVersionChoices = spec.outputPorts
     .filter((port) => !port.hidden)
     .map((port) => {
       const history = data.outputArtifactHistory?.[port.id] ?? [];
       if (history.length < 2) return null;
+      const availability = getOutputAvailability(port.id);
       const selectionKey = `__selectedArtifact__${port.id}`;
       const selectedRaw =
         typeof data.params?.[selectionKey] === "string"
@@ -318,11 +460,14 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         portLabel: port.label,
         selectionKey,
         selectedValue,
-        history
+        history,
+        available: availability.available,
+        unavailableReason: availability.reason
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   const nodeStatus = data.status ?? "idle";
+  const isRuntimeLocked = Boolean(data.isLockedByRun || nodeStatus === "running");
   const statusFxClass =
     nodeStatus === "success"
       ? "node-success-glow"
@@ -356,6 +501,155 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     };
   }, [isCustomSceneGenNode]);
 
+  useEffect(() => {
+    if (!shouldLoadSequenceManifest || typeof previewSourceArtifact?.url !== "string") {
+      setSequenceManifest(null);
+      setSequenceLoading(false);
+      setSequenceError(null);
+      setSequenceFrameIndex(0);
+      setSequencePlaying(false);
+      for (const objectUrl of Object.values(sequenceFrameUrlRegistryRef.current)) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      sequenceFrameUrlRegistryRef.current = {};
+      setSequenceFrameUrls({});
+      return;
+    }
+
+    let mounted = true;
+    setSequenceLoading(true);
+    setSequenceError(null);
+
+    fetch(previewSourceArtifact.url, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load sequence manifest (${response.status})`);
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        if (!mounted) return;
+        const normalized = normalizeSequenceManifest(payload);
+        if (!normalized) {
+          throw new Error("Sequence manifest is invalid.");
+        }
+        setSequenceManifest(normalized);
+        setSequenceFrameIndex(0);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setSequenceManifest(null);
+        setSequenceError(error instanceof Error ? error.message : "Failed to load sequence.");
+      })
+      .finally(() => {
+        if (mounted) {
+          setSequenceLoading(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [shouldLoadSequenceManifest, previewSourceArtifact?.url]);
+
+  useEffect(() => {
+    return () => {
+      for (const objectUrl of Object.values(sequenceFrameUrlRegistryRef.current)) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      sequenceFrameUrlRegistryRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || sequenceFrames.length === 0) {
+      return;
+    }
+
+    const activeKey = activeSequenceFrame?.depth_storage_key ?? null;
+    const nextKey =
+      sequenceFrames.length > 1
+        ? sequenceFrames[(clampedSequenceFrameIndex + 1) % sequenceFrames.length]?.depth_storage_key ?? null
+        : null;
+    const keysToLoad = [activeKey, nextKey]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .filter((value) => !sequenceFrameUrlRegistryRef.current[value]);
+
+    if (keysToLoad.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    Promise.all(
+      keysToLoad.map(async (storageKey) => {
+        const response = await fetch(buildStorageObjectUrl(storageKey), { cache: "force-cache" });
+        if (!response.ok) {
+          throw new Error(`Failed to load frame (${response.status})`);
+        }
+        const blob = await response.blob();
+        return {
+          storageKey,
+          objectUrl: URL.createObjectURL(blob)
+        };
+      })
+    )
+      .then((entries) => {
+        if (cancelled) {
+          for (const entry of entries) {
+            URL.revokeObjectURL(entry.objectUrl);
+          }
+          return;
+        }
+        for (const entry of entries) {
+          sequenceFrameUrlRegistryRef.current[entry.storageKey] = entry.objectUrl;
+        }
+        setSequenceFrameUrls({ ...sequenceFrameUrlRegistryRef.current });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setSequenceError(error instanceof Error ? error.message : "Failed to load sequence frame.");
+        setSequencePlaying(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSequenceFrame?.depth_storage_key, clampedSequenceFrameIndex, sequenceFrames, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence) {
+      setSequencePlaying(false);
+      return;
+    }
+    setSequencePlaying(shouldAutoPlaySequence);
+  }, [shouldAutoPlaySequence, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || !sequencePlaying || sequenceFrames.length <= 1) {
+      return;
+    }
+    const intervalMs = Math.max(40, Math.floor(1000 / sequenceFps));
+    const timer = window.setInterval(() => {
+      setSequenceFrameIndex((current) => {
+        if (current >= sequenceFrames.length - 1) {
+          if (sequenceLoop) return 0;
+          window.clearInterval(timer);
+          return current;
+        }
+        return current + 1;
+      });
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [sequenceFps, sequenceFrames.length, sequenceLoop, sequencePlaying, shouldRenderSequence]);
+
+  useEffect(() => {
+    if (!shouldRenderSequence || sequenceLoop || sequenceFrames.length === 0) return;
+    if (sequenceFrameIndex >= sequenceFrames.length - 1) {
+      setSequencePlaying(false);
+    }
+  }, [sequenceFrameIndex, sequenceFrames.length, sequenceLoop, shouldRenderSequence]);
+
   const openPreviewModal = (event: ReactMouseEvent) => {
     if (!hasOpenablePreview) return;
     event.preventDefault();
@@ -373,7 +667,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       )}
     >
       <NodeResizer
-        isVisible={selected}
+        isVisible={selected && !isRuntimeLocked}
         minWidth={minNodeWidth}
         minHeight={minNodeHeight}
         maxWidth={720}
@@ -444,7 +738,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isSam2Node ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Mode</p>
             <select
@@ -485,7 +779,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isCustomSceneGenNode ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">Config Preset</p>
             <select
@@ -560,7 +854,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
           ) : null}
         </div>
       ) : isSceneGenerationPipelineNode ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="space-y-1">
             <p className="text-[10px] text-zinc-400">objectPrompt</p>
             <input
@@ -632,7 +926,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isGroundingDinoNode ? (
-        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] text-zinc-400">Classes to detect</p>
           <input
             className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
@@ -647,7 +941,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isQwenImageEditNode ? (
-        <div className="nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] text-zinc-400">Edit prompt</p>
           <textarea
             className="nodrag min-h-[68px] w-full resize-y rounded-md border border-[#555] bg-[#1f1f1f] px-2 py-1.5 text-[10px] text-[#d7d7d7] outline-none"
@@ -659,7 +953,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       ) : null}
 
       {isInputImageNode ? (
-        <div className="mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-1">
+        <div className={cn("mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-1", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <div className="mb-1 grid grid-cols-2 gap-1">
             <button
               type="button"
@@ -711,17 +1005,27 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </div>
           ) : null}
         </div>
+      ) : isInputVideoNode ? (
+        <div className={cn("mb-2 nodrag rounded-lg border border-white/10 bg-black/25 p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
+          <p className="text-[10px] text-zinc-400">Upload an MP4 source video for frame-wise depth estimation.</p>
+        </div>
       ) : null}
 
-      {isSceneGenerationNode ? (
+      {isSceneViewerNode ? (
         <div className="mb-2 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
           <div className="rounded-md border border-[#565656] bg-[#1f1f1f] px-2 py-1.5">
-            <p className="text-[11px] text-zinc-300">Output format: {sceneFormat}</p>
+            <p className="text-[11px] text-zinc-300">
+              Output format: {isDepthEstimationNode ? "depth + native glb" : sceneFormat}
+            </p>
             {sceneViewerArtifactId ? (
               <p className="mt-1 truncate text-[10px] text-zinc-500">Artifact #{sceneViewerArtifactId.slice(0, 8)}</p>
             ) : (
               <p className="mt-1 text-[10px] text-zinc-500">
-                {isCustomSceneGenNode ? "Run CustomSceneGen to create scene assets." : "Run SceneGeneration to create scene assets."}
+                {isDepthEstimationNode
+                  ? "Run Depth Estimation to create a native DA3 GLB scene."
+                  : isCustomSceneGenNode
+                    ? "Run CustomSceneGen to create scene assets."
+                    : "Run SceneGeneration to create scene assets."}
               </p>
             )}
           </div>
@@ -738,6 +1042,184 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </button>
           </div>
         </div>
+      ) : isPreviewNode ? (
+        <div className="mb-2 space-y-2">
+          <div className={cn("nodrag space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <p className="text-[10px] text-zinc-400">Preview Mode</p>
+                <select
+                  className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                  value={previewMode}
+                  onChange={(event) => data.onUpdateParam?.(id, "previewMode", event.target.value)}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="single">Single</option>
+                  <option value="sequence">Sequence</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] text-zinc-400">Fit</p>
+                <select
+                  className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                  value={previewFit}
+                  onChange={(event) => data.onUpdateParam?.(id, "previewFit", event.target.value)}
+                >
+                  <option value="contain">Contain</option>
+                  <option value="cover">Cover</option>
+                </select>
+              </div>
+            </div>
+
+            {hasSequenceManifestArtifact && !shouldPreferVideoPreview ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <p className="text-[10px] text-zinc-400">Playback FPS</p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    step={1}
+                    className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                    value={sequenceFps}
+                    onChange={(event) => data.onUpdateParam?.(id, "sequenceFps", Number(event.target.value) || 1)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-1 self-end">
+                  <button
+                    type="button"
+                    onClick={() => data.onUpdateParam?.(id, "sequenceAutoplay", !sequenceAutoplay)}
+                    className={cn(
+                      "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                      sequenceAutoplay ? "border border-[#4f6478] bg-[#253341] text-[#c9def1]" : "border border-[#555] bg-[#1f1f1f] text-zinc-300"
+                    )}
+                  >
+                    Autoplay
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => data.onUpdateParam?.(id, "sequenceLoop", !sequenceLoop)}
+                    className={cn(
+                      "nodrag h-7 rounded-md px-2 text-[10px] font-medium transition",
+                      sequenceLoop ? "border border-[#4f6478] bg-[#253341] text-[#c9def1]" : "border border-[#555] bg-[#1f1f1f] text-zinc-300"
+                    )}
+                  >
+                    Loop
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div
+            className={cn(
+              "rounded-xl border border-white/10 bg-gradient-to-br p-2",
+              previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+            )}
+          >
+            <div className="relative aspect-video overflow-hidden rounded-lg border border-white/10 bg-black/35">
+              {shouldPreferVideoPreview && effectivePreviewUrl ? (
+                <video
+                  src={effectivePreviewUrl}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  controls
+                  muted
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : sequenceLoading || (shouldRenderSequence && !activeSequenceFrameUrl && !sequenceError) ? (
+                <div className="grid h-full w-full place-items-center bg-black/35">
+                  <p className="px-3 text-center text-[10px] text-zinc-400">Loading sequence preview…</p>
+                </div>
+              ) : shouldRenderSequence && activeSequenceFrameUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={activeSequenceFrameUrl}
+                  alt={`${spec.title} frame ${clampedSequenceFrameIndex + 1}`}
+                  className={cn(
+                    "nodrag h-full w-full cursor-zoom-in",
+                    previewFit === "cover" ? "object-cover" : "object-contain"
+                  )}
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : effectivePreviewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={effectivePreviewUrl}
+                  alt={`${spec.title} output`}
+                  className={cn(
+                    "nodrag h-full w-full cursor-zoom-in",
+                    previewFit === "cover" ? "object-cover" : "object-contain"
+                  )}
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : (
+                <div className="grid h-full w-full place-items-center bg-black/35">
+                  <p className="px-3 text-center text-[10px] text-zinc-400">
+                    {sequenceError
+                      ? sequenceError
+                      : hasSequenceManifestArtifact
+                        ? "Sequence manifest loaded, but no frames are available."
+                        : "Connect an artifact to preview."}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {!shouldPreferVideoPreview && shouldRenderSequence && sequenceFrames.length > 0 ? (
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="nodrag inline-flex h-7 items-center gap-1 rounded-md border border-[#4f6478] bg-[#253341] px-2 text-[10px] font-medium text-[#c9def1] transition hover:bg-[#2b3d4e]"
+                    onClick={() => setSequencePlaying((current) => !current)}
+                    disabled={previewMode === "single" || sequenceFrames.length <= 1}
+                  >
+                    {sequencePlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+                    {sequencePlaying ? "Pause" : "Play"}
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag h-7 rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-zinc-300"
+                    onClick={() => {
+                      setSequencePlaying(false);
+                      setSequenceFrameIndex((current) => Math.max(0, current - 1));
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag h-7 rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-zinc-300"
+                    onClick={() => {
+                      setSequencePlaying(false);
+                      setSequenceFrameIndex((current) => Math.min(sequenceFrames.length - 1, current + 1));
+                    }}
+                  >
+                    Next
+                  </button>
+                  <span className="ml-auto text-[10px] text-zinc-400">
+                    Frame {clampedSequenceFrameIndex + 1}/{sequenceFrames.length}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, sequenceFrames.length - 1)}
+                  step={1}
+                  value={clampedSequenceFrameIndex}
+                  onChange={(event) => {
+                    setSequencePlaying(false);
+                    setSequenceFrameIndex(Number(event.target.value) || 0);
+                  }}
+                  className="nodrag w-full accent-sky-400"
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : isImageNode ? (
         <div
           className={cn(
@@ -745,7 +1227,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
           )}
           onDragOver={
-            isInputImageNode
+            isInputMediaNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -753,7 +1235,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               : undefined
           }
           onDrop={
-            isInputImageNode && !isImageGenerationNode
+            isInputMediaNode && !isImageGenerationNode && !isRuntimeLocked
               ? (event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -779,14 +1261,25 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             ) : data.status === "running" ? (
               <div className="h-full w-full animate-pulse bg-white/10" />
             ) : effectivePreviewUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={effectivePreviewUrl}
-                alt={`${spec.title} preview`}
-                className="nodrag h-full w-full cursor-zoom-in object-contain"
-                onDoubleClick={openPreviewModal}
-                title="Double-click to open full size"
-              />
+              isVideoPreview ? (
+                <video
+                  src={effectivePreviewUrl}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  controls
+                  muted
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={effectivePreviewUrl}
+                  alt={`${spec.title} preview`}
+                  className="nodrag h-full w-full cursor-zoom-in object-contain"
+                  onDoubleClick={openPreviewModal}
+                  title="Double-click to open full size"
+                />
+              )
             ) : (
               <div className="grid h-full w-full place-items-center bg-black/35">
                 <p className="px-3 text-center text-[10px] text-zinc-400">
@@ -794,17 +1287,25 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                     ? "Choose prompt and run to generate preview."
                     : isPreviewNode
                       ? "Connect an artifact to preview."
-                      : "Upload an image."}
+                      : isInputVideoNode
+                        ? "Upload an MP4 video."
+                        : "Upload an image."}
                 </p>
               </div>
             )}
-            {isInputImageNode && hasImagePreview && !isImageGenerationNode ? (
-              <label className="nodrag absolute bottom-2 right-2 inline-flex cursor-pointer items-center gap-1 rounded-full border border-white/25 bg-black/70 px-2 py-1 text-[10px] text-zinc-100 transition hover:border-white/40 hover:bg-black/85">
+            {isInputMediaNode && hasImagePreview && !isImageGenerationNode ? (
+              <label
+                className={cn(
+                  "nodrag absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full border border-white/25 bg-black/70 px-2 py-1 text-[10px] text-zinc-100 transition hover:border-white/40 hover:bg-black/85",
+                  isRuntimeLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                )}
+              >
                 <UploadCloud className="h-3.5 w-3.5" />
                 <span>Replace</span>
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={isInputVideoNode ? "video/mp4" : "image/png,image/jpeg,image/webp"}
+                  disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -825,16 +1326,17 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
                 ? `Output: ${effectiveArtifactKind}`
                 : spec.description}
           </p>
-          {isInputImageNode && !hasImagePreview && !isImageGenerationNode ? (
+          {isInputMediaNode && !hasImagePreview && !isImageGenerationNode ? (
             <div
-              className="nodrag mt-2 rounded-lg border border-dashed border-white/20 bg-black/20 p-2 text-center"
+              className={cn("nodrag mt-2 rounded-lg border border-dashed border-white/20 bg-black/20 p-2 text-center", isRuntimeLocked && "opacity-60")}
             >
-              <label className="nodrag inline-flex cursor-pointer items-center gap-1 text-[11px] text-zinc-200">
+              <label className={cn("nodrag inline-flex items-center gap-1 text-[11px] text-zinc-200", isRuntimeLocked ? "cursor-not-allowed" : "cursor-pointer")}>
                 <UploadCloud className="h-3.5 w-3.5" />
-                <span>Upload / Drop Image</span>
+                <span>{isInputVideoNode ? "Upload / Drop MP4" : "Upload / Drop Image"}</span>
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={isInputVideoNode ? "video/mp4" : "image/png,image/jpeg,image/webp"}
+                  disabled={isRuntimeLocked}
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -846,7 +1348,11 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               </label>
             </div>
           ) : null}
-          {isInputImageNode && hasImagePreview && !isImageGenerationNode ? <p className="mt-1 text-[10px] text-zinc-500">Drag and drop to replace image.</p> : null}
+          {isInputMediaNode && hasImagePreview && !isImageGenerationNode ? (
+            <p className="mt-1 text-[10px] text-zinc-500">
+              {isInputVideoNode ? "Drag and drop to replace video." : "Drag and drop to replace image."}
+            </p>
+          ) : null}
         </div>
       ) : isTextNode ? (
         <div className="mb-2 rounded-xl border border-white/10 bg-black/30 px-2.5 py-2 text-[11px] text-zinc-300">
@@ -866,17 +1372,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
               <div className="h-3 w-24 animate-pulse rounded bg-white/15" />
               <div className="h-3 w-32 animate-pulse rounded bg-white/10" />
             </div>
-          ) : isPreviewNode && effectivePreviewUrl ? (
-            <div className="overflow-hidden rounded-lg border border-white/10 bg-black/40">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={effectivePreviewUrl}
-                alt={`${spec.title} output`}
-                className="nodrag aspect-video h-full w-full cursor-zoom-in object-cover"
-                onDoubleClick={openPreviewModal}
-                title="Double-click to open full size"
-              />
-            </div>
           ) : effectiveArtifactKind ? (
             <div className="space-y-1">
               <p className="font-medium text-zinc-100">Output: {effectiveArtifactKind}</p>
@@ -889,15 +1384,23 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
       )}
 
       {outputVersionChoices.length > 0 ? (
-        <div className="nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2">
+        <div className={cn("nodrag mb-2 space-y-1.5 rounded-md border border-[#4a4a4a] bg-[#262626] p-2", isRuntimeLocked && "pointer-events-none opacity-60")}>
           <p className="text-[10px] uppercase tracking-[0.08em] text-zinc-400">Output Version</p>
           {outputVersionChoices.map((choice) => (
-            <div key={`${id}-${choice.portId}`} className="space-y-1">
-              <p className="text-[10px] text-zinc-400">{choice.portLabel}</p>
+            <div
+              key={`${id}-${choice.portId}`}
+              className={cn("space-y-1", !choice.available && "opacity-45")}
+              title={choice.unavailableReason ?? undefined}
+            >
+              <p className="text-[10px] text-zinc-400">
+                {choice.portLabel}
+                {!choice.available ? " (unavailable)" : ""}
+              </p>
               <select
-                className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none"
+                className="nodrag h-7 w-full rounded-md border border-[#555] bg-[#1f1f1f] px-2 text-[10px] text-[#d7d7d7] outline-none disabled:cursor-not-allowed"
                 value={choice.selectedValue}
                 onChange={(event) => data.onUpdateParam?.(id, choice.selectionKey, event.target.value)}
+                disabled={!choice.available}
               >
                 <option value="__latest__">Latest (auto)</option>
                 {choice.history.map((artifact) => (
@@ -915,6 +1418,7 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
         <button
           type="button"
           onClick={() => data.onRunNode?.(id)}
+          disabled={isRuntimeLocked}
           className="mb-2 inline-flex h-7 items-center gap-1 rounded-md border border-[#5f6f53] bg-[#2d3a2a] px-2 text-[10px] font-medium text-[#cfe3c1] transition hover:bg-[#34452f]"
         >
           <Play className="h-3 w-3" />
@@ -938,18 +1442,30 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
 
       {(isSam2Node ? spec.outputPorts.filter((port) => port.id === "config") : spec.outputPorts).map((port, idx) => {
         const top = 46 + idx * 20;
+        const availability = getOutputAvailability(port.id);
+        const isOutputDisabled = !availability.available;
         return (
-          <div key={`${port.id}-${idx}`}>
+          <div key={`${port.id}-${idx}`} title={availability.reason ?? undefined}>
             <Handle
               id={port.id}
               type="source"
               position={Position.Right}
-              style={{ top, width: 9, height: 9, background: "#66b6ff", border: "1px solid #141414", right: -4.5 }}
+              isConnectable={!isOutputDisabled}
+              style={{
+                top,
+                width: 9,
+                height: 9,
+                background: isOutputDisabled ? "#555" : "#66b6ff",
+                border: isOutputDisabled ? "1px solid #303030" : "1px solid #141414",
+                right: -4.5,
+                cursor: isOutputDisabled ? "not-allowed" : "crosshair"
+              }}
             />
             <span
               className={cn(
                 "pointer-events-none absolute -right-1 translate-x-full px-1 py-0.5 text-[10px] text-[#a9a9a9]",
-                port.hidden && "opacity-70"
+                port.hidden && "opacity-70",
+                isOutputDisabled && "text-zinc-600 line-through opacity-60"
               )}
               style={{ top: top - 8 }}
             >
@@ -973,9 +1489,22 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
             </DialogClose>
           </div>
           <div className="max-h-[82vh] overflow-auto rounded-lg border border-white/10 bg-black/50 p-1">
-            {effectivePreviewUrl ? (
+            {shouldPreferVideoPreview && effectivePreviewUrl ? (
+              <video src={effectivePreviewUrl} className="h-auto max-h-[80vh] w-full" controls />
+            ) : shouldRenderSequence && activeSequenceFrameUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              <img
+                src={activeSequenceFrameUrl}
+                alt={`${spec.title} frame ${clampedSequenceFrameIndex + 1}`}
+                className={cn("h-auto w-full", previewFit === "cover" ? "object-cover" : "object-contain")}
+              />
+            ) : effectivePreviewUrl ? (
+              isVideoPreview ? (
+                <video src={effectivePreviewUrl} className="h-auto max-h-[80vh] w-full" controls />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={effectivePreviewUrl} alt={`${spec.title} full preview`} className="h-auto w-full object-contain" />
+              )
             ) : null}
           </div>
         </DialogContent>
@@ -983,3 +1512,6 @@ export function WorkflowNode({ id, data, type, selected }: NodeProps<GraphNodeDa
     </div>
   );
 }
+
+export const WorkflowNode = memo(WorkflowNodeImpl);
+WorkflowNode.displayName = "WorkflowNode";

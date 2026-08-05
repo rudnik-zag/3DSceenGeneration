@@ -8,7 +8,7 @@ Full-stack workflow platform for AI/geometry pipelines:
 - 3D viewer (`/app/p/[projectId]/viewer?artifactId=...`)
 
 ## Stack
-- Next.js 14 (App Router) + TypeScript
+- Next.js 15 (App Router) + TypeScript
 - TailwindCSS + shadcn/ui
 - Framer Motion
 - React Flow
@@ -31,7 +31,7 @@ Full-stack workflow platform for AI/geometry pipelines:
   - `.splat/.spz/.compressed.ply/.ksplat` and GS kinds -> Spark GS (fallback to legacy runtime if Spark load fails)
 - Local file open in viewer (`.glb/.gltf/.ply/.splat/.spz/.ksplat`).
 - Project deletion now deletes DB rows and related storage objects under `projects/{projectId}/`.
-- Storage fallback when S3/MinIO is unreachable: uses `.local-storage/`.
+- Storage fallback for S3 transport outages only: uses `LOCAL_STORAGE_ROOT` (default `.local-storage/`). Authentication and configuration failures do not silently fall back.
 
 ## Key Paths
 - `app/` routes + APIs
@@ -190,9 +190,20 @@ Open:
 - MinIO console: `http://localhost:9001` (`minioadmin` / `minioadmin`)
 
 ## Alternative: Run Everything in Docker
+Set non-default secrets first; Compose intentionally refuses to start without them:
+```bash
+export AUTH_SECRET="$(openssl rand -hex 32)"
+export POSTGRES_PASSWORD="replace-with-a-strong-password"
+export MINIO_ROOT_USER="replace-with-a-non-default-user"
+export MINIO_ROOT_PASSWORD="replace-with-a-strong-password"
+```
+
 ```bash
 docker compose up --build
 ```
+
+The container runs the production server with no source bind mount. PostgreSQL, Redis, MinIO, and the app bind to localhost by default.
+Compose waits for PostgreSQL, runs `pnpm db:deploy`, then starts the app and worker.
 
 ## GroundingDINO Runtime (Optional but Supported)
 `model.groundingdino` is wired to call:
@@ -228,6 +239,9 @@ SAM2_ALLOW_MOCK_FALLBACK=true
 SAM2_USE_CONDA=true
 SAM2_CONDA_COMMAND=conda
 SAM2_CONDA_ENV=sam2
+GROUNDING_DINO_TIMEOUT_MS=300000
+SAM2_TIMEOUT_MS=600000
+SAM3D_TIMEOUT_MS=1800000
 ```
 - Real execution command builder uses:
   - `conda run -n sam2 python ...` by default
@@ -434,6 +448,7 @@ Check `.env` endpoint and protocol (`http` vs `https`) and that MinIO is running
 - `pnpm worker` start BullMQ worker
 - `pnpm db:generate` Prisma client
 - `pnpm db:migrate` run migrations
+- `pnpm db:deploy` apply committed migrations in production
 - `pnpm db:seed` seed demo data
 - `pnpm build` production build
 - `bash scripts/dev-stack.sh start` start infra + app + worker

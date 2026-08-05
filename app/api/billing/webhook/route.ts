@@ -9,7 +9,7 @@ import { env } from "@/lib/env";
 import { logAuditEvent } from "@/lib/security/audit";
 import { HttpError, toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { getRequestIp } from "@/lib/security/request";
+import { getRequestIp, readRequestText } from "@/lib/security/request";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -141,8 +141,7 @@ async function handleCheckoutSessionCompleted(event: StripeWebhookEventObject) {
       status: "active",
       billingProvider: "stripe",
       billingCustomerId: asString(session.customer),
-      billingSubscriptionId: asString(session.subscription),
-      resetMonthlyAllowance: true
+      billingSubscriptionId: asString(session.subscription)
     });
     await logAuditEvent({
       action: "subscription_change",
@@ -161,6 +160,7 @@ async function handleCheckoutSessionCompleted(event: StripeWebhookEventObject) {
       userId,
       tokenAmount: pack.tokens,
       description: `Token pack purchase (${pack.title})`,
+      idempotencyKey: `stripe:${event.id}:token-pack`,
       metadata: {
         stripeEventId: event.id,
         stripeSessionId: asString(session.id),
@@ -248,7 +248,8 @@ async function handleInvoicePaid(event: StripeWebhookEventObject) {
     billingSubscriptionId: subscriptionId,
     currentPeriodStart: asDateFromUnix(invoice.period_start),
     currentPeriodEnd: asDateFromUnix(invoice.period_end),
-    resetMonthlyAllowance: true
+    resetMonthlyAllowance: true,
+    idempotencyKey: `stripe:${event.id}:monthly-reset`
   });
   await logAuditEvent({
     action: "subscription_change",
@@ -288,7 +289,7 @@ export async function POST(req: NextRequest) {
       message: "Webhook rate limit exceeded"
     });
 
-    const payload = await req.text();
+    const payload = await readRequestText(req, 1024 * 1024);
     const signature = req.headers.get("stripe-signature");
     const isValid = verifyStripeWebhookSignature({
       payload,
@@ -318,6 +319,7 @@ export async function POST(req: NextRequest) {
             eventId,
             eventType: parsed.type,
             processed: false,
+            status: "pending",
             payload: parsed as unknown as Prisma.InputJsonValue
           }
         });
@@ -331,12 +333,36 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    const claim = await prisma.stripeWebhookEvent.updateMany({
+      where: {
+        eventId,
+        processed: false,
+        OR: [
+          { status: { in: ["pending", "failed"] } },
+          {
+            status: "processing",
+            updatedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) }
+          }
+        ]
+      },
+      data: {
+        status: "processing",
+        attempts: { increment: 1 },
+        lastError: null
+      }
+    });
+    if (claim.count === 0) {
+      return NextResponse.json({ received: true, duplicate: true });
+    }
+
     await processStripeEvent(parsed);
 
     await prisma.stripeWebhookEvent.update({
       where: { eventId },
       data: {
         processed: true,
+        status: "processed",
+        lastError: null,
         eventType: parsed.type,
         payload: parsed as unknown as Prisma.InputJsonValue
       }
@@ -350,6 +376,8 @@ export async function POST(req: NextRequest) {
           where: { eventId },
           data: {
             processed: false,
+            status: "failed",
+            lastError: error instanceof Error ? error.message : String(error),
             payload: {
               eventId,
               error: error instanceof Error ? error.message : String(error),

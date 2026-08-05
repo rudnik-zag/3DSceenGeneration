@@ -66,6 +66,7 @@ export function LandingPage({
   const [activeCategory, setActiveCategory] = useState("All");
   const [loadedCards, setLoadedCards] = useState<Record<string, true>>({});
   const [loadedProjectPreviews, setLoadedProjectPreviews] = useState<Record<string, true>>({});
+  const [brokenProjectPreviews, setBrokenProjectPreviews] = useState<Record<string, true>>({});
 
   const categories = useMemo(() => ["All", ...Array.from(new Set(galleryItems.map((item) => item.category)))], []);
   const filteredGallery = useMemo(
@@ -222,18 +223,22 @@ export function LandingPage({
                             className="group overflow-hidden rounded-xl border border-[#324371] bg-[#111d3f]/90 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#162650]"
                           >
                             <div className="relative h-24 border-b border-[#2e406c] bg-[#0c1631]">
-                              {project.previewStorageKey ? (
+                              {project.previewStorageKey && !brokenProjectPreviews[project.id] ? (
                                 <>
                                   {!loadedProjectPreviews[project.id] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
                                   <img
                                     src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
                                     alt={`${project.name} preview`}
                                     loading="lazy"
-                                    className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
-                                      loadedProjectPreviews[project.id] ? "opacity-100" : "opacity-0"
-                                    }`}
+                                    className="relative z-[1] h-full w-full object-cover motion-panel group-hover:scale-[1.03]"
                                     onLoad={() =>
                                       setLoadedProjectPreviews((current) => ({
+                                        ...current,
+                                        [project.id]: true
+                                      }))
+                                    }
+                                    onError={() =>
+                                      setBrokenProjectPreviews((current) => ({
                                         ...current,
                                         [project.id]: true
                                       }))
@@ -328,12 +333,18 @@ export function LandingPage({
                   className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#101a34]/85 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#152347]"
                 >
                   <div className="relative aspect-[4/3] overflow-hidden border-b border-[#2f3f68] bg-[#0d1733]">
-                    {project.previewStorageKey ? (
+                    {project.previewStorageKey && !brokenProjectPreviews[project.id] ? (
                       <img
                         src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
                         alt={`${project.name} preview`}
                         loading="lazy"
                         className="h-full w-full object-cover motion-panel group-hover:scale-[1.035]"
+                        onError={() =>
+                          setBrokenProjectPreviews((current) => ({
+                            ...current,
+                            [project.id]: true
+                          }))
+                        }
                       />
                     ) : (
                       <div className="h-full w-full bg-[linear-gradient(135deg,rgba(43,86,123,0.55),rgba(36,47,88,0.5),rgba(23,89,77,0.45))]" />
@@ -398,9 +409,7 @@ export function LandingPage({
                             [item.src]: true
                           }))
                         }
-                        className={`h-full w-full object-cover transition duration-300 ease-out group-hover:scale-[1.035] ${
-                          loadedCards[item.src] ? "opacity-100" : "opacity-0"
-                        }`}
+                        className="relative z-[1] h-full w-full object-cover transition duration-300 ease-out group-hover:scale-[1.035]"
                       />
                     </div>
                     <div className="flex items-center justify-between gap-2 border-t border-[#2f3f68] px-3 py-2.5">

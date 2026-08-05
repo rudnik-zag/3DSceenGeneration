@@ -135,9 +135,17 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
       if (!res.ok) {
         throw new Error("Failed to delete project");
       }
+      const data = await res.json().catch(() => null);
 
       setProjects((prev) => prev.filter((project) => project.id !== projectId));
-      toast({ title: "Project deleted", description: projectName });
+      if (data && data.storageCleanupOk === false) {
+        toast({
+          title: "Project deleted",
+          description: `${projectName} was removed from the database, but some storage files need manual cleanup.`
+        });
+      } else {
+        toast({ title: "Project deleted", description: projectName });
+      }
       router.refresh();
     } catch (error) {
       toast({ title: "Delete failed", description: error instanceof Error ? error.message : "Unknown error" });
@@ -328,9 +336,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                           <img
                             src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
                             alt={`${project.name} preview`}
-                            className={`h-full w-full object-cover motion-panel group-hover:scale-[1.03] ${
-                              loadedPreviewIds[project.id] ? "opacity-100" : "opacity-0"
-                            }`}
+                            className="relative z-[1] h-full w-full object-cover motion-panel group-hover:scale-[1.03]"
                             loading="lazy"
                             onLoad={() =>
                               setLoadedPreviewIds((prev) =>

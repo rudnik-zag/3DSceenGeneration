@@ -22,7 +22,6 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
 import { extractArtifactExtension, inferDisplayFileType } from "@/lib/viewer/renderer-switch";
 
 interface ViewerArtifact {
@@ -309,7 +308,7 @@ export function BabylonSplatViewer({ artifact }: { artifact: ViewerArtifact }) {
       engineRef.current = null;
       cameraRef.current = null;
     };
-  }, [artifact.id, artifact.url, extension]);
+  }, [artifact.id, artifact.url, extension, invertY]);
 
   const resetCamera = () => {
     const camera = cameraRef.current;

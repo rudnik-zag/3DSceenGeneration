@@ -1,0 +1,6 @@
+.next/
+node_modules/
+models/
+public/
+test_data/
+tsconfig.tsbuildinfo

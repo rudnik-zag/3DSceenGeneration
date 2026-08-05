@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireProjectAccess } from "@/lib/auth/access";
-import { createRunWithTokenReservation } from "@/lib/billing/usage";
+import { createRunWithTokenReservation, finalizeRunUsage } from "@/lib/billing/usage";
 import { prisma } from "@/lib/db";
 import { env } from "@/lib/env";
 import { recordRunEvent } from "@/lib/execution/telemetry";
@@ -10,18 +10,24 @@ import { reserveNextRunNumber } from "@/lib/runs/numbering";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { runCreatePayloadSchema } from "@/lib/validation/schemas";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
     const { projectId } = await params;
     await requireProjectAccess(projectId, "viewer");
-    const runs = await prisma.run.findMany({
+    const requestedLimit = Number(req.nextUrl.searchParams.get("limit") ?? 50);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50));
+    const cursor = req.nextUrl.searchParams.get("cursor")?.trim() || null;
+    const rows = await prisma.run.findMany({
       where: { projectId },
       orderBy: [{ runNumber: "desc" }, { createdAt: "desc" }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       include: {
         creator: {
           select: {
@@ -42,8 +48,10 @@ export async function GET(
         }
       }
     });
+    const hasMore = rows.length > limit;
+    const runs = hasMore ? rows.slice(0, limit) : rows;
 
-    return NextResponse.json({ runs });
+    return NextResponse.json({ runs, nextCursor: hasMore ? runs.at(-1)?.id ?? null : null });
   } catch (error) {
     return toApiErrorResponse(error, "Failed to list runs");
   }
@@ -64,7 +72,7 @@ export async function POST(
       message: "Run creation rate limit exceeded"
     });
 
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 64 * 1024);
     const parsed = runCreatePayloadSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
@@ -136,18 +144,34 @@ export async function POST(
       queueOptions.priority = reservation.queuePriority;
     }
 
-    await runWorkflowQueue.add(
-      "run",
-      {
-        projectId,
-        graphId,
-        runId: run.id,
-        startNodeId
-      },
-      {
-        ...queueOptions
+    try {
+      await runWorkflowQueue.add(
+        "run",
+        {
+          projectId,
+          graphId,
+          runId: run.id,
+          startNodeId
+        },
+        {
+          ...queueOptions
+        }
+      );
+    } catch (queueError) {
+      const message = queueError instanceof Error ? queueError.message : "Queue unavailable";
+      await prisma.run.update({
+        where: { id: run.id },
+        data: {
+          status: "error",
+          finishedAt: new Date(),
+          logs: `${run.logs}\n[${new Date().toISOString()}] Queue failed: ${message}`
+        }
+      });
+      if (reservation) {
+        await finalizeRunUsage({ runId: run.id, status: "error" });
       }
-    );
+      throw queueError;
+    }
 
     await recordRunEvent({
       runId: run.id,

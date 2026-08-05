@@ -13,6 +13,7 @@ export default async function RunsPage({
   const runs = await prisma.run.findMany({
     where: { projectId },
     orderBy: { createdAt: "desc" },
+    take: 50,
     include: {
       creator: {
         select: {

@@ -321,8 +321,8 @@ export function fitPlaneRANSAC(
 
   for (let iter = 0; iter < iterations; iter += 1) {
     const i0 = Math.floor(Math.random() * points.length);
-    let i1 = Math.floor(Math.random() * points.length);
-    let i2 = Math.floor(Math.random() * points.length);
+    const i1 = Math.floor(Math.random() * points.length);
+    const i2 = Math.floor(Math.random() * points.length);
     if (i0 === i1 || i0 === i2 || i1 === i2) {
       iter -= 1;
       continue;
@@ -400,7 +400,7 @@ export function applySceneAlignment(
     .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z));
   let nextWorld = currentWorld.clone().premultiply(rotateAroundPivot);
 
-  let translation = new THREE.Vector3(0, 0, 0);
+  const translation = new THREE.Vector3(0, 0, 0);
   if (translateToGround && supportPointsWorld.length > 0) {
     let minHeight = Number.POSITIVE_INFINITY;
     const transformedPoint = new THREE.Vector3();

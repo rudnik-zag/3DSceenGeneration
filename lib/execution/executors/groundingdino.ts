@@ -1,9 +1,9 @@
-import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult } from "@/lib/execution/contracts";
+import { runManagedProcess } from "@/lib/execution/process";
 
 function hashBuffer(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
@@ -44,39 +44,21 @@ function getLocalStorageRoot() {
   return process.env.LOCAL_STORAGE_ROOT || path.join(process.cwd(), ".local-storage");
 }
 
-async function runProcess(command: string, args: string[], cwd: string, envOverrides?: Record<string, string>) {
-  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      env: {
-        ...process.env,
-        ...(envOverrides ?? {})
-      }
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(
-          new Error(
-            `GroundingDINO process failed (exit=${code})\n` +
-              `cmd: ${command} ${args.join(" ")}\n` +
-              `stderr: ${stderr.slice(-5000)}`
-          )
-        );
-      }
-    });
+async function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  envOverrides?: Record<string, string>,
+  isCancellationRequested?: () => Promise<boolean>
+) {
+  return runManagedProcess({
+    command,
+    args,
+    cwd,
+    env: { ...process.env, ...(envOverrides ?? {}) },
+    label: "GroundingDINO process",
+    timeoutMs: Number(process.env.GROUNDING_DINO_TIMEOUT_MS ?? 300_000),
+    isCancellationRequested
   });
 }
 
@@ -323,7 +305,7 @@ export async function executeGroundingDinoNode(ctx: NodeExecutionContext): Promi
 
   let processResult: { stdout: string; stderr: string };
   try {
-    processResult = await runProcess(command, args, modelRoot, envOverrides);
+    processResult = await runProcess(command, args, modelRoot, envOverrides, ctx.isCancellationRequested);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("ReadTimeout") || message.includes("httpx.ReadTimeout")) {

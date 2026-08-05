@@ -66,6 +66,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
 import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib/graph/connection-rules";
+import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
   mergeNodeParamsWithDefaults,
@@ -74,7 +75,7 @@ import {
 } from "@/lib/graph/node-specs";
 import { applySceneGenerationPreset } from "@/lib/graph/scene-generation-presets";
 import { workflowPresets } from "@/lib/graph/workflow-presets";
-import { GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
+import { ArtifactType, GraphDocument, GraphNodeData, NodeUiScale, WorkflowNodeType } from "@/types/workflow";
 
 interface GraphVersion {
   id: string;
@@ -88,6 +89,8 @@ interface NodeArtifact {
   id: string;
   nodeId: string;
   kind: string;
+  mimeType?: string | null;
+  artifactType?: string | null;
   outputKey?: string;
   hidden?: boolean;
   url?: string | null;
@@ -95,6 +98,44 @@ interface NodeArtifact {
   meta?: Record<string, unknown> | null;
   createdAt?: string;
 }
+
+interface RunArtifactPayload {
+  nodeId: string;
+  id: string;
+  kind: string;
+  mimeType?: string | null;
+  artifactType?: string | null;
+  outputKey?: string;
+  hidden?: boolean;
+  previewUrl?: string | null;
+  url?: string | null;
+  createdAt?: string;
+  meta?: Record<string, unknown> | null;
+}
+
+interface RunStepPayload {
+  nodeId?: string | null;
+  status?: string | null;
+  sequence?: number | null;
+}
+
+interface RunEventPayload {
+  eventType?: string | null;
+  nodeId?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+interface RunPayload {
+  id: string;
+  status: string;
+  progress?: number | null;
+  logs?: string | null;
+  artifacts?: RunArtifactPayload[];
+  steps?: RunStepPayload[];
+  events?: RunEventPayload[];
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 
 interface CanvasEditorProps {
   projectId: string;
@@ -216,8 +257,9 @@ interface ClipboardSnapshot {
   };
 }
 
-const nodeTypes = {
+const NODE_TYPES = Object.freeze({
   "input.image": WorkflowNode,
+  "input.video": WorkflowNode,
   "input.text": WorkflowNode,
   "input.cameraPath": WorkflowNode,
   "viewer.environment": WorkflowNode,
@@ -235,11 +277,11 @@ const nodeTypes = {
   "geo.bake_textures": WorkflowNode,
   "out.export_scene": WorkflowNode,
   "out.open_in_viewer": WorkflowNode
-};
+});
 
-const edgeTypes = {
+const EDGE_TYPES = Object.freeze({
   flowing: FlowingEdge
-};
+});
 
 const defaultEdgeOptions = {
   type: "flowing",
@@ -254,6 +296,7 @@ const miniMapStyle = { background: "rgba(26,26,26,0.96)" };
 const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "input.text": "T",
   "input.image": "I",
+  "input.video": "Y",
   "input.cameraPath": "C",
   "viewer.environment": "H",
   "model.groundingdino": "G",
@@ -273,10 +316,11 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
 };
 
 const preferredCategoryOrder = ["Inputs", "Models", "Geometry", "Outputs"] as const;
-const MAX_IMAGE_GENERATION_SEED = 2_147_483_646;
+const MAX_RANDOM_IMAGE_GENERATION_SEED = 2_147_483_646;
+const MAX_IMAGE_GENERATION_SEED = Number.MAX_SAFE_INTEGER;
 
 function createRandomImageGenerationSeed() {
-  return Math.floor(Math.random() * (MAX_IMAGE_GENERATION_SEED + 1));
+  return Math.floor(Math.random() * (MAX_RANDOM_IMAGE_GENERATION_SEED + 1));
 }
 
 const inputImageGeneratorModelPresets: Record<string, Record<string, string | number | boolean>> = {
@@ -335,13 +379,22 @@ function parseTemplateNodeId(artifact: NodeArtifact) {
 }
 
 function mapArtifactView(artifact: NodeArtifact): OutputArtifactView {
+  const artifactType =
+    typeof artifact.artifactType === "string"
+      ? artifact.artifactType
+      : artifact.meta && typeof artifact.meta.artifactType === "string"
+        ? artifact.meta.artifactType
+        : null;
   return {
     id: artifact.id,
     kind: artifact.kind,
+    mimeType: artifact.mimeType ?? null,
+    artifactType: artifactType as OutputArtifactView["artifactType"],
     hidden: Boolean(artifact.hidden),
     url: artifact.url ?? null,
     previewUrl: artifact.previewUrl ?? null,
-    createdAt: artifact.createdAt
+    createdAt: artifact.createdAt,
+    meta: artifact.meta ?? null
   };
 }
 
@@ -382,6 +435,37 @@ function resolveSelectedOutputArtifacts(
       : entries[0];
   }
   return selected;
+}
+
+function isVideoArtifactView(artifact: OutputArtifactView | undefined | null) {
+  return (
+    artifact?.mimeType === "video/mp4" ||
+    artifact?.artifactType === "Video" ||
+    artifact?.meta?.semantic === "depth_video"
+  );
+}
+
+function pickPreviewArtifact(
+  outputArtifacts: Record<string, OutputArtifactView | undefined>,
+  spec: (typeof nodeSpecRegistry)[WorkflowNodeType]
+) {
+  const previewOutputIds = spec.ui?.previewOutputIds ?? [];
+  const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
+  return (
+    previewOutputIds
+      .map((key) => outputArtifacts[key])
+      .find((artifact) => Boolean(artifact?.id)) ??
+    Object.values(outputArtifacts).find((artifact) => isVideoArtifactView(artifact)) ??
+    Object.entries(outputArtifacts)
+      .filter(([key, artifact]) => artifact && !artifact.hidden && !hiddenOutputIds.has(key))
+      .sort((a, b) => new Date(b[1]?.createdAt ?? 0).getTime() - new Date(a[1]?.createdAt ?? 0).getTime())[0]?.[1] ??
+    Object.values(outputArtifacts)[0]
+  );
+}
+
+function isSourceOutputAvailable(node: Node<GraphNodeData>, outputId: string | null | undefined) {
+  if ((node.type as WorkflowNodeType) !== "geo.depth_estimation" || !outputId) return true;
+  return getDepthEstimationOutputAvailability(node.data.params ?? {}, node.data.outputArtifacts, outputId).available;
 }
 
 function createWorkflowId(prefix: string) {
@@ -524,9 +608,17 @@ function mergeOutputArtifactHistory(
 }
 
 function toScenePreviewStage(label: string, artifact: NodeArtifact): ScenePreviewStageView {
+  const artifactType =
+    typeof artifact.artifactType === "string"
+      ? artifact.artifactType
+      : artifact.meta && typeof artifact.meta.artifactType === "string"
+        ? artifact.meta.artifactType
+        : null;
   return {
     id: artifact.id,
     kind: artifact.kind,
+    mimeType: artifact.mimeType ?? null,
+    artifactType: artifactType as ArtifactType | null,
     label,
     hidden: Boolean(artifact.hidden),
     outputKey: artifact.outputKey ?? "default",
@@ -595,16 +687,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
   const outputArtifactHistory = buildOutputArtifactHistory(matched);
   const outputArtifacts = resolveSelectedOutputArtifacts(outputArtifactHistory, mergedParams);
 
-  const previewOutputIds = spec.ui?.previewOutputIds ?? [];
-  const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-  const previewArtifact =
-    previewOutputIds
-      .map((key) => outputArtifacts[key])
-      .find((artifact) => Boolean(artifact?.id)) ??
-    Object.entries(outputArtifacts)
-      .filter(([key, artifact]) => !artifact.hidden && !hiddenOutputIds.has(key))
-      .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-    Object.values(outputArtifacts)[0];
+  const previewArtifact = pickPreviewArtifact(outputArtifacts, spec);
   const scenePreviewStages =
     nodeType === "pipeline.scene_generation"
       ? buildSceneGenerationPreviewStages(base.id, artifacts)
@@ -628,7 +711,7 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
         ? runtimeMetaCandidate.warning
         : null;
   const inputNodeStorageKey =
-    nodeType === "input.image" && typeof mergedParams.storageKey === "string"
+    (nodeType === "input.image" || nodeType === "input.video") && typeof mergedParams.storageKey === "string"
       ? mergedParams.storageKey.trim()
       : "";
   const inputNodePreviewUrl = inputNodeStorageKey
@@ -644,14 +727,20 @@ function buildNodeData(base: Node<GraphNodeData>, artifacts: NodeArtifact[]) {
       ...base.data,
       label: typeof base.data.label === "string" && base.data.label.trim().length > 0 ? base.data.label : spec.title,
       params: mergedParams,
-      status: base.data.status ?? "idle",
+      status: "idle",
+      isLockedByRun: false,
+      runProgress: 0,
       latestArtifactId: resolvedPreviewArtifact?.id,
       latestArtifactKind: resolvedPreviewArtifact?.kind,
+      latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? null,
+      latestArtifactType: resolvedPreviewArtifact?.artifactType ?? null,
       previewUrl:
         resolvedPreviewArtifact?.previewUrl ??
         resolvedPreviewArtifact?.url ??
         inputNodePreviewUrl ??
-        (nodeType === "input.image" && typeof base.data.previewUrl === "string" ? base.data.previewUrl : null),
+        ((nodeType === "input.image" || nodeType === "input.video") && typeof base.data.previewUrl === "string"
+          ? base.data.previewUrl
+          : null),
       outputArtifacts,
       outputArtifactHistory: Object.keys(outputArtifactHistory).length > 0 ? outputArtifactHistory : undefined,
       scenePreviewStages: scenePreviewStages ?? undefined,
@@ -674,6 +763,67 @@ function withStyledEdge(edge: Edge): Edge {
       ...(edge.style ?? {})
     }
   };
+}
+
+function normalizeRuntimeNodeId(raw: unknown) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const [topLevelNodeId] = trimmed.split("::");
+  return topLevelNodeId?.trim() || null;
+}
+
+function readQueuedStartNodeId(run: RunPayload) {
+  const events = Array.isArray(run.events) ? run.events : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const metadata = event?.metadata;
+    const metadataStartNodeId =
+      metadata && typeof metadata.startNodeId === "string" ? normalizeRuntimeNodeId(metadata.startNodeId) : null;
+    if (metadataStartNodeId) return metadataStartNodeId;
+    const eventNodeId = normalizeRuntimeNodeId(event?.nodeId);
+    if (eventNodeId) return eventNodeId;
+  }
+  return null;
+}
+
+function deriveRunTargetNodeId(run: RunPayload) {
+  const steps = Array.isArray(run.steps) ? [...run.steps] : [];
+  const runningStepNodeId =
+    steps
+      .filter((step) => step?.status === "running" || step?.status === "queued")
+      .sort((left, right) => Number(right?.sequence ?? 0) - Number(left?.sequence ?? 0))
+      .map((step) => normalizeRuntimeNodeId(step?.nodeId))
+      .find(Boolean) ?? null;
+  if (runningStepNodeId) return runningStepNodeId;
+
+  const latestStepNodeId =
+    steps
+      .sort((left, right) => Number(right?.sequence ?? 0) - Number(left?.sequence ?? 0))
+      .map((step) => normalizeRuntimeNodeId(step?.nodeId))
+      .find(Boolean) ?? null;
+  if (latestStepNodeId) return latestStepNodeId;
+
+  return readQueuedStartNodeId(run);
+}
+
+function deriveLockedNodeIdsFromRun(run: RunPayload, fallbackTargetNodeId: string | null) {
+  const activeNodeIds = new Set<string>();
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+
+  for (const step of steps) {
+    if (step?.status !== "running" && step?.status !== "queued") continue;
+    const nodeId = normalizeRuntimeNodeId(step.nodeId);
+    if (nodeId) activeNodeIds.add(nodeId);
+  }
+
+  if (activeNodeIds.size > 0) return activeNodeIds;
+
+  if (ACTIVE_RUN_STATUSES.has(run.status) && fallbackTargetNodeId) {
+    activeNodeIds.add(fallbackTargetNodeId);
+  }
+
+  return activeNodeIds;
 }
 
 async function readApiErrorMessage(response: Response, fallback: string) {
@@ -747,6 +897,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const [showMiniMap, setShowMiniMap] = useState(true);
   const [editingWorkflowGroupId, setEditingWorkflowGroupId] = useState<string | null>(null);
   const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const restoredActiveRunRef = useRef(false);
   const runNodeRef = useRef<(nodeId: string) => void>(() => {});
   const uploadNodeRef = useRef<(nodeId: string, file: File) => void>(() => {});
   const updateNodeParamRef = useRef<(nodeId: string, key: string, value: string | number | boolean) => void>(() => {});
@@ -768,6 +920,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const draftStorageKey = useMemo(() => `tribalai.canvas.draft.${projectId}`, [projectId]);
 
   const selectedNode = useMemo(() => nodes.find((n) => n.selected), [nodes]);
+  const selectedNodeLocked = Boolean(selectedNode?.data.isLockedByRun || selectedNode?.data.status === "running");
   const hasNodeSelection = useMemo(() => nodes.some((n) => n.selected), [nodes]);
   const hasEdgeSelection = useMemo(() => edges.some((edge) => edge.selected), [edges]);
   const selectedNodeIds = useMemo(() => nodes.filter((node) => node.selected).map((node) => node.id), [nodes]);
@@ -812,6 +965,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     if (!query) return flatNodeSpecs;
     return flatNodeSpecs.filter((spec) => spec.title.toLowerCase().includes(query) || spec.type.toLowerCase().includes(query));
   }, [flatNodeSpecs, nodeSearchMenu?.query]);
+  useEffect(() => {
+    activeRunIdRef.current = activeRunId;
+  }, [activeRunId]);
   const canNodeRun = useCallback((node: Node<GraphNodeData> | undefined) => {
     if (!node) return false;
     const nodeType = node.type as WorkflowNodeType;
@@ -832,10 +988,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         {
           id: string;
           kind: string;
+          mimeType: string | null;
+          artifactType: ArtifactType | null;
           previewUrl: string | null;
           url: string | null;
           hidden?: boolean;
           createdAt?: string;
+          meta?: Record<string, unknown> | null;
         }
       >();
 
@@ -858,30 +1017,68 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           if (!sourceNode) continue;
           const sourceType = sourceNode.type as WorkflowNodeType;
           const sourceSpec = nodeSpecRegistry[sourceType];
-          const sourceOutputHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+          const explicitSourceOutputHandle = edge.sourceHandle ?? null;
+          const sourceOutputHandle = explicitSourceOutputHandle ?? sourceSpec.outputPorts[0]?.id;
+          if (!isSourceOutputAvailable(sourceNode, sourceOutputHandle)) continue;
+          const sourceOutputArtifacts = sourceNode.data.outputArtifacts ?? {};
           const sourcePortArtifact = sourceOutputHandle
-            ? sourceNode.data.outputArtifacts?.[sourceOutputHandle]
+            ? sourceOutputArtifacts[sourceOutputHandle]
             : undefined;
+          const prefersSequence = targetNode.data.params?.previewMode === "sequence";
+          const preferredPreviewArtifact = pickPreviewArtifact(sourceOutputArtifacts, sourceSpec);
+          const depthVideoArtifact = sourceOutputArtifacts.depthVideo;
+          const sourcePortIsSequence =
+            sourceOutputHandle === "sequence" ||
+            sourcePortArtifact?.meta?.outputKey === "sequence" ||
+            sourcePortArtifact?.meta?.semantic === "image_sequence";
+          const sourcePortIsDepthPreview =
+            sourceType === "geo.depth_estimation" &&
+            (explicitSourceOutputHandle === null ||
+              sourceOutputHandle === "depth" ||
+              sourcePortArtifact?.meta?.semantic === "depth" ||
+              sourcePortIsSequence);
+          const videoSiblingArtifact =
+            !prefersSequence && isVideoArtifactView(depthVideoArtifact) && sourcePortIsDepthPreview
+              ? depthVideoArtifact
+              : !prefersSequence && sourcePortIsSequence && isVideoArtifactView(depthVideoArtifact)
+                ? depthVideoArtifact
+                : !prefersSequence && explicitSourceOutputHandle === null && isVideoArtifactView(preferredPreviewArtifact)
+                  ? preferredPreviewArtifact
+                  : undefined;
+          const handlelessPreferredArtifact =
+            !videoSiblingArtifact && explicitSourceOutputHandle === null && preferredPreviewArtifact?.id
+              ? preferredPreviewArtifact
+              : undefined;
           const fallbackArtifact =
-            !sourcePortArtifact && sourceNode.data.latestArtifactId && sourceNode.data.latestArtifactKind
+            !videoSiblingArtifact &&
+            !handlelessPreferredArtifact &&
+            !sourcePortArtifact &&
+            sourceNode.data.latestArtifactId &&
+            sourceNode.data.latestArtifactKind
               ? {
                   id: sourceNode.data.latestArtifactId,
                   kind: sourceNode.data.latestArtifactKind,
+                  mimeType: sourceNode.data.latestArtifactMimeType ?? null,
+                  artifactType: sourceNode.data.latestArtifactType ?? null,
                   previewUrl: sourceNode.data.previewUrl ?? null,
                   url: sourceNode.data.previewUrl ?? null,
                   hidden: false,
-                  createdAt: sourceNode.data.lastRunAt
+                  createdAt: sourceNode.data.lastRunAt,
+                  meta: null
                 }
               : undefined;
-          const resolved = sourcePortArtifact ?? fallbackArtifact;
+          const resolved = videoSiblingArtifact ?? handlelessPreferredArtifact ?? sourcePortArtifact ?? fallbackArtifact;
           if (!resolved?.id) continue;
           previewArtifactByNode.set(edge.target, {
             id: resolved.id,
             kind: resolved.kind,
+            mimeType: resolved.mimeType ?? null,
+            artifactType: resolved.artifactType ?? null,
             previewUrl: resolved.previewUrl ?? null,
             url: resolved.url ?? null,
             hidden: resolved.hidden,
-            createdAt: resolved.createdAt
+            createdAt: resolved.createdAt,
+            meta: resolved.meta ?? null
           });
         }
       }
@@ -912,16 +1109,21 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const previewArtifact = previewArtifactByNode.get(node.id);
           const nextLatestArtifactId = previewArtifact?.id;
           const nextLatestArtifactKind = previewArtifact?.kind;
+          const nextLatestArtifactMimeType = previewArtifact?.mimeType;
+          const nextLatestArtifactType = previewArtifact?.artifactType;
           const nextPreviewUrl = previewArtifact?.previewUrl ?? previewArtifact?.url ?? null;
           const nextOutputArtifacts = previewArtifact
             ? ({
                 artifact: {
                   id: previewArtifact.id,
                   kind: previewArtifact.kind,
+                  mimeType: previewArtifact.mimeType ?? null,
+                  artifactType: previewArtifact.artifactType ?? null,
                   hidden: Boolean(previewArtifact.hidden),
                   url: previewArtifact.url,
                   previewUrl: previewArtifact.previewUrl,
-                  createdAt: previewArtifact.createdAt
+                  createdAt: previewArtifact.createdAt,
+                  meta: previewArtifact.meta ?? null
                 }
               } as NonNullable<GraphNodeData["outputArtifacts"]>)
             : undefined;
@@ -930,13 +1132,18 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const outputArtifactsUnchanged = previewArtifact
             ? currentArtifactEntry?.id === previewArtifact.id &&
               currentArtifactEntry?.kind === previewArtifact.kind &&
+              (currentArtifactEntry?.mimeType ?? null) === (previewArtifact.mimeType ?? null) &&
+              (currentArtifactEntry?.artifactType ?? null) === (previewArtifact.artifactType ?? null) &&
               (currentArtifactEntry?.previewUrl ?? null) === (previewArtifact.previewUrl ?? null) &&
-              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null)
+              (currentArtifactEntry?.url ?? null) === (previewArtifact.url ?? null) &&
+              JSON.stringify(currentArtifactEntry?.meta ?? null) === JSON.stringify(previewArtifact.meta ?? null)
             : !node.data.outputArtifacts || Object.keys(node.data.outputArtifacts).length === 0;
 
           if (
             (node.data.latestArtifactId ?? undefined) === nextLatestArtifactId &&
             (node.data.latestArtifactKind ?? undefined) === nextLatestArtifactKind &&
+            (node.data.latestArtifactMimeType ?? undefined) === nextLatestArtifactMimeType &&
+            (node.data.latestArtifactType ?? undefined) === nextLatestArtifactType &&
             (node.data.previewUrl ?? null) === nextPreviewUrl &&
             outputArtifactsUnchanged
           ) {
@@ -950,6 +1157,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               ...node.data,
               latestArtifactId: nextLatestArtifactId,
               latestArtifactKind: nextLatestArtifactKind,
+              latestArtifactMimeType: nextLatestArtifactMimeType,
+              latestArtifactType: nextLatestArtifactType,
               previewUrl: nextPreviewUrl,
               outputArtifacts: nextOutputArtifacts
             }
@@ -1020,14 +1229,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     }
   }, [paneMenu]);
 
+  const nodeSearchMenuX = nodeSearchMenu?.x;
+  const nodeSearchMenuY = nodeSearchMenu?.y;
   useEffect(() => {
-    if (!nodeSearchMenu) return;
+    if (nodeSearchMenuX === undefined || nodeSearchMenuY === undefined) return;
     const handle = window.setTimeout(() => {
       nodeSearchInputRef.current?.focus();
       nodeSearchInputRef.current?.select();
     }, 0);
     return () => window.clearTimeout(handle);
-  }, [nodeSearchMenu?.x, nodeSearchMenu?.y]);
+  }, [nodeSearchMenuX, nodeSearchMenuY]);
 
   useEffect(() => {
     if (!nodeSearchMenu) return;
@@ -1138,7 +1349,10 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       return;
     }
 
-    if (selectedNode?.data.previewUrl && selectedNode.data.latestArtifactKind !== "json") {
+    if (
+      selectedNode?.data.previewUrl &&
+      (selectedNode.type === "input.video" || selectedNode.data.latestArtifactKind !== "json")
+    ) {
       setSelectedArtifactPreview({ previewUrl: selectedNode.data.previewUrl, jsonSnippet: null });
       return;
     }
@@ -1190,10 +1404,24 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         sourceHandleId: connection.sourceHandle,
         targetHandleId: connection.targetHandle
       });
-      return result.valid;
+      return result.valid && isSourceOutputAvailable(sourceNode, result.sourceHandleId);
     },
     [nodes]
   );
+
+  useEffect(() => {
+    setEdges((currentEdges) => {
+      const nextEdges = currentEdges.filter((edge) => {
+        const sourceNode = nodeById.get(edge.source);
+        if (!sourceNode) return true;
+        const sourceType = sourceNode.type as WorkflowNodeType;
+        const sourceSpec = nodeSpecRegistry[sourceType];
+        const sourceHandle = edge.sourceHandle ?? sourceSpec.outputPorts[0]?.id;
+        return isSourceOutputAvailable(sourceNode, sourceHandle);
+      });
+      return nextEdges.length === currentEdges.length ? currentEdges : nextEdges;
+    });
+  }, [nodeById, setEdges]);
 
   const onConnect = useCallback<OnConnect>(
     (params) => {
@@ -1307,6 +1535,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           label: options?.label?.trim() || spec.title,
           params: options?.params ? mergeNodeParamsWithDefaults(nodeType, options.params) : { ...spec.defaultParams },
           status: "idle",
+          isLockedByRun: false,
           uiScale: options?.uiScale ?? nodeScalePreset,
           onRunNode: (currentNodeId: string) => runNodeRef.current(currentNodeId),
           onUploadImage: (currentNodeId: string, file: File) => uploadNodeRef.current(currentNodeId, file),
@@ -1692,7 +1921,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       targetHandleId: port.id
                     })
                   )
-                  .find((result) => result.valid)
+                  .find((result) => result.valid && isSourceOutputAvailable(pendingNode, result.sourceHandleId))
               : findFirstCompatibleHandles(pendingSourceType, nodeType);
 
           if (compatible) {
@@ -1723,7 +1952,19 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       targetHandleId: targetHandle
                     })
                   )
-                  .find((result) => result.valid)
+                  .find((result) => {
+                    if (!result.valid) return false;
+                    const nextNode = {
+                      id: newNodeId,
+                      type: nodeType,
+                      position: { x: paneMenu.flowX, y: paneMenu.flowY },
+                      data: {
+                        label: nodeSpecRegistry[nodeType].title,
+                        params: nodeSpecRegistry[nodeType].defaultParams
+                      }
+                    } as Node<GraphNodeData>;
+                    return isSourceOutputAvailable(nextNode, result.sourceHandleId);
+                  })
               : findFirstCompatibleHandles(nodeType, pendingTargetType);
 
           if (compatible) {
@@ -2226,7 +2467,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     setActiveWorkflowGroupId(null);
     setEditingWorkflowGroupId(null);
     toast({ title: "Workflow deleted", description: activeWorkflowTemplate.name });
-  }, [activeWorkflowTemplate, workflowGroups]);
+  }, [activeWorkflowTemplate, setEdges, setNodes, workflowGroups]);
 
   const instantiateWorkflowTemplate = useCallback(
     (templateId: string) => {
@@ -2299,7 +2540,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setActiveWorkflowGroupId(group.id);
       toast({ title: "Workflow placed", description: `${template.name} added to canvas.` });
     },
-    [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, workflowTemplates]
+    [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes, workflowTemplates]
   );
 
   const addNodeMenuItems = useMemo<CascadingMenuEntry[]>(() => {
@@ -2445,6 +2686,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setNodes((prev) =>
         prev.map((node) => {
           if (node.id !== nodeId) return node;
+          if (node.data.isLockedByRun || node.data.status === "running") return node;
           const nodeType = node.type as WorkflowNodeType;
           const spec = nodeSpecRegistry[nodeType];
           const nextParams = {
@@ -2475,16 +2717,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               const outputArtifacts = node.data.outputArtifactHistory
                 ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, applied)
                 : node.data.outputArtifacts;
-              const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-              const previewArtifact =
-                (spec.ui?.previewOutputIds ?? [])
-                  .map((outputId) => outputArtifacts?.[outputId])
-                  .find((artifact) => Boolean(artifact?.id)) ??
-                Object.entries(outputArtifacts ?? {})
-                  .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
-                  .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-                Object.values(outputArtifacts ?? {})[0] ??
-                null;
+              const previewArtifact = outputArtifacts ? pickPreviewArtifact(outputArtifacts, spec) : null;
               return {
                 ...node,
                 data: {
@@ -2493,6 +2726,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
                   latestArtifactId: previewArtifact?.id ?? node.data.latestArtifactId,
                   latestArtifactKind: previewArtifact?.kind ?? node.data.latestArtifactKind,
+                  latestArtifactMimeType: previewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+                  latestArtifactType: previewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
                   previewUrl: previewArtifact?.previewUrl ?? previewArtifact?.url ?? node.data.previewUrl ?? null
                 }
               };
@@ -2506,16 +2741,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           const outputArtifacts = node.data.outputArtifactHistory
             ? resolveSelectedOutputArtifacts(node.data.outputArtifactHistory, nextParams)
             : node.data.outputArtifacts;
-          const hiddenOutputIds = new Set(spec.ui?.hiddenOutputIds ?? []);
-          const previewArtifact =
-            (spec.ui?.previewOutputIds ?? [])
-              .map((outputId) => outputArtifacts?.[outputId])
-              .find((artifact) => Boolean(artifact?.id)) ??
-            Object.entries(outputArtifacts ?? {})
-              .filter(([outputId, artifact]) => !artifact.hidden && !hiddenOutputIds.has(outputId))
-              .sort((a, b) => new Date(b[1].createdAt ?? 0).getTime() - new Date(a[1].createdAt ?? 0).getTime())[0]?.[1] ??
-            Object.values(outputArtifacts ?? {})[0] ??
-            null;
+          const previewArtifact = outputArtifacts ? pickPreviewArtifact(outputArtifacts, spec) : null;
           const selectedScenePreviewStage =
             nodeType === "pipeline.scene_generation" && typeof nextParams.ScenePreviewStage === "string"
               ? nextParams.ScenePreviewStage
@@ -2534,6 +2760,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               outputArtifacts: outputArtifacts && Object.keys(outputArtifacts).length > 0 ? outputArtifacts : node.data.outputArtifacts,
               latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
               latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+              latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+              latestArtifactType: resolvedPreviewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
               previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null
             }
           };
@@ -2548,7 +2776,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     updateNodeParamById(selectedNode.id, key, value);
   };
 
-  const createNodePreviewUrl = useCallback(async (file: File) => {
+  const createImagePreviewUrl = useCallback(async (file: File) => {
     const objectUrl = URL.createObjectURL(file);
     const asDataUrl = () =>
       new Promise<string>((resolve) => {
@@ -2591,13 +2819,109 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     }
   }, []);
 
+  const createUploadPreviewUrl = useCallback(async (file: File, nodeType: WorkflowNodeType) => {
+    if (nodeType === "input.video") {
+      return URL.createObjectURL(file);
+    }
+    return createImagePreviewUrl(file);
+  }, [createImagePreviewUrl]);
+
+  const persistUploadedNodeState = useCallback(
+    async (nextNodes: Node<GraphNodeData>[]) => {
+      const payload = {
+        nodes: nextNodes.map((n) => ({
+          id: n.id,
+          type: n.type as WorkflowNodeType,
+          position: n.position,
+          data: {
+            label: n.data.label,
+            params: n.data.params,
+            uiScale: n.data.uiScale ?? nodeScalePreset,
+            previewUrl: n.data.previewUrl ?? null
+          }
+        })),
+        edges: edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle ?? undefined,
+          targetHandle: e.targetHandle ?? undefined
+        })),
+        viewport: { x: 0, y: 0, zoom: 1 },
+        workflowLibrary: {
+          templates: workflowTemplates,
+          groups: workflowGroups
+        }
+      } as GraphDocument;
+
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            draftStorageKey,
+            JSON.stringify({
+              updatedAt: new Date().toISOString(),
+              graph: payload
+            })
+          );
+        } catch {
+          // Ignore quota and serialization errors.
+        }
+      }
+
+      try {
+        await fetch(`/api/projects/${projectId}/graph`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Main Graph",
+            graphJson: payload
+          })
+        });
+      } catch {
+        // Keep local draft even if remote persistence fails.
+      }
+    },
+    [draftStorageKey, edges, nodeScalePreset, projectId, workflowGroups, workflowTemplates]
+  );
+
   const uploadImageForNode = useCallback(
     async (nodeId: string, file: File) => {
       if (!nodeId) return;
-      const localPreviewUrl = await createNodePreviewUrl(file);
+      const targetNode = nodeById.get(nodeId);
+      if (targetNode?.data.isLockedByRun || targetNode?.data.status === "running") {
+        toast({ title: "Node is busy", description: "Cannot replace inputs while this node is still running." });
+        return;
+      }
+      const targetNodeType = targetNode?.type as WorkflowNodeType | undefined;
+      const extension = file.name.toLowerCase().split(".").pop();
+      const inferredContentType = extension === "png"
+        ? "image/png"
+        : extension === "jpg" || extension === "jpeg"
+          ? "image/jpeg"
+          : extension === "webp"
+            ? "image/webp"
+            : extension === "mp4"
+              ? "video/mp4"
+              : "";
+      const contentType = ["image/png", "image/jpeg", "image/webp", "video/mp4"].includes(file.type)
+        ? file.type
+        : inferredContentType;
+      if (!contentType) {
+        toast({ title: "Unsupported upload", description: "Use PNG, JPEG, WebP, or MP4." });
+        return;
+      }
+      if (targetNodeType === "input.video" && contentType !== "video/mp4") {
+        toast({ title: "Unsupported video", description: "Use MP4 for video inputs." });
+        return;
+      }
+      if (targetNodeType === "input.image" && contentType === "video/mp4") {
+        toast({ title: "Unsupported image", description: "Use PNG, JPEG, or WebP for image inputs." });
+        return;
+      }
+      const localPreviewUrl = await createUploadPreviewUrl(file, targetNodeType ?? "input.image");
       setNodes((prev) =>
         prev.map((node) => {
-          if (node.id !== nodeId || node.type !== "input.image") return node;
+          if (node.id !== nodeId || (node.type !== "input.image" && node.type !== "input.video")) return node;
           return {
             ...node,
             data: {
@@ -2619,8 +2943,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           body: JSON.stringify({
             projectId,
             nodeId,
+            category: targetNodeType === "input.video" ? "input.video" : "input.image",
             filename: file.name,
-            contentType: file.type || "application/octet-stream",
+            contentType,
             byteSize: file.size
           })
         });
@@ -2635,43 +2960,51 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         }
         const uploadRes = await fetch(uploadTarget, {
           method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
+          headers: { "Content-Type": contentType },
           body: file
         });
         if (!uploadRes.ok) {
           throw new Error(`Upload failed (${uploadRes.status})`);
         }
-        setNodes((prev) =>
-          prev.map((node) => {
-            if (node.id !== nodeId || node.type !== "input.image") return node;
-            return {
-              ...node,
-              data: {
-                ...node.data,
-                params: {
-                  ...node.data.params,
-                  storageKey: uploadData.key,
-                  filename: file.name,
-                  uploadAssetId: uploadData.uploadAssetId ?? ""
+        const uploadedPreviewUrl = `/api/storage/object?key=${encodeURIComponent(uploadData.key)}`;
+        const nextNodes = (() => {
+          let computed: Node<GraphNodeData>[] = [];
+          setNodes((prev) => {
+            computed = prev.map((node) => {
+              if (node.id !== nodeId || (node.type !== "input.image" && node.type !== "input.video")) return node;
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  previewUrl: uploadedPreviewUrl,
+                  params: {
+                    ...node.data.params,
+                    storageKey: uploadData.key,
+                    filename: file.name,
+                    uploadAssetId: uploadData.uploadAssetId ?? ""
+                  }
                 }
-              }
-            };
-          })
-        );
-        toast({ title: "Image uploaded", description: file.name });
+              };
+            });
+            return computed;
+          });
+          return computed;
+        })();
+        void persistUploadedNodeState(nextNodes);
+        toast({ title: targetNodeType === "input.video" ? "Video uploaded" : "Image uploaded", description: file.name });
       } catch (error) {
         toast({ title: "Upload failed", description: error instanceof Error ? error.message : "Unknown error" });
       }
     },
-    [createNodePreviewUrl, projectId, setNodes]
+    [createUploadPreviewUrl, nodeById, nodes, persistUploadedNodeState, projectId, setNodes]
   );
 
-  const workflowLibraryPayload = (): WorkflowLibraryPayload => ({
+  const workflowLibraryPayload = useCallback((): WorkflowLibraryPayload => ({
     templates: workflowTemplates,
     groups: workflowGroups
-  });
+  }), [workflowGroups, workflowTemplates]);
 
-  const currentGraph = (): GraphDocument =>
+  const currentGraph = useCallback((): GraphDocument =>
     ({
       nodes: nodes.map((n) => ({
         id: n.id,
@@ -2680,7 +3013,6 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         data: {
           label: n.data.label,
           params: n.data.params,
-          status: n.data.status,
           uiScale: n.data.uiScale ?? nodeScalePreset
         }
       })),
@@ -2693,9 +3025,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       })),
       viewport: { x: 0, y: 0, zoom: 1 },
       workflowLibrary: workflowLibraryPayload()
-    } as GraphDocument);
+    } as GraphDocument), [edges, nodeScalePreset, nodes, workflowLibraryPayload]);
 
-  const currentDraftGraph = (): GraphDocument =>
+  const currentDraftGraph = useCallback((): GraphDocument =>
     ({
       nodes: nodes.map((n) => ({
         id: n.id,
@@ -2704,7 +3036,6 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         data: {
           label: n.data.label,
           params: n.data.params,
-          status: n.data.status,
           uiScale: n.data.uiScale ?? nodeScalePreset,
           previewUrl: n.data.previewUrl ?? null
         }
@@ -2718,7 +3049,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       })),
       viewport: { x: 0, y: 0, zoom: 1 },
       workflowLibrary: workflowLibraryPayload()
-    } as GraphDocument);
+    } as GraphDocument), [edges, nodeScalePreset, nodes, workflowLibraryPayload]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2745,7 +3076,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         clearTimeout(draftSaveTimeoutRef.current);
       }
     };
-  }, [draftStorageKey, edges, nodeScalePreset, nodes, workflowGroups, workflowTemplates]);
+  }, [currentDraftGraph, draftStorageKey]);
 
   const saveGraph = async ({ silent }: { silent?: boolean } = {}) => {
     setIsSaving(true);
@@ -2790,13 +3121,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       nodeId: string;
       id: string;
       kind: string;
+      mimeType?: string | null;
+      artifactType?: string | null;
       outputKey?: string;
       hidden?: boolean;
       previewUrl?: string | null;
       url?: string | null;
       createdAt?: string;
       meta?: Record<string, unknown> | null;
-    }>
+    }>,
+    lockedNodeIds: Set<string> = new Set<string>()
   ) => {
     const lines = logs.split("\n");
     const executed = new Set<string>();
@@ -2823,12 +3157,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     });
 
     setNodes((prev) => {
-      const hasRunningOrQueued = status === "running" || status === "queued";
+      const hasRunningOrQueued = ACTIVE_RUN_STATUSES.has(status);
       return prev.map((node) => {
-        if (targetNodeId && node.id !== targetNodeId) {
-          return node;
-        }
-
         const nodeType = node.type as WorkflowNodeType;
         const spec = nodeSpecRegistry[nodeType];
         const nodeArtifacts = [...(groupedArtifacts[node.id] ?? [])].sort(
@@ -2838,12 +3168,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         const mergedHistory = mergeOutputArtifactHistory(node.data.outputArtifactHistory, runHistory);
         const artifactByOutput = resolveSelectedOutputArtifacts(mergedHistory, node.data.params ?? {});
 
-        const previewArtifact =
-          (spec.ui?.previewOutputIds ?? [])
-            .map((outputId) => artifactByOutput[outputId])
-            .find((artifact) => Boolean(artifact?.id)) ??
-          Object.values(artifactByOutput).find((artifact) => !artifact.hidden) ??
-          Object.values(artifactByOutput)[0];
+        const previewArtifact = pickPreviewArtifact(artifactByOutput, spec);
         const scenePreviewStages =
           nodeType === "pipeline.scene_generation"
             ? buildSceneGenerationPreviewStages(node.id, artifactPairs)
@@ -2871,21 +3196,29 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               : node.data.runtimeWarning;
 
         let runtimeStatus = node.data.status ?? "idle";
+        const isLockedByRun = hasRunningOrQueued && lockedNodeIds.has(node.id);
 
         if (errored.has(node.id)) runtimeStatus = "error";
         else if (cached.has(node.id)) runtimeStatus = "cache-hit";
         else if (sourceResolved.has(node.id)) runtimeStatus = "success";
         else if (executed.has(node.id)) runtimeStatus = "success";
-        else if (hasRunningOrQueued && node.data.status === "running") runtimeStatus = "running";
+        else if (isLockedByRun) runtimeStatus = "running";
+        else if (hasRunningOrQueued && targetNodeId && node.id === targetNodeId) runtimeStatus = "running";
+        else if (!hasRunningOrQueued && targetNodeId && node.id === targetNodeId && status === "success") runtimeStatus = "success";
+        else if (!hasRunningOrQueued && targetNodeId && node.id === targetNodeId && status === "error") runtimeStatus = "error";
+        else if (!hasRunningOrQueued && node.data.isLockedByRun && node.data.status === "running") runtimeStatus = "idle";
 
         return {
           ...node,
           data: {
             ...node.data,
+            isLockedByRun,
             status: runtimeStatus,
             runProgress: runtimeStatus === "running" ? runProgress : runtimeStatus === "success" || runtimeStatus === "cache-hit" ? 100 : 0,
             latestArtifactId: resolvedPreviewArtifact?.id ?? node.data.latestArtifactId,
             latestArtifactKind: resolvedPreviewArtifact?.kind ?? node.data.latestArtifactKind,
+            latestArtifactMimeType: resolvedPreviewArtifact?.mimeType ?? node.data.latestArtifactMimeType ?? null,
+            latestArtifactType: resolvedPreviewArtifact?.artifactType ?? node.data.latestArtifactType ?? null,
             previewUrl: resolvedPreviewArtifact?.previewUrl ?? resolvedPreviewArtifact?.url ?? node.data.previewUrl ?? null,
             outputArtifacts: Object.keys(artifactByOutput).length > 0 ? artifactByOutput : node.data.outputArtifacts,
             outputArtifactHistory:
@@ -2907,60 +3240,76 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     });
   };
 
-  const pollRun = (runId: string, targetNodeId: string | null) => {
-    if (runPollRef.current) {
-      clearInterval(runPollRef.current);
-    }
+  const stopRunPolling = useCallback(() => {
+    if (!runPollRef.current) return;
+    clearInterval(runPollRef.current);
+    runPollRef.current = null;
+  }, []);
 
-    runPollRef.current = setInterval(async () => {
+  const refreshRunState = useCallback(
+    async (runId: string, preferredTargetNodeId: string | null = null) => {
       const res = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) return null;
 
-      const data = await res.json();
-      setRunLogs(data.run.logs ?? "");
+      const data = (await res.json()) as { run: RunPayload };
+      const run = data.run;
+      const derivedTargetNodeId = deriveRunTargetNodeId(run) ?? preferredTargetNodeId;
+      const lockedNodeIds = deriveLockedNodeIdsFromRun(run, derivedTargetNodeId);
+
+      setRunLogs(run.logs ?? "");
       applyRunNodeState(
-        data.run.logs ?? "",
-        data.run.status,
-        Number(data.run.progress ?? 0),
-        targetNodeId,
-        (data.run.artifacts ?? []).map(
-          (a: {
-            nodeId: string;
-            id: string;
-            kind: string;
-            outputKey?: string;
-            hidden?: boolean;
-            previewUrl?: string | null;
-            url?: string | null;
-            createdAt?: string;
-            meta?: Record<string, unknown> | null;
-          }) => ({
-            nodeId: a.nodeId,
-            id: a.id,
-            kind: a.kind,
-            outputKey: a.outputKey,
-            hidden: a.hidden,
-            previewUrl: a.previewUrl ?? null,
-            url: a.url ?? null,
-            createdAt: a.createdAt,
-            meta: a.meta ?? null
-          })
-        )
+        run.logs ?? "",
+        run.status,
+        Number(run.progress ?? 0),
+        derivedTargetNodeId,
+        (run.artifacts ?? []).map((artifact) => ({
+          nodeId: artifact.nodeId,
+          id: artifact.id,
+          kind: artifact.kind,
+          mimeType: artifact.mimeType ?? null,
+          artifactType: artifact.artifactType ?? null,
+          outputKey: artifact.outputKey,
+          hidden: artifact.hidden,
+          previewUrl: artifact.previewUrl ?? null,
+          url: artifact.url ?? null,
+          createdAt: artifact.createdAt,
+          meta: artifact.meta ?? null
+        })),
+        lockedNodeIds
       );
 
-      if (["success", "error", "canceled"].includes(data.run.status)) {
-        setActiveRunId(null);
-        clearInterval(runPollRef.current!);
-        runPollRef.current = null;
-        const title = data.run.status === "success" ? "Run finished" : data.run.status === "canceled" ? "Run canceled" : "Run failed";
-        const logLines = String(data.run.logs ?? "")
+      return {
+        run,
+        targetNodeId: derivedTargetNodeId
+      };
+    },
+    [applyRunNodeState]
+  );
+
+  const pollRun = useCallback((runId: string, targetNodeId: string | null) => {
+    stopRunPolling();
+    let resolvedTargetNodeId = targetNodeId;
+
+    runPollRef.current = setInterval(async () => {
+      const snapshot = await refreshRunState(runId, resolvedTargetNodeId);
+      if (!snapshot) return;
+
+      resolvedTargetNodeId = snapshot.targetNodeId;
+      if (["success", "error", "canceled"].includes(snapshot.run.status)) {
+        if (activeRunIdRef.current === runId) {
+          setActiveRunId(null);
+        }
+        stopRunPolling();
+        const title =
+          snapshot.run.status === "success" ? "Run finished" : snapshot.run.status === "canceled" ? "Run canceled" : "Run failed";
+        const logLines = String(snapshot.run.logs ?? "")
           .split("\n")
           .map((line: string) => line.trim())
           .filter(Boolean);
         const descriptionBase = `Run ${runId.slice(0, 8)}`;
         let description = descriptionBase;
 
-        if (data.run.status === "success") {
+        if (snapshot.run.status === "success") {
           const executedLine = [...logLines].reverse().find((line) => line.includes(" executed "));
           if (executedLine) {
             const nodeMatch = executedLine.match(/\]\s+([^\s]+)\s+executed/);
@@ -2973,7 +3322,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               description = `${description} | ${warningsMatch[1]}`;
             }
           }
-        } else if (data.run.status === "error") {
+        } else if (snapshot.run.status === "error") {
           const errorLine = [...logLines].reverse().find((line) => line.includes("ERROR:"));
           const errorLineIndex = errorLine ? logLines.lastIndexOf(errorLine) : -1;
           const detailsAfterError = errorLineIndex >= 0 ? logLines.slice(errorLineIndex + 1) : [];
@@ -2993,7 +3342,48 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         toast({ title, description });
       }
     }, 1600);
-  };
+  }, [refreshRunState, stopRunPolling]);
+
+  useEffect(() => {
+    return () => {
+      stopRunPolling();
+    };
+  }, [stopRunPolling]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreActiveRun = async () => {
+      if (restoredActiveRunRef.current || activeRunIdRef.current) return;
+      restoredActiveRunRef.current = true;
+
+      const res = await fetch(`/api/projects/${projectId}/runs?limit=20`, { cache: "no-store" });
+      if (!res.ok || cancelled) return;
+
+      const data = (await res.json()) as {
+        runs?: Array<{
+          id: string;
+          status: string;
+        }>;
+      };
+      const activeRun = (data.runs ?? []).find((run) => ACTIVE_RUN_STATUSES.has(run.status));
+      if (!activeRun || cancelled) return;
+
+      const snapshot = await refreshRunState(activeRun.id);
+      if (!snapshot || cancelled) return;
+
+      if (ACTIVE_RUN_STATUSES.has(snapshot.run.status)) {
+        setActiveRunId(activeRun.id);
+        pollRun(activeRun.id, snapshot.targetNodeId);
+      }
+    };
+
+    void restoreActiveRun();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pollRun, projectId, refreshRunState]);
 
   const markNodesPreparingRun = useCallback(
     (startNodeId?: string) => {
@@ -3003,6 +3393,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
             ...node,
             data: {
               ...node.data,
+              isLockedByRun: true,
               status: "running",
               runProgress: 0,
               runtimeWarning: null
@@ -3017,9 +3408,10 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           ...node,
           data: {
             ...node.data,
-            status: node.id === startNodeId && node.type !== "input.image" ? "running" : node.data.status,
-            runProgress: node.id === startNodeId && node.type !== "input.image" ? 0 : node.data.runProgress ?? 0,
-            runtimeWarning: node.id === startNodeId && node.type !== "input.image" ? null : node.data.runtimeWarning
+            isLockedByRun: node.id === startNodeId,
+            status: node.id === startNodeId ? "running" : node.data.status,
+            runProgress: node.id === startNodeId ? 0 : node.data.runProgress ?? 0,
+            runtimeWarning: node.id === startNodeId ? null : node.data.runtimeWarning
           }
         }))
       );
@@ -3029,6 +3421,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   const startRun = async (startNodeId?: string) => {
     if (isStartingRun) return;
+    if (startNodeId) {
+      const targetNode = nodeById.get(startNodeId);
+      if (targetNode?.data.isLockedByRun || targetNode?.data.status === "running") {
+        toast({ title: "Node is busy", description: "This node is still running and cannot be edited or rerun yet." });
+        return;
+      }
+    }
     setIsStartingRun(true);
     try {
       const latestGraphId = await saveGraph({ silent: true });
@@ -3205,7 +3604,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         null
       : selectedNode.type === "model.sam3d_objects"
         ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
-        : selectedNode.data.latestArtifactId ?? null
+        : selectedNode.type === "geo.depth_estimation"
+          ? selectedNode.data.outputArtifacts?.scene?.id ?? selectedNode.data.latestArtifactId ?? null
+          : selectedNode.data.latestArtifactId ?? null
     : null;
   const viewerHref = selectedNodeSceneArtifactId
     ? `/app/p/${projectId}/viewer?artifactId=${selectedNodeSceneArtifactId}${selectedNode ? `&nodeId=${selectedNode.id}` : ""}`
@@ -3829,8 +4230,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
+            nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -4051,12 +4452,21 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                     </div>
                     <Separator className="mb-3" />
                     {canNodeRun(selectedNode) ? (
-                      <Button className="mb-3 w-full rounded-xl" disabled={isStartingRun} onClick={() => startRun(selectedNode.id)}>
+                      <Button
+                        className="mb-3 w-full rounded-xl"
+                        disabled={isStartingRun || selectedNodeLocked}
+                        onClick={() => startRun(selectedNode.id)}
+                      >
                         <Play className="mr-1 h-4 w-4" /> Run this node (+ dependencies)
                       </Button>
                     ) : selectedNode.type === "input.image" ? (
                       <div className="mb-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
                         Run is available only when source mode is <span className="text-zinc-200">generate</span>.
+                      </div>
+                    ) : null}
+                    {selectedNodeLocked ? (
+                      <div className="mb-3 rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                        This node is locked while its run is active.
                       </div>
                     ) : null}
                     <ScrollArea className="h-[calc(100vh-260px)] max-h-[46vh] pr-2">
@@ -4133,13 +4543,18 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                                 <Label>{field.label}</Label>
                                 {field.input === "textarea" || field.input === "json" ? (
                                   <Textarea
+                                    disabled={selectedNodeLocked}
                                     value={String(value ?? "")}
                                     onChange={(e) => updateSelectedNodeParam(field.key, e.target.value)}
                                     rows={field.input === "json" ? 5 : 3}
                                     className="rounded-xl"
                                   />
                                 ) : field.input === "select" ? (
-                                  <Select value={String(value ?? field.options?.[0] ?? "")} onValueChange={(v) => updateSelectedNodeParam(field.key, v)}>
+                                  <Select
+                                    disabled={selectedNodeLocked}
+                                    value={String(value ?? field.options?.[0] ?? "")}
+                                    onValueChange={(v) => updateSelectedNodeParam(field.key, v)}
+                                  >
                                     <SelectTrigger className="rounded-xl">
                                       <SelectValue />
                                     </SelectTrigger>
@@ -4156,12 +4571,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                                     type="button"
                                     variant={boolValue ? "default" : "outline"}
                                     className="h-9 w-full justify-start rounded-xl"
+                                    disabled={selectedNodeLocked}
                                     onClick={() => updateSelectedNodeParam(field.key, !boolValue)}
                                   >
                                     {boolValue ? "Enabled" : "Disabled"}
                                   </Button>
                                 ) : (
                                   <Input
+                                    disabled={selectedNodeLocked}
                                     type={field.input === "number" ? "number" : "text"}
                                     value={String(value ?? "")}
                                     min={field.input === "number" ? field.min : undefined}
@@ -4286,7 +4703,16 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                           ))}
                         </div>
                         {selectedArtifactPreview.previewUrl ? (
-                          <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                          selectedNode?.type === "input.video" ? (
+                            <video
+                              src={selectedArtifactPreview.previewUrl}
+                              className="h-32 w-full rounded-lg border object-contain bg-black/40"
+                              controls
+                              muted
+                            />
+                          ) : (
+                            <img src={selectedArtifactPreview.previewUrl} alt="Artifact preview" className="h-32 w-full rounded-lg border object-contain bg-black/40" />
+                          )
                         ) : null}
                         {selectedArtifactPreview.jsonSnippet ? (
                           <pre className="max-h-44 overflow-auto rounded-lg border bg-background/70 p-2 text-xs">

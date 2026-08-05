@@ -10,8 +10,86 @@ import { runWorkflowQueue } from "@/lib/queue/queues";
 import { logAuditEventFromRequest } from "@/lib/security/audit";
 import { toApiErrorResponse } from "@/lib/security/errors";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { readJsonRequest } from "@/lib/security/request";
 import { safeGetSignedDownloadUrl } from "@/lib/storage/s3";
 import { runActionSchema } from "@/lib/validation/schemas";
+
+type RunArtifactResponse = {
+  id: string;
+  nodeId: string;
+  kind: string;
+  mimeType: string;
+  storageKey: string;
+  previewStorageKey: string | null;
+  createdAt: Date;
+  meta: unknown;
+  outputKey: string;
+  artifactType: string | null;
+  hidden: boolean;
+  url: string | null;
+  previewUrl: string | null;
+};
+
+function getArtifactAttemptPrefix(storageKey: string) {
+  const match = storageKey.match(/^(.*)\/outputs\/[^/]+$/);
+  return match?.[1] ?? null;
+}
+
+function deriveDepthVideoStorageKey(depthStorageKey: string) {
+  const attemptPrefix = getArtifactAttemptPrefix(depthStorageKey);
+  return attemptPrefix ? `${attemptPrefix}/outputs/depthvideo.mp4` : null;
+}
+
+function addSyntheticDepthVideoArtifacts(artifacts: RunArtifactResponse[]) {
+  const existingDepthVideoPrefixes = new Set(
+    artifacts
+      .filter((artifact) => artifact.outputKey === "depthVideo")
+      .map((artifact) => getArtifactAttemptPrefix(artifact.storageKey))
+      .filter((value): value is string => Boolean(value))
+  );
+
+  const synthetic = artifacts.flatMap((artifact) => {
+    const meta =
+      artifact.meta && typeof artifact.meta === "object" && !Array.isArray(artifact.meta)
+        ? (artifact.meta as Record<string, unknown>)
+        : {};
+    const isDepthVideoCandidate =
+      artifact.nodeId.startsWith("geo.depth_estimation") &&
+      artifact.outputKey === "depth" &&
+      meta.mediaType === "video";
+    if (!isDepthVideoCandidate) return [];
+
+    const attemptPrefix = getArtifactAttemptPrefix(artifact.storageKey);
+    if (!attemptPrefix || existingDepthVideoPrefixes.has(attemptPrefix)) return [];
+
+    const depthVideoStorageKey = deriveDepthVideoStorageKey(artifact.storageKey);
+    if (!depthVideoStorageKey) return [];
+
+    return [{
+      ...artifact,
+      id: `${artifact.id}:depthVideo`,
+      kind: "json",
+      mimeType: "video/mp4",
+      storageKey: depthVideoStorageKey,
+      previewStorageKey: null,
+      outputKey: "depthVideo",
+      artifactType: "Video",
+      hidden: false,
+      url: `/api/storage/object?key=${encodeURIComponent(depthVideoStorageKey)}`,
+      previewUrl: null,
+      meta: {
+        outputKey: "depthVideo",
+        artifactType: "Video",
+        semantic: "depth_video",
+        mediaType: "video",
+        synthetic: true,
+        sourceArtifactId: artifact.id
+      }
+    }];
+  });
+
+  return synthetic.length > 0 ? [...artifacts, ...synthetic] : artifacts;
+}
 
 export async function GET(
   req: NextRequest,
@@ -68,6 +146,7 @@ export async function GET(
             ? (artifact.meta as Record<string, unknown>)
             : {};
         const outputKey = typeof meta.outputKey === "string" ? meta.outputKey : "default";
+        const artifactType = typeof meta.artifactType === "string" ? meta.artifactType : null;
         const hidden = Boolean(meta.hidden);
         const url = await safeGetSignedDownloadUrl(artifact.storageKey, env.SIGNED_URL_TTL_SEC);
         const previewUrl = artifact.previewStorageKey
@@ -76,17 +155,19 @@ export async function GET(
         return {
           ...artifact,
           outputKey,
+          artifactType,
           hidden,
           url,
           previewUrl
         };
       })
     );
+    const artifactsWithDepthVideos = addSyntheticDepthVideoArtifacts(artifacts);
 
     return NextResponse.json({
       run: {
         ...run,
-        artifacts,
+        artifacts: artifactsWithDepthVideos,
         steps,
         events
       }
@@ -103,7 +184,7 @@ export async function PATCH(
   try {
     const { runId } = await params;
     const access = await requireRunAccess(runId, "editor");
-    const body = await req.json().catch(() => ({}));
+    const body = await readJsonRequest(req, 16 * 1024);
     const parsed = runActionSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
@@ -117,14 +198,19 @@ export async function PATCH(
       return NextResponse.json({ run: current });
     }
 
-    const run = await prisma.run.update({
-      where: { id: runId },
+    const canceled = await prisma.run.updateMany({
+      where: { id: runId, status: { in: ["queued", "running"] } },
       data: {
         status: "canceled",
         finishedAt: new Date(),
         logs: `${current.logs}\n[${new Date().toISOString()}] Cancel requested`
       }
     });
+    if (canceled.count === 0) {
+      const latest = await prisma.run.findUnique({ where: { id: runId } });
+      return NextResponse.json({ run: latest });
+    }
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: runId } });
     const queuedJob = await runWorkflowQueue.getJob(runId);
     if (queuedJob) {
       try {

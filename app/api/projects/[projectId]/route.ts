@@ -92,10 +92,15 @@ export async function DELETE(
 
     await prisma.$transaction(async (tx) => {
       await tx.projectMember.deleteMany({ where: { projectId } });
+      await tx.uploadAsset.deleteMany({ where: { projectId } });
       await tx.cacheEntry.deleteMany({ where: { projectId } });
+      await tx.runEvent.deleteMany({ where: { projectId } });
+      await tx.runStep.deleteMany({ where: { projectId } });
+      await tx.usageEvent.deleteMany({ where: { projectId } });
       await tx.artifact.deleteMany({ where: { projectId } });
       await tx.run.deleteMany({ where: { projectId } });
       await tx.graph.deleteMany({ where: { projectId } });
+      await tx.projectRunCounter.deleteMany({ where: { projectId } });
       await tx.project.delete({ where: { id: projectId } });
     });
 
@@ -145,11 +150,22 @@ export async function DELETE(
       prefixesToDelete.add(`projects/${projectSlug}/`);
     }
 
+    const storageCleanupErrors: string[] = [];
     for (const prefix of prefixesToDelete) {
-      await deleteStoragePrefix(prefix);
+      try {
+        await deleteStoragePrefix(prefix);
+      } catch (error) {
+        storageCleanupErrors.push(`${prefix}: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
     }
 
-    return NextResponse.json({ ok: true, deletedProjectId: projectId, deletedProjectName: project.name });
+    return NextResponse.json({
+      ok: true,
+      deletedProjectId: projectId,
+      deletedProjectName: project.name,
+      storageCleanupOk: storageCleanupErrors.length === 0,
+      storageCleanupErrors
+    });
   } catch (error) {
     return toApiErrorResponse(error, "Failed to delete project");
   }

@@ -12,7 +12,7 @@ This document is synced with the current repository behavior and `README.md`.
 - Viewer page: `/app/p/[projectId]/viewer?artifactId=...`
 
 ### Core Stack
-- Next.js 14 App Router + TypeScript
+- Next.js 15 App Router + TypeScript
 - Tailwind + shadcn/ui
 - React Flow (canvas)
 - Three.js + Babylon.js Gaussian Splat renderer switch
