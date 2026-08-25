@@ -114,7 +114,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
       setName("");
       setCreateOpen(false);
       toast({ title: "Project created", description: data.project.name });
-      router.push(`/app/p/${data.project.id}/canvas`);
+      router.push(`/app/p/${data.project.id}/graph-editor`);
       router.refresh();
     } catch (error) {
       toast({ title: "Create project failed", description: error instanceof Error ? error.message : "Unknown error" });
@@ -167,7 +167,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
           >
             <DialogHeader className="space-y-1">
               <DialogTitle className="text-white">Create Project</DialogTitle>
-              <DialogDescription>Give your project a name and start from the canvas.</DialogDescription>
+              <DialogDescription>Give your project a name and start from the graph editor.</DialogDescription>
             </DialogHeader>
 
             <div className="space-y-2.5">
@@ -235,13 +235,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                 {latestProject ? latestProject.name : "Your latest project"}
               </h2>
               <p className="mt-1 text-sm text-[#a8b7df]">
-                Open your latest canvas, review runs, or inspect assets in viewer.
+                Open your latest graph editor, review runs, or inspect assets in viewer.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {latestProject ? (
                   <>
-                    <Button className="h-9 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${latestProject.id}/canvas`)}>
-                      Open latest canvas
+                    <Button className="h-9 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${latestProject.id}/graph-editor`)}>
+                      Open latest graph editor
                     </Button>
                     <Button
                       variant="outline"
@@ -294,7 +294,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
               <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Empty Workspace</p>
               <h2 className="mt-2 text-3xl font-semibold text-white">Create your first project</h2>
               <p className="mt-2 text-sm text-[#a8b7df]">
-                Start from a blank canvas and build your first Intelligent 3D Environment Maker workflow.
+                Start from a blank graph editor and build your first Intelligent 3D Environment Maker workflow.
               </p>
               <Button className="mt-4 h-10 rounded-lg bg-[#5b58f3] px-5 text-white hover:bg-[#6a67ff]" onClick={() => setCreateOpen(true)}>
                 <Plus className="mr-1.5 h-4 w-4" />
@@ -378,7 +378,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                         <CardDescription className="line-clamp-2 text-sm leading-6 text-[#a2b0d9]">
                           {project._count.runs > 0
                             ? `${project._count.runs} workflow runs processed in this project.`
-                            : "Start your first run by opening the canvas and executing a workflow."}
+                            : "Start your first run by opening the graph editor and executing a workflow."}
                         </CardDescription>
                       </div>
                     </CardHeader>
@@ -396,8 +396,8 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                       </div>
 
                       <div className="flex gap-2">
-                        <Button size="sm" className="h-8 flex-1 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${project.id}/canvas`)}>
-                          Open canvas
+                        <Button size="sm" className="h-8 flex-1 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${project.id}/graph-editor`)}>
+                          Open graph editor
                         </Button>
                         <Button
                           variant="outline"

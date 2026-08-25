@@ -17,6 +17,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "analytics:views": "bash scripts/apply-analytics-views.sh",
     "comfy:start": "bash scripts/comfyui-start.sh",
+    "docs:generate": "node --import tsx scripts/generate-technical-docs.ts",
     "seed": "pnpm db:push && pnpm db:seed",
     "worker": "tsx worker/index.ts"
   },

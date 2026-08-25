@@ -5,7 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: "TribalAI Workflow Studio",
-  description: "Infinite-canvas ML workflows with integrated 3D viewer"
+  description: "GraphEditor ML workflows with integrated 3D viewer"
 };
 
 export default function RootLayout({

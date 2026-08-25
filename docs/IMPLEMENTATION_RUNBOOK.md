@@ -7,14 +7,14 @@ This document is synced with the current repository behavior and `README.md`.
 ### Product Surface
 - Landing page: `/`
 - Dashboard: `/app`
-- Canvas editor: `/app/p/[projectId]/canvas`
+- GraphEditor editor: `/app/p/[projectId]/graph-editor`
 - Runs page: `/app/p/[projectId]/runs`
 - Viewer page: `/app/p/[projectId]/viewer?artifactId=...`
 
 ### Core Stack
 - Next.js 15 App Router + TypeScript
 - Tailwind + shadcn/ui
-- React Flow (canvas)
+- React Flow (graph editor)
 - Three.js + Babylon.js Gaussian Splat renderer switch
 - BullMQ + Redis
 - PostgreSQL + Prisma
@@ -34,10 +34,10 @@ This document is synced with the current repository behavior and `README.md`.
   - image fallback from boxes JSON path when image input is not connected
   - env-driven SAM2 repo/tools/checkpoint configuration
 
-### Canvas UX
+### GraphEditor UX
 - Right-click/double-click context menu for add-node.
 - Node categories in menu: Inputs / Models / Geometry / Outputs.
-- Drag edge to empty canvas -> add-node menu opens and auto-connects.
+- Drag edge to empty graph editor -> add-node menu opens and auto-connects.
 - Node delete works from toolbar/keyboard.
 
 ### Viewer
@@ -164,7 +164,7 @@ If Conda/weights are missing, run logs show failure in the run panel.
 
 ## 7) Smoke Test Checklist
 
-1. Open `/app`, create a project, confirm it opens canvas.
+1. Open `/app`, create a project, confirm it opens graph editor.
 2. Add `input.image`, upload image, confirm node preview appears.
 3. Add `model.groundingdino`, connect and run node.
 4. Add `model.sam2`, connect from DINO and verify guided mode.

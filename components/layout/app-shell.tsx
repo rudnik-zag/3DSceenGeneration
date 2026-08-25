@@ -16,7 +16,7 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
-  const isImmersiveRoute = pathname.includes("/viewer") || pathname.includes("/canvas");
+  const isImmersiveRoute = pathname.includes("/viewer") || pathname.includes("/graph-editor");
 
   return (
     <div className="min-h-screen bg-background">

@@ -24,7 +24,7 @@ Teams building AI-generated 3D content currently use fragmented tooling (multipl
 
 ### Solution
 TribalAI Workflow Studio is a full-stack workflow system for image-to-3D pipelines with:
-- visual node canvas for workflow composition
+- visual node graph editor for workflow composition
 - queue-based DAG execution and per-step observability
 - model orchestration (GroundingDINO, SAM2, scene generation, geometry/texturing)
 - integrated 3D artifact viewer (mesh and splat workflows)

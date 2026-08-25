@@ -29,7 +29,7 @@ Main files:
 
 ## 2) End-to-End Execution Flow
 
-1. You run a workflow/node from canvas.
+1. You run a workflow/node from graph editor.
 2. Worker resolves task execution in `lib/execution/mock-runner.ts`.
 3. Comfy-backed nodes call one of:
    - `executeComfyZImageNode`

@@ -7,7 +7,7 @@ This document explains the current implementation of the web app, backend, datab
 TribalAI Workflow Studio is a full-stack workflow platform for image -> detection -> segmentation -> scene-generation pipelines, with:
 
 - user auth and project workspaces
-- a React Flow canvas to build node graphs
+- a React Flow graph editor to build node graphs
 - queued run execution with BullMQ worker
 - artifact storage in S3/MinIO with local fallback
 - a multi-runtime 3D viewer (Three.js + Spark/legacy splat)
@@ -17,7 +17,7 @@ Main user routes:
 
 - `/` landing
 - `/app` dashboard
-- `/app/p/[projectId]/canvas` workflow editor
+- `/app/p/[projectId]/graph-editor` workflow editor
 - `/app/p/[projectId]/runs` run history
 - `/app/p/[projectId]/viewer` artifact viewer
 
@@ -29,11 +29,11 @@ Main user routes:
 - Worker process (`worker/index.ts`) for queue jobs
 - PostgreSQL (Prisma ORM)
 - Redis (rate limiting + BullMQ)
-- S3-compatible object storage (MinIO in local dev)
+- S3-compatible object storage (MinIO in local dev)P
 
 ### 2.2 Core Flow (Run Execution)
 
-1. User builds graph in canvas.
+1. User builds graph in graph editor.
 2. Graph version saved in `Graph.graphJson`.
 3. User starts run (`POST /api/projects/:projectId/runs` or node run endpoint).
 4. Run row is created, usage reserved (if billing enabled), job queued.
@@ -49,7 +49,7 @@ Main user routes:
 ## 3. Repository Map (Important Areas)
 
 - `app/` Next.js pages and API routes
-- `components/canvas/` graph editor and node UI
+- `components/canvas/` GraphEditor and node UI
 - `components/viewer/` viewer loader and unified renderer
 - `lib/graph/` node specs, validation, execution planning, templates
 - `lib/execution/` node runtime execution and telemetry
@@ -202,7 +202,7 @@ Installed by `pnpm analytics:views` from `scripts/sql/analytics_views.sql`:
 
 These are the best source for Metabase dashboards.
 
-## 6. Workflow Graph and Canvas
+## 6. Workflow Graph and GraphEditor
 
 ### 6.1 Node Type System
 
@@ -224,7 +224,7 @@ Node types are strongly typed in `types/workflow.ts` (`WorkflowNodeType`) and de
 
 ### 6.3 Graph Persistence
 
-- Canvas saves graph versions via `/api/projects/:projectId/graph`
+- GraphEditor saves graph versions via `/api/projects/:projectId/graph`
 - Graph JSON is migrated/normalized on parse (`migrateGraphDocument` + `parseGraphDocument`)
 
 ## 7. Execution Engine Internals
@@ -424,7 +424,7 @@ File: `lib/graph/node-specs.ts`
   - defaults
   - UI config
 
-### Step 3: UI registration for canvas
+### Step 3: UI registration for graph editor
 
 File: `components/canvas/canvas-editor.tsx`
 
@@ -483,7 +483,7 @@ If new persistent state is needed:
 
 ### Step 10: Verify end-to-end
 
-1. Create node in canvas.
+1. Create node in graph editor.
 2. Connect required ports.
 3. Run node-only (`/nodes/:nodeId/run`) and full run.
 4. Confirm artifacts written and preview works.

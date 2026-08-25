@@ -44,6 +44,23 @@ interface ArtifactMetaLike {
   meshObjectStorageKeys?: unknown;
 }
 
+type WorldManifestLightType = "ambient" | "point" | "spot" | "directional";
+
+interface WorldManifestLight {
+  id: string;
+  type: WorldManifestLightType;
+  label: string;
+  enabled: boolean;
+  color: string;
+  intensity: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  distance: number;
+  decay: number;
+  angle: number;
+  penumbra: number;
+}
+
 interface WorldManifestEnvironment {
   enabled: boolean;
   hdriUrl: string | null;
@@ -58,6 +75,7 @@ interface WorldManifestEnvironment {
   sunIntensity: number;
   sunColor: string;
   groundColor: string;
+  lights: WorldManifestLight[];
 }
 
 interface WorldManifestCameraPathFrame {
@@ -104,7 +122,23 @@ const DEFAULT_ENVIRONMENT: WorldManifestEnvironment = {
   ambientIntensity: 1.1,
   sunIntensity: 1.2,
   sunColor: "#ffffff",
-  groundColor: "#101828"
+  groundColor: "#101828",
+  lights: [
+    {
+      id: "ambient-default",
+      type: "ambient",
+      label: "Ambient Light",
+      enabled: true,
+      color: "#ffffff",
+      intensity: 1.1,
+      position: [0, 0, 0],
+      target: [0, 0, 0],
+      distance: 0,
+      decay: 2,
+      angle: 30,
+      penumbra: 0.25
+    }
+  ]
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -127,9 +161,134 @@ function normalizeToneMapping(value: unknown): WorldManifestEnvironment["toneMap
   return "ACESFilmic";
 }
 
+function normalizeLightType(value: unknown): WorldManifestLightType | null {
+  if (value === "ambient" || value === "point" || value === "spot" || value === "directional") return value;
+  return null;
+}
+
+function normalizeVector3Tuple(value: unknown, fallback: [number, number, number]): [number, number, number] {
+  if (!Array.isArray(value) || value.length < 3) return fallback;
+  return [0, 1, 2].map((index) => {
+    const parsed = Number(value[index]);
+    return Number.isFinite(parsed) ? parsed : fallback[index];
+  }) as [number, number, number];
+}
+
+function makeLightDefaults(type: WorldManifestLightType, id: string): WorldManifestLight {
+  if (type === "ambient") {
+    return {
+      ...DEFAULT_ENVIRONMENT.lights[0],
+      id,
+      label: "Ambient Light"
+    };
+  }
+  if (type === "spot") {
+    return {
+      id,
+      type,
+      label: "Spot Light",
+      enabled: true,
+      color: "#ffffff",
+      intensity: 2.5,
+      position: [2.5, 4, 2.5],
+      target: [0, 0, 0],
+      distance: 18,
+      decay: 2,
+      angle: 28,
+      penumbra: 0.35
+    };
+  }
+  if (type === "point") {
+    return {
+      id,
+      type,
+      label: "Point Light",
+      enabled: true,
+      color: "#ffffff",
+      intensity: 3,
+      position: [2, 3, 2],
+      target: [0, 0, 0],
+      distance: 16,
+      decay: 2,
+      angle: 30,
+      penumbra: 0.25
+    };
+  }
+  return {
+    id,
+    type,
+    label: "Directional Light",
+    enabled: true,
+    color: "#ffffff",
+    intensity: 1.2,
+    position: [4, 6, 3],
+    target: [0, 0, 0],
+    distance: 0,
+    decay: 2,
+    angle: 30,
+    penumbra: 0.25
+  };
+}
+
+function normalizeLightConfig(raw: unknown, index: number): WorldManifestLight | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const type = normalizeLightType(record.type);
+  if (!type) return null;
+  const fallback = makeLightDefaults(type, `${type}-${index}`);
+  const idRaw = typeof record.id === "string" ? record.id.trim() : "";
+  const labelRaw = typeof record.label === "string" ? record.label.trim() : "";
+  return {
+    ...fallback,
+    id: idRaw.length > 0 ? idRaw.slice(0, 80) : fallback.id,
+    label: labelRaw.length > 0 ? labelRaw.slice(0, 80) : fallback.label,
+    enabled: typeof record.enabled === "boolean" ? record.enabled : fallback.enabled,
+    color: sanitizeColor(record.color, fallback.color),
+    intensity: clamp(Number.isFinite(Number(record.intensity)) ? Number(record.intensity) : fallback.intensity, 0, 20),
+    position: normalizeVector3Tuple(record.position, fallback.position),
+    target: normalizeVector3Tuple(record.target, fallback.target),
+    distance: clamp(Number.isFinite(Number(record.distance)) ? Number(record.distance) : fallback.distance, 0, 200),
+    decay: clamp(Number.isFinite(Number(record.decay)) ? Number(record.decay) : fallback.decay, 0, 8),
+    angle: clamp(Number.isFinite(Number(record.angle)) ? Number(record.angle) : fallback.angle, 1, 89),
+    penumbra: clamp(Number.isFinite(Number(record.penumbra)) ? Number(record.penumbra) : fallback.penumbra, 0, 1)
+  };
+}
+
+function parseLightsJson(value: unknown): unknown {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLightsConfig(raw: unknown, params: Record<string, unknown>, ambientIntensity: number, sunColor: string): WorldManifestLight[] {
+  const source = Array.isArray(raw) ? raw : parseLightsJson(params.lightsJson);
+  if (Array.isArray(source)) {
+    const lights = source
+      .map((entry, index) => normalizeLightConfig(entry, index))
+      .filter((entry): entry is WorldManifestLight => Boolean(entry));
+    if (lights.length > 0) return lights;
+  }
+  return [
+    {
+      ...DEFAULT_ENVIRONMENT.lights[0],
+      color: sunColor,
+      intensity: ambientIntensity
+    }
+  ];
+}
+
 function normalizeEnvironmentConfig(raw: Record<string, unknown> | null | undefined): WorldManifestEnvironment {
   const params = raw ?? {};
   const hdriUrlRaw = typeof params.hdriUrl === "string" ? params.hdriUrl.trim() : "";
+  const ambientIntensity = clamp(
+    Number.isFinite(Number(params.ambientIntensity)) ? Number(params.ambientIntensity) : DEFAULT_ENVIRONMENT.ambientIntensity,
+    0,
+    8
+  );
+  const sunColor = sanitizeColor(params.sunColor, DEFAULT_ENVIRONMENT.sunColor);
   return {
     enabled: params.enabled !== false,
     hdriUrl: hdriUrlRaw.length > 0 ? hdriUrlRaw : null,
@@ -152,18 +311,15 @@ function normalizeEnvironmentConfig(raw: Record<string, unknown> | null | undefi
       0,
       1
     ),
-    ambientIntensity: clamp(
-      Number.isFinite(Number(params.ambientIntensity)) ? Number(params.ambientIntensity) : DEFAULT_ENVIRONMENT.ambientIntensity,
-      0,
-      8
-    ),
+    ambientIntensity,
     sunIntensity: clamp(
       Number.isFinite(Number(params.sunIntensity)) ? Number(params.sunIntensity) : DEFAULT_ENVIRONMENT.sunIntensity,
       0,
       8
     ),
-    sunColor: sanitizeColor(params.sunColor, DEFAULT_ENVIRONMENT.sunColor),
-    groundColor: sanitizeColor(params.groundColor, DEFAULT_ENVIRONMENT.groundColor)
+    sunColor,
+    groundColor: sanitizeColor(params.groundColor, DEFAULT_ENVIRONMENT.groundColor),
+    lights: normalizeLightsConfig(params.lights, params, ambientIntensity, sunColor)
   };
 }
 

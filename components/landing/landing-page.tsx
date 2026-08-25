@@ -19,8 +19,8 @@ interface LandingUserProject {
 
 const featureCards = [
   {
-    title: "Canvas-first workflow graph",
-    text: "Compose model chains on an infinite node canvas with smooth pan, zoom, and port-safe connections."
+    title: "GraphEditor-first workflow graph",
+    text: "Compose model chains on an infinite node graph editor with smooth pan, zoom, and port-safe connections."
   },
   {
     title: "Model orchestration",
@@ -219,7 +219,7 @@ export function LandingPage({
                           <button
                             key={`landing-project-${project.id}`}
                             type="button"
-                            onClick={() => router.push(`/app/p/${project.id}/canvas`)}
+                            onClick={() => router.push(`/app/p/${project.id}/graph-editor`)}
                             className="group overflow-hidden rounded-xl border border-[#324371] bg-[#111d3f]/90 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#162650]"
                           >
                             <div className="relative h-24 border-b border-[#2e406c] bg-[#0c1631]">
@@ -329,7 +329,7 @@ export function LandingPage({
                 <button
                   key={`landing-gallery-${project.id}`}
                   type="button"
-                  onClick={() => router.push(`/app/p/${project.id}/canvas`)}
+                  onClick={() => router.push(`/app/p/${project.id}/graph-editor`)}
                   className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#101a34]/85 text-left motion-fast hover:border-[#4a63a5] hover:bg-[#152347]"
                 >
                   <div className="relative aspect-[4/3] overflow-hidden border-b border-[#2f3f68] bg-[#0d1733]">

@@ -85,7 +85,7 @@ The implementation follows the original prompt, with these practical refinements
 - `app/forbidden/page.tsx`
 - `app/app/layout.tsx`
 - `app/app/page.tsx`
-- `app/app/p/[projectId]/*` (layout/canvas/runs/viewer)
+- `app/app/p/[projectId]/*` (layout/graph-editor/runs/viewer)
 
 ### Hardened API routes
 - `app/api/projects/route.ts`
