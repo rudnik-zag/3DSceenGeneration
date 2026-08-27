@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import "@/app/globals.css";
+import { InteractiveDotGrid } from "@/components/layout/interactive-dot-grid";
 import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
@@ -16,8 +17,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="font-sans" suppressHydrationWarning>
-        {children}
-        <Toaster />
+        <InteractiveDotGrid />
+        <div className="relative z-10 min-h-screen">
+          {children}
+          <Toaster />
+        </div>
       </body>
     </html>
   );
