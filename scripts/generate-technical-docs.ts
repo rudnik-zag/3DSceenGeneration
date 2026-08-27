@@ -33,6 +33,11 @@ type SourceDocPage = {
   sourcePath: string;
 };
 
+type GeneratedFile = {
+  absolutePath: string;
+  contents: string;
+};
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const docsOutputDir = path.join(repoRoot, "public", "technical-docs");
 const legacyOutputPath = path.join(repoRoot, "public", "technical-docs.html");
@@ -860,7 +865,7 @@ function renderLegacyRedirect() {
 `;
 }
 
-async function main() {
+async function buildGeneratedFiles() {
   const [runnerSource, ...envSources] = await Promise.all([
     readText("lib/execution/mock-runner.ts"),
     ...envSourceFiles.map((file) => readText(file))
@@ -926,15 +931,63 @@ async function main() {
       }))
   ];
 
+  return [
+    { absolutePath: path.join(docsOutputDir, "styles.css"), contents: stylesheet() },
+    { absolutePath: legacyOutputPath, contents: renderLegacyRedirect() },
+    ...pages.map((page) => ({
+      absolutePath: path.join(docsOutputDir, `${page.slug}.html`),
+      contents: renderPage(page)
+    }))
+  ] satisfies GeneratedFile[];
+}
+
+async function writeGeneratedFiles(files: GeneratedFile[]) {
   await fs.mkdir(docsOutputDir, { recursive: true });
-  await Promise.all([
-    fs.writeFile(path.join(docsOutputDir, "styles.css"), stylesheet()),
-    fs.writeFile(legacyOutputPath, renderLegacyRedirect()),
-    ...pages.map((page) => fs.writeFile(path.join(docsOutputDir, `${page.slug}.html`), renderPage(page)))
-  ]);
+  await Promise.all(files.map((file) => fs.writeFile(file.absolutePath, file.contents)));
+}
+
+async function checkGeneratedFiles(files: GeneratedFile[]) {
+  const staleFiles: string[] = [];
+
+  await Promise.all(
+    files.map(async (file) => {
+      let current = "";
+      try {
+        current = await fs.readFile(file.absolutePath, "utf8");
+      } catch {
+        staleFiles.push(path.relative(repoRoot, file.absolutePath));
+        return;
+      }
+      if (current !== file.contents) {
+        staleFiles.push(path.relative(repoRoot, file.absolutePath));
+      }
+    })
+  );
+
+  if (staleFiles.length > 0) {
+    throw new Error(
+      `Generated technical docs are stale. Run pnpm docs:generate and commit updated files:\n${staleFiles
+        .sort()
+        .map((file) => `- ${file}`)
+        .join("\n")}`
+    );
+  }
+}
+
+async function main() {
+  const files = await buildGeneratedFiles();
+  const checkOnly = process.argv.includes("--check");
+
+  if (checkOnly) {
+    await checkGeneratedFiles(files);
+    console.log(`[docs:check] generated technical docs are current (${files.length} files checked)`);
+    return;
+  }
+
+  await writeGeneratedFiles(files);
 
   console.log(
-    `[docs:generate] wrote ${pages.length} pages to ${path.relative(repoRoot, docsOutputDir)} from ${specs.length} node specs and ${envNames.length} env keys`
+    `[docs:generate] wrote ${files.length} files to ${path.relative(repoRoot, docsOutputDir)}`
   );
 }
 

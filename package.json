@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint app components hooks lib worker prisma --ext .js,.jsx,.ts,.tsx --max-warnings 0",
     "test": "node --import tsx --test tests/*.test.ts",
-    "check": "pnpm lint && pnpm test && pnpm exec tsc --noEmit",
+    "check": "pnpm lint && pnpm test && pnpm docs:check && pnpm exec tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
@@ -17,6 +17,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "analytics:views": "bash scripts/apply-analytics-views.sh",
     "comfy:start": "bash scripts/comfyui-start.sh",
+    "docs:check": "node --import tsx scripts/generate-technical-docs.ts --check",
     "docs:generate": "node --import tsx scripts/generate-technical-docs.ts",
     "seed": "pnpm db:push && pnpm db:seed",
     "worker": "tsx worker/index.ts"
