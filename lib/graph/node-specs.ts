@@ -128,6 +128,12 @@ const depthParams = z.object({
   maxFrames: z.number().int().min(1).max(2048).default(32),
   resizeLongEdge: z.number().int().min(0).max(4096).default(0)
 });
+const vggtParams = z.object({
+  device: z.enum(["auto", "cuda", "cpu"]).default("auto"),
+  videoFps: z.string().max(32).default("1.0"),
+  maxFrames: z.number().int().min(1).max(2048).default(32),
+  saveNpz: z.boolean().default(false)
+});
 const pointcloudParams = z.object({
   density: z.number().min(0.1).max(2).default(1),
   depthScale: z.number().min(0.01).max(100).default(1)
@@ -637,6 +643,43 @@ export const nodeSpecEntries = [
       previewOutputIds: ["scene", "depthVideo", "depth"],
       hiddenOutputIds: ["confidence", "sky", "meta"],
       advancedOutputIds: ["sequence", "camera", "confidence", "sky", "meta"],
+      nodeRunEnabled: true
+    }
+  }),
+  makeSpec("geo.vggt", {
+    type: "geo.vggt",
+    category: "Geometry",
+    title: "VGGT",
+    icon: "Sparkles",
+    description: "Estimate multi-view depth and camera geometry from an RGB image or MP4 video with VGGT.",
+    inputPorts: [
+      { id: "image", label: "Image", artifactType: "Image" },
+      { id: "video", label: "Video", artifactType: "Video" }
+    ],
+    outputPorts: [
+      { id: "depth", label: "Depth", artifactType: "DepthMap" },
+      { id: "depthVideo", label: "Depth Video", artifactType: "Video" },
+      { id: "sequence", label: "Depth Sequence", artifactType: "JsonData", advancedOnly: true },
+      { id: "camera", label: "Camera", artifactType: "Descriptor", advancedOnly: true },
+      { id: "meta", label: "Meta", artifactType: "JsonData", hidden: true, advancedOnly: true }
+    ],
+    paramSchema: vggtParams,
+    paramFields: [
+      { key: "device", label: "Device", input: "select", options: ["auto", "cuda", "cpu"] },
+      { key: "videoFps", label: "Video FPS", input: "text", placeholder: "1.0 or auto" },
+      { key: "maxFrames", label: "Max Frames", input: "number", min: 1, max: 2048, step: 1 },
+      { key: "saveNpz", label: "Save Raw NPZ", input: "boolean" }
+    ],
+    defaultParams: {
+      device: "auto",
+      videoFps: "1.0",
+      maxFrames: 32,
+      saveNpz: false
+    },
+    ui: {
+      previewOutputIds: ["depthVideo", "depth"],
+      hiddenOutputIds: ["meta"],
+      advancedOutputIds: ["sequence", "camera", "meta"],
       nodeRunEnabled: true
     }
   }),

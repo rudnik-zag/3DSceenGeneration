@@ -78,6 +78,7 @@ const STEP_CODE_MAP: Partial<Record<WorkflowNodeType, string>> = {
   "model.qwen_image_edit": "QWEN_IMAGE_EDIT",
   "model.texturing": "TEXTURING",
   "geo.depth_estimation": "DEPTH_ESTIMATION",
+  "geo.vggt": "VGGT_GEOMETRY",
   "geo.pointcloud_from_depth": "POINT_CLOUD",
   "geo.mesh_reconstruction": "MESH_RECONSTRUCTION",
   "geo.uv_unwrap": "UV_UNWRAP",

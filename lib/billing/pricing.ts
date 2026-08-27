@@ -15,6 +15,7 @@ const baseNodeCost: Record<WorkflowNodeType, number> = {
   "model.qwen_image_edit": 30,
   "model.texturing": 45,
   "geo.depth_estimation": 18,
+  "geo.vggt": 24,
   "geo.pointcloud_from_depth": 20,
   "geo.mesh_reconstruction": 35,
   "geo.uv_unwrap": 20,

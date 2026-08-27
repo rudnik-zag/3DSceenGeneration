@@ -28,7 +28,8 @@ tsconfig.tsbuildinfo
 dist/
 downloads/
 test_data/
-python_script/
+python_script/*
+!python_script/vggt_infer.py
 eggs/
 .eggs/
 lib64/

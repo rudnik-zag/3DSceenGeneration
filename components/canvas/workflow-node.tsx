@@ -22,7 +22,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
+import { getDepthNodeOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { getSceneGenerationPresetNames } from "@/lib/graph/scene-generation-presets";
 import { nodeSpecRegistry } from "@/lib/graph/node-specs";
 import { cn } from "@/lib/utils";
@@ -59,6 +59,7 @@ const nodeIconMap: Partial<Record<WorkflowNodeType, ComponentType<{ className?: 
   "model.qwen_image_edit": WandSparkles,
   "model.texturing": WandSparkles,
   "geo.depth_estimation": Sparkles,
+  "geo.vggt": Sparkles,
   "geo.pointcloud_from_depth": Sparkles,
   "geo.mesh_reconstruction": Boxes,
   "geo.uv_unwrap": Layers,
@@ -80,6 +81,7 @@ const modelTagMap: Partial<Record<WorkflowNodeType, string>> = {
   "model.qwen_image_edit": "Qwen Image Edit",
   "model.texturing": "Texturing",
   "geo.depth_estimation": "Depth",
+  "geo.vggt": "VGGT",
   "geo.pointcloud_from_depth": "Points",
   "geo.mesh_reconstruction": "Mesher",
   "out.export_scene": "Exporter",
@@ -238,6 +240,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
   const isSceneGenerationPipelineNode = nodeType === "pipeline.scene_generation";
   const isSceneGenerationNode = isCustomSceneGenNode || isSceneGenerationPipelineNode;
   const isDepthEstimationNode = nodeType === "geo.depth_estimation";
+  const isVggtNode = nodeType === "geo.vggt";
   const isSceneViewerNode = isSceneGenerationNode || isDepthEstimationNode;
   const isPreviewNode = nodeType === "out.open_in_viewer";
   const [sam2CfgOptions, setSam2CfgOptions] = useState<string[]>(["sam2.1_hiera_l.yaml"]);
@@ -439,8 +442,8 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
       ? data.outputArtifacts?.scene?.id ?? data.latestArtifactId
       : data.latestArtifactId;
   const getOutputAvailability = (outputId: string) =>
-    nodeType === "geo.depth_estimation"
-      ? getDepthEstimationOutputAvailability(data.params ?? {}, data.outputArtifacts, outputId)
+    nodeType === "geo.depth_estimation" || isVggtNode
+      ? getDepthNodeOutputAvailability(nodeType, data.params ?? {}, data.outputArtifacts, outputId)
       : { available: true, reason: null };
   const outputVersionChoices = spec.outputPorts
     .filter((port) => !port.hidden)

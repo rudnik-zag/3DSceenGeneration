@@ -33,6 +33,7 @@ export type WorkflowNodeType =
   | "model.qwen_image_edit"
   | "model.texturing"
   | "geo.depth_estimation"
+  | "geo.vggt"
   | "geo.pointcloud_from_depth"
   | "geo.mesh_reconstruction"
   | "geo.uv_unwrap"

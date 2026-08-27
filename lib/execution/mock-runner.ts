@@ -7,6 +7,7 @@ import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdin
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
 import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
 import { executeDepthEstimationNode } from "@/lib/execution/executors/depth-estimation";
+import { executeVggtNode } from "@/lib/execution/executors/vggt";
 import { executePointcloudFromDepthNode } from "@/lib/execution/executors/pointcloud-from-depth";
 import {
   executeComfyQwenDistillNode,
@@ -226,6 +227,9 @@ export class MockModelRunner implements NodeExecutor {
       }
       case "geo.depth_estimation": {
         return executeDepthEstimationNode(ctx);
+      }
+      case "geo.vggt": {
+        return executeVggtNode(ctx);
       }
       case "geo.pointcloud_from_depth": {
         return executePointcloudFromDepthNode(ctx);

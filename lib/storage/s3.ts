@@ -84,7 +84,8 @@ function shouldTemporarilyDisableS3(error: unknown) {
     code === "ENOTFOUND" ||
     code === "EHOSTUNREACH" ||
     code === "ECONNRESET" ||
-    code === "ETIMEDOUT"
+    code === "ETIMEDOUT" ||
+    code === "EPERM"
   ) {
     return true;
   }

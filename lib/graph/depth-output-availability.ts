@@ -1,9 +1,15 @@
-import { GraphNodeData } from "@/types/workflow";
+import { GraphNodeData, WorkflowNodeType } from "@/types/workflow";
 
-const DEPTH_OUTPUT_IDS = new Set(["depth", "scene", "depthVideo", "sequence", "camera", "confidence", "sky", "meta"]);
+const DEPTH_ESTIMATION_OUTPUT_IDS = new Set(["depth", "scene", "depthVideo", "sequence", "camera", "confidence", "sky", "meta"]);
+const VGGT_OUTPUT_IDS = new Set(["depth", "depthVideo", "sequence", "camera", "meta"]);
 
-function hasDepthRunOutputs(outputArtifacts: GraphNodeData["outputArtifacts"]) {
-  return Object.keys(outputArtifacts ?? {}).some((outputId) => DEPTH_OUTPUT_IDS.has(outputId));
+function outputIdsForNodeType(nodeType: WorkflowNodeType) {
+  return nodeType === "geo.vggt" ? VGGT_OUTPUT_IDS : DEPTH_ESTIMATION_OUTPUT_IDS;
+}
+
+function hasDepthRunOutputs(nodeType: WorkflowNodeType, outputArtifacts: GraphNodeData["outputArtifacts"]) {
+  const outputIds = outputIdsForNodeType(nodeType);
+  return Object.keys(outputArtifacts ?? {}).some((outputId) => outputIds.has(outputId));
 }
 
 function hasOutputArtifact(outputArtifacts: GraphNodeData["outputArtifacts"], outputId: string) {
@@ -22,7 +28,11 @@ function resolveBooleanParam(params: Record<string, unknown>, key: string, fallb
   return fallback;
 }
 
-function isPotentialDepthOutput(params: Record<string, unknown>, outputId: string) {
+function isPotentialDepthOutput(nodeType: WorkflowNodeType, params: Record<string, unknown>, outputId: string) {
+  if (nodeType === "geo.vggt") {
+    return VGGT_OUTPUT_IDS.has(outputId);
+  }
+
   const modelVariant = resolveModelVariant(params);
   const exportConfidence = resolveBooleanParam(params, "exportConfidence", true);
   const exportSky = resolveBooleanParam(params, "exportSky", true);
@@ -46,7 +56,14 @@ function isPotentialDepthOutput(params: Record<string, unknown>, outputId: strin
   return true;
 }
 
-function unavailableReason(params: Record<string, unknown>, outputId: string) {
+function unavailableReason(nodeType: WorkflowNodeType, params: Record<string, unknown>, outputId: string) {
+  if (nodeType === "geo.vggt") {
+    if (outputId === "depthVideo") {
+      return "Depth video is produced only for multi-frame VGGT runs.";
+    }
+    return "This output was not produced by the latest run.";
+  }
+
   const modelVariant = resolveModelVariant(params);
   const exportConfidence = resolveBooleanParam(params, "exportConfidence", true);
   const exportSky = resolveBooleanParam(params, "exportSky", true);
@@ -73,17 +90,26 @@ function unavailableReason(params: Record<string, unknown>, outputId: string) {
   return "This output was not produced by the latest run.";
 }
 
+export function getDepthNodeOutputAvailability(
+  nodeType: WorkflowNodeType,
+  params: Record<string, unknown>,
+  outputArtifacts: GraphNodeData["outputArtifacts"],
+  outputId: string
+) {
+  const potential = isPotentialDepthOutput(nodeType, params, outputId);
+  const hasRuntimeOutputs = hasDepthRunOutputs(nodeType, outputArtifacts);
+  const available = potential && (!hasRuntimeOutputs || hasOutputArtifact(outputArtifacts, outputId));
+
+  return {
+    available,
+    reason: available ? null : unavailableReason(nodeType, params, outputId)
+  };
+}
+
 export function getDepthEstimationOutputAvailability(
   params: Record<string, unknown>,
   outputArtifacts: GraphNodeData["outputArtifacts"],
   outputId: string
 ) {
-  const potential = isPotentialDepthOutput(params, outputId);
-  const hasRuntimeOutputs = hasDepthRunOutputs(outputArtifacts);
-  const available = potential && (!hasRuntimeOutputs || hasOutputArtifact(outputArtifacts, outputId));
-
-  return {
-    available,
-    reason: available ? null : unavailableReason(params, outputId)
-  };
+  return getDepthNodeOutputAvailability("geo.depth_estimation", params, outputArtifacts, outputId);
 }

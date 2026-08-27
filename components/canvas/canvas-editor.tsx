@@ -66,7 +66,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
 import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib/graph/connection-rules";
-import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
+import { getDepthNodeOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
   isNodeSpecAvailableForCreation,
@@ -272,6 +272,7 @@ const NODE_TYPES = Object.freeze({
   "model.qwen_image_edit": WorkflowNode,
   "model.texturing": WorkflowNode,
   "geo.depth_estimation": WorkflowNode,
+  "geo.vggt": WorkflowNode,
   "geo.pointcloud_from_depth": WorkflowNode,
   "geo.mesh_reconstruction": WorkflowNode,
   "geo.uv_unwrap": WorkflowNode,
@@ -308,6 +309,7 @@ const shortcutByNodeType: Partial<Record<WorkflowNodeType, string>> = {
   "model.qwen_image_edit": "E",
   "model.texturing": "X",
   "geo.depth_estimation": "D",
+  "geo.vggt": "R",
   "geo.pointcloud_from_depth": "P",
   "geo.mesh_reconstruction": "M",
   "geo.uv_unwrap": "U",
@@ -465,8 +467,9 @@ function pickPreviewArtifact(
 }
 
 function isSourceOutputAvailable(node: Node<GraphNodeData>, outputId: string | null | undefined) {
-  if ((node.type as WorkflowNodeType) !== "geo.depth_estimation" || !outputId) return true;
-  return getDepthEstimationOutputAvailability(node.data.params ?? {}, node.data.outputArtifacts, outputId).available;
+  const nodeType = node.type as WorkflowNodeType;
+  if ((nodeType !== "geo.depth_estimation" && nodeType !== "geo.vggt") || !outputId) return true;
+  return getDepthNodeOutputAvailability(nodeType, node.data.params ?? {}, node.data.outputArtifacts, outputId).available;
 }
 
 function createWorkflowId(prefix: string) {
@@ -1033,7 +1036,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
             sourcePortArtifact?.meta?.outputKey === "sequence" ||
             sourcePortArtifact?.meta?.semantic === "image_sequence";
           const sourcePortIsDepthPreview =
-            sourceType === "geo.depth_estimation" &&
+            (sourceType === "geo.depth_estimation" || sourceType === "geo.vggt") &&
             (explicitSourceOutputHandle === null ||
               sourceOutputHandle === "depth" ||
               sourcePortArtifact?.meta?.semantic === "depth" ||
@@ -4659,7 +4662,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                         {(selectedNode.type === "model.groundingdino" ||
                           selectedNode.type === "model.sam2" ||
                           selectedNode.type === "model.sam3d_objects" ||
-                          selectedNode.type === "pipeline.scene_generation") &&
+                          selectedNode.type === "pipeline.scene_generation" ||
+                          selectedNode.type === "geo.vggt") &&
                         selectedNodeArtifacts.length > 0 ? (
                           <div className="rounded-xl border border-border/70 bg-background/40 p-2.5">
                             <p className="mb-1.5 text-xs font-medium text-zinc-300">Latest artifacts</p>
