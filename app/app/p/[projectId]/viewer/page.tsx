@@ -392,16 +392,16 @@ export default async function ViewerPage({
 
     return (
       <div className="flex h-full min-h-0 flex-col gap-3">
-        <Card className="rounded-2xl border-border/70 panel-blur">
+        <Card className="rounded-xl border-white/[0.08] panel-blur">
           <CardHeader className="pb-2">
-            <CardTitle className="text-white">Choose Viewer Source</CardTitle>
+            <CardTitle className="studio-hero-title font-medium text-white">Choose Viewer Source</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm text-zinc-300">
             <p>Select node/version to open in viewer, or start with an empty scene.</p>
             <div className="flex flex-wrap gap-2">
               <Link
                 href={`/app/p/${projectId}/viewer?empty=1`}
-                className="inline-flex h-9 items-center justify-center rounded-md border border-border/70 bg-background/60 px-3 text-xs text-zinc-100 transition hover:bg-white/10"
+                className="inline-flex h-9 items-center justify-center rounded-md border border-white/10 bg-white/[0.035] px-3 text-xs text-zinc-100 transition hover:bg-white/[0.08]"
               >
                 Open Empty Viewer
               </Link>
@@ -410,7 +410,7 @@ export default async function ViewerPage({
         </Card>
 
         {groupedByNode.length === 0 ? (
-          <Card className="rounded-2xl border-border/70 panel-blur">
+          <Card className="rounded-xl border-white/[0.08] panel-blur">
             <CardContent className="py-6 text-sm text-muted-foreground">
               No scene artifacts found yet. Run `CustomSceneGeneration` node first.
             </CardContent>
@@ -418,7 +418,7 @@ export default async function ViewerPage({
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
             {groupedByNode.map((group) => (
-              <Card key={group.nodeId} className="rounded-2xl border-border/70 panel-blur">
+              <Card key={group.nodeId} className="rounded-xl border-white/[0.08] panel-blur">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm text-white">
                     {group.nodeLabel ?? group.nodeType}
@@ -434,7 +434,7 @@ export default async function ViewerPage({
                         nodeId: group.nodeId,
                         bundleMode: selectedBundleMode
                       })}
-                      className="flex items-center justify-between rounded-md border border-border/60 bg-background/50 px-2 py-1.5 text-xs text-zinc-200 transition hover:bg-white/10"
+                      className="flex items-center justify-between rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-xs text-zinc-200 transition hover:bg-white/[0.08]"
                     >
                       <span>{artifact.kind}</span>
                       <span className="text-zinc-400">
@@ -604,11 +604,11 @@ export default async function ViewerPage({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {openEmptyViewer ? (
-        <Card className="mb-2 rounded-2xl border-sky-300/30 bg-sky-500/10">
+        <Card className="mb-2 rounded-xl border-white/[0.08] bg-white/[0.035]">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sky-100">Empty Viewer Mode</CardTitle>
+            <CardTitle className="text-zinc-100">Empty Viewer Mode</CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-sky-100/90">
+          <CardContent className="text-sm text-zinc-300">
             Scene started empty. Load a local file, add external object, or open a node version from chooser.
           </CardContent>
         </Card>

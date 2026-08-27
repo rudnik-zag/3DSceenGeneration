@@ -65,10 +65,10 @@ function RegisterForm() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#0b0d14] p-4">
-      <Card className="w-full max-w-md rounded-2xl border-border/70 bg-black/40">
+    <main className="flex min-h-screen items-center justify-center studio-dot-bg p-4">
+      <Card className="w-full max-w-md rounded-xl border-white/[0.08] bg-[#1a1a1d]/86">
         <CardHeader>
-          <CardTitle className="text-2xl text-white">Create Account</CardTitle>
+          <CardTitle className="studio-hero-title text-2xl font-medium text-white">Create Account</CardTitle>
           <CardDescription>Start building secure private workflows.</CardDescription>
         </CardHeader>
         <CardContent>
@@ -113,7 +113,7 @@ function RegisterForm() {
           </form>
           <p className="mt-4 text-sm text-zinc-300">
             Already have an account?{" "}
-            <Link className="text-cyan-300 hover:underline" href="/login">
+            <Link className="text-white hover:underline" href="/login">
               Sign in
             </Link>
           </p>
@@ -125,7 +125,7 @@ function RegisterForm() {
 
 export default function RegisterPage() {
   return (
-    <Suspense fallback={<main className="min-h-screen bg-[#0b0d14]" />}>
+    <Suspense fallback={<main className="min-h-screen studio-dot-bg" />}>
       <RegisterForm />
     </Suspense>
   );

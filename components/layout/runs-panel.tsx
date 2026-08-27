@@ -76,7 +76,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-white">Workflow Runs</h2>
+        <h2 className="studio-hero-title text-xl font-medium text-white">Workflow Runs</h2>
         <div className="flex items-center gap-2">
           <Button variant="outline" className="rounded-xl" onClick={refreshRuns}>
             Refresh
@@ -87,7 +87,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
         </div>
       </div>
 
-      <Card className="rounded-2xl border-border/70 panel-blur">
+      <Card className="rounded-xl border-white/[0.08] panel-blur">
         <CardContent className="p-0">
           <Table>
             <TableHeader>
@@ -137,7 +137,7 @@ export function RunsPanel({ projectId, initialRuns }: { projectId: string; initi
       </Card>
 
       {runs[0] ? (
-        <Card className="rounded-2xl border-border/70 panel-blur">
+        <Card className="rounded-xl border-white/[0.08] panel-blur">
           <CardContent className="p-4">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="font-semibold">Latest run logs</h3>

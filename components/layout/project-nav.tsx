@@ -18,8 +18,8 @@ export function ProjectNav({
 
   const wrapperClass =
     variant === "underline"
-      ? "inline-flex gap-1 border-b border-border/60"
-      : "inline-flex rounded-xl studio-panel p-1";
+      ? "inline-flex gap-1 border-b border-white/[0.08]"
+      : "inline-flex rounded-lg border border-white/[0.08] bg-white/[0.025] p-1";
 
   return (
     <div className={cn(variant === "pill" && "mt-4", wrapperClass, className)}>
@@ -28,12 +28,12 @@ export function ProjectNav({
         const itemClass =
           variant === "underline"
             ? cn(
-                "rounded-t-md border-b-2 border-transparent px-3 py-1.5 text-sm text-muted-foreground motion-fast transition hover:border-primary/35 hover:text-foreground",
-                active && "border-primary text-foreground"
+                "rounded-t-md border-b-2 border-transparent px-3 py-1.5 text-sm text-muted-foreground motion-fast transition hover:border-white/35 hover:text-foreground",
+                active && "border-white text-foreground"
               )
             : cn(
-                "rounded-lg px-3 py-1.5 text-sm text-muted-foreground motion-fast transition hover:bg-accent hover:text-foreground",
-                active && "bg-accent text-foreground"
+                "rounded-md px-3 py-1.5 text-sm text-muted-foreground motion-fast transition hover:bg-white/5 hover:text-foreground",
+                active && "bg-white text-[#18181a]"
               );
         return (
           <Link

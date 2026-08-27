@@ -976,7 +976,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
               className={cn(
                 "rounded-md px-2 py-1 text-[10px] transition",
                 inputImageSourceMode === "upload"
-                  ? "border border-sky-400/40 bg-sky-500/15 text-sky-200"
+                  ? "border border-white/30 bg-white/[0.12] text-white"
                   : "border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08]"
               )}
             >
@@ -1129,7 +1129,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
           <div
             className={cn(
               "rounded-xl border border-white/10 bg-gradient-to-br p-2",
-              previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+              previewTint[effectiveArtifactKind ?? "image"] ?? "from-white/10 to-white/[0.035]"
             )}
           >
             <div className="relative aspect-video overflow-hidden rounded-lg border border-white/10 bg-black/35">
@@ -1188,7 +1188,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="nodrag inline-flex h-7 items-center gap-1 rounded-md border border-[#4f6478] bg-[#253341] px-2 text-[10px] font-medium text-[#c9def1] transition hover:bg-[#2b3d4e]"
+                    className="nodrag inline-flex h-7 items-center gap-1 rounded-md border border-white/15 bg-white/[0.06] px-2 text-[10px] font-medium text-zinc-200 transition hover:bg-white/[0.1]"
                     onClick={() => setSequencePlaying((current) => !current)}
                     disabled={previewMode === "single" || sequenceFrames.length <= 1}
                   >
@@ -1229,7 +1229,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
                     setSequencePlaying(false);
                     setSequenceFrameIndex(Number(event.target.value) || 0);
                   }}
-                  className="nodrag w-full accent-sky-400"
+                  className="nodrag w-full accent-white"
                 />
               </div>
             ) : null}
@@ -1239,7 +1239,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
         <div
           className={cn(
             "mb-2 rounded-xl border border-white/10 bg-gradient-to-br p-2",
-            previewTint[effectiveArtifactKind ?? "image"] ?? "from-sky-500/25 to-cyan-500/20"
+            previewTint[effectiveArtifactKind ?? "image"] ?? "from-white/10 to-white/[0.035]"
           )}
           onDragOver={
             isInputMediaNode && !isRuntimeLocked
@@ -1264,7 +1264,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
           <div className="relative aspect-video overflow-hidden rounded-lg border border-white/10 bg-black/35">
             {data.status === "running" && isImageGenerationNode ? (
               <div className="relative h-full w-full overflow-hidden bg-black/70">
-                <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-emerald-500/20 via-sky-400/25 to-emerald-500/20" />
+                <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-white/[0.05] via-white/15 to-white/[0.05]" />
                 <div className="absolute inset-0 animate-pulse bg-gradient-to-tr from-transparent via-white/10 to-transparent" />
                 <div className="absolute inset-0 grid place-items-center text-center">
                   <div>

@@ -7099,7 +7099,7 @@ export function UnifiedWorldViewer({
       ) : null}
 
       {shortcutHint ? (
-        <div className="absolute left-1/2 top-[86px] z-40 -translate-x-1/2 rounded-full border border-cyan-300/35 bg-cyan-500/10 px-3 py-1 text-[11px] text-cyan-100 panel-fade-in">
+        <div className="absolute left-1/2 top-[86px] z-40 -translate-x-1/2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-[11px] text-zinc-100 panel-fade-in">
           {shortcutHint}
         </div>
       ) : null}
