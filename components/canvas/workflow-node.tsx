@@ -230,6 +230,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
   const nodeType = type as WorkflowNodeType;
   const spec = nodeSpecRegistry[nodeType];
   const Icon = nodeIconMap[nodeType] ?? Sparkles;
+  const isUnavailable = spec.ui?.available === false;
   const isGroundingDinoNode = nodeType === "model.groundingdino";
   const isQwenImageEditNode = nodeType === "model.qwen_image_edit";
   const isSam2Node = nodeType === "model.sam2";
@@ -265,6 +266,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
   const usesImageSizing = isInputMediaNode || isPreviewNode;
   const hasImagePreview = Boolean(data.previewUrl);
   const canRunNode =
+    !isUnavailable &&
     Boolean(data.onRunNode && spec.ui?.nodeRunEnabled) &&
     (!isInputImageNode || (isImageGenerationNode && inputImageModel.trim().length > 0));
   const promptText = pickPromptText(data);
@@ -467,7 +469,7 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   const nodeStatus = data.status ?? "idle";
-  const isRuntimeLocked = Boolean(data.isLockedByRun || nodeStatus === "running");
+  const isRuntimeLocked = Boolean(isUnavailable || data.isLockedByRun || nodeStatus === "running");
   const statusFxClass =
     nodeStatus === "success"
       ? "node-success-glow"
@@ -662,6 +664,8 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
       className={cn(
         "relative rounded-[9px] border border-[#494949] bg-[#2f2f2f]/95 p-2.5 text-zinc-100 shadow-[0_8px_22px_rgba(0,0,0,0.55)] motion-fast hover:scale-[1.01] hover:border-[#5b83a8] hover:shadow-[0_0_0_1px_rgba(91,131,168,0.3),0_12px_34px_rgba(0,0,0,0.62)]",
         sizeClass,
+        isUnavailable &&
+          "grayscale opacity-55 hover:scale-100 hover:border-[#494949] hover:shadow-[0_8px_22px_rgba(0,0,0,0.55)]",
         selected && "scale-[1.02] border-[#78a9d3] shadow-[0_0_0_1px_rgba(120,169,211,0.65),0_10px_30px_rgba(0,0,0,0.6)]",
         statusFxClass
       )}
@@ -723,11 +727,22 @@ function WorkflowNodeImpl({ id, data, type, selected }: NodeProps<GraphNodeData>
               {tag}
             </Badge>
           ) : null}
+          {isUnavailable ? (
+            <Badge className="rounded border border-zinc-600 bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400" variant="secondary">
+              disabled
+            </Badge>
+          ) : null}
           <Badge className={cn("rounded border px-1.5 py-0.5 text-[10px] capitalize", statusClass[nodeStatus])} variant="secondary">
             {nodeStatus}
           </Badge>
         </div>
       </div>
+
+      {isUnavailable ? (
+        <div className="mb-2 rounded-md border border-zinc-700 bg-zinc-900/60 px-2 py-1 text-[10px] text-zinc-400">
+          {spec.ui?.unavailableReason ?? "This node is not implemented yet."}
+        </div>
+      ) : null}
 
       {nodeType === "model.sam2" ? (
         <div className="mb-2 rounded-md border border-[#4b5f70] bg-[#24303a] px-2 py-1 text-[10px] text-[#c4d8ea]">

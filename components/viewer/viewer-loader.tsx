@@ -20,6 +20,22 @@ interface ViewerArtifact {
 
 type SplatFormatHint = "ply" | "splat" | "ksplat" | "spz" | null;
 type BundleMode = "same_node" | "project_fallback";
+type ViewerLightType = "ambient" | "point" | "spot" | "directional";
+
+interface ViewerLightConfig {
+  id: string;
+  type: ViewerLightType;
+  label: string;
+  enabled: boolean;
+  color: string;
+  intensity: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  distance: number;
+  decay: number;
+  angle: number;
+  penumbra: number;
+}
 
 interface WorldManifestResponse {
   artifactId: string;
@@ -61,6 +77,7 @@ interface WorldManifestResponse {
     sunIntensity: number;
     sunColor: string;
     groundColor: string;
+    lights?: ViewerLightConfig[];
   } | null;
   cameraPath?: CameraPathManifest | null;
 }
@@ -102,6 +119,7 @@ interface UnifiedManifest {
     sunIntensity: number;
     sunColor: string;
     groundColor: string;
+    lights?: ViewerLightConfig[];
   } | null;
   cameraPath?: CameraPathManifest | null;
   meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
@@ -832,7 +850,7 @@ export function ViewerLoader({
               <CardTitle className="text-white">No 3D artifact loaded</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm text-muted-foreground">
-              <p>Open a local `.ply` / `.glb` file, or generate artifacts from the canvas workflow.</p>
+              <p>Open a local `.ply` / `.glb` file, or generate artifacts from the graph editor workflow.</p>
             </CardContent>
           </Card>
         )}

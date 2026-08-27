@@ -26,7 +26,7 @@ export default async function ProjectLayout({
   });
 
   const nav = [
-    { href: `/app/p/${projectId}/canvas`, label: "Canvas" },
+    { href: `/app/p/${projectId}/graph-editor`, label: "GraphEditor" },
     { href: `/app/p/${projectId}/runs`, label: "Runs" },
     { href: `/app/p/${projectId}/viewer`, label: "Viewer" }
   ];

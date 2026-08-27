@@ -42,6 +42,16 @@ function jsonOutput(outputId: string, data: Record<string, unknown>, hidden = fa
   };
 }
 
+function parseLightsJson(value: unknown) {
+  if (typeof value !== "string" || value.trim().length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export class MockModelRunner implements NodeExecutor {
   async executeNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
     const now = new Date().toISOString();
@@ -196,6 +206,8 @@ export class MockModelRunner implements NodeExecutor {
           sunIntensity: Number.isFinite(Number(ctx.params.sunIntensity)) ? Number(ctx.params.sunIntensity) : 1.2,
           sunColor: typeof ctx.params.sunColor === "string" ? ctx.params.sunColor : "#ffffff",
           groundColor: typeof ctx.params.groundColor === "string" ? ctx.params.groundColor : "#101828",
+          lights: Array.isArray(ctx.params.lights) ? ctx.params.lights : parseLightsJson(ctx.params.lightsJson),
+          lightsJson: typeof ctx.params.lightsJson === "string" ? ctx.params.lightsJson : "",
           createdAt: now
         };
         const output = jsonOutput("environment", payload);

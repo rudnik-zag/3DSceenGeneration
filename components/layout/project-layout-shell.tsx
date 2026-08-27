@@ -20,7 +20,7 @@ interface ProjectLayoutShellProps {
 
 export function ProjectLayoutShell({ projectName, counts, nav, children }: ProjectLayoutShellProps) {
   const pathname = usePathname();
-  const isImmersiveRoute = pathname.includes("/viewer") || pathname.includes("/canvas");
+  const isImmersiveRoute = pathname.includes("/viewer") || pathname.includes("/graph-editor");
 
   if (isImmersiveRoute) {
     return (

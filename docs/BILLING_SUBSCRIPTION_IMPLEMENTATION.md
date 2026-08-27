@@ -159,7 +159,7 @@ Handled event families:
   - checkout actions (plan + token packs + portal)
 - `/settings` (protected placeholder page)
 
-### Canvas run UX
+### GraphEditor run UX
 Before queueing a run:
 1. save graph
 2. estimate token cost

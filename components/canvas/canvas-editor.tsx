@@ -69,6 +69,7 @@ import { findFirstCompatibleHandles, validateConnectionByNodeTypes } from "@/lib
 import { getDepthEstimationOutputAvailability } from "@/lib/graph/depth-output-availability";
 import { migrateGraphDocument } from "@/lib/graph/migrations";
 import {
+  isNodeSpecAvailableForCreation,
   mergeNodeParamsWithDefaults,
   nodeGroups,
   nodeSpecRegistry
@@ -137,7 +138,7 @@ interface RunPayload {
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 
-interface CanvasEditorProps {
+interface GraphEditorProps {
   projectId: string;
   initialGraph: GraphDocument;
   versions: GraphVersion[];
@@ -851,7 +852,7 @@ function dispatchTokenStatus(detail: {
   window.dispatchEvent(new CustomEvent("billing:token-status", { detail }));
 }
 
-function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, nodeArtifacts }: CanvasEditorProps) {
+function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, nodeArtifacts }: GraphEditorProps) {
   const reactFlow = useReactFlow();
   const viewport = useViewport();
   const migratedInitialGraph = useMemo(() => migrateGraphDocument(initialGraph), [initialGraph]);
@@ -1288,7 +1289,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       if (restoredPreset === "compact" || restoredPreset === "balanced" || restoredPreset === "cinematic") {
         setNodeScalePreset(restoredPreset);
       }
-      toast({ title: "Draft restored", description: "Recovered your latest unsaved canvas state." });
+      toast({ title: "Draft restored", description: "Recovered your latest unsaved GraphEditor state." });
     } catch {
       window.localStorage.removeItem(draftStorageKey);
     }
@@ -1550,6 +1551,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   const addNode = useCallback(
     (nodeType: WorkflowNodeType, x = 80, y = 80) => {
+      const spec = nodeSpecRegistry[nodeType];
+      if (!isNodeSpecAvailableForCreation(nodeType)) {
+        toast({
+          title: "Node unavailable",
+          description: spec.ui?.unavailableReason ?? `${spec.title} is not implemented yet.`
+        });
+        return null;
+      }
       const id = `${nodeType}-${Date.now().toString(36)}`;
       const newNode = makeCanvasNode(nodeType, id, { x, y });
       setNodes((prev) => [...prev, newNode]);
@@ -1589,6 +1598,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     event.preventDefault();
     const nodeType = event.dataTransfer.getData("application/reactflow") as WorkflowNodeType;
     if (!nodeType) return;
+    if (!isNodeSpecAvailableForCreation(nodeType)) {
+      const spec = nodeSpecRegistry[nodeType];
+      toast({
+        title: "Node unavailable",
+        description: spec.ui?.unavailableReason ?? `${spec.title} is not implemented yet.`
+      });
+      return;
+    }
     const position = reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
     addNode(nodeType, position.x, position.y);
   };
@@ -1899,7 +1916,18 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const addNodeFromContextMenu = useCallback(
     (nodeType: WorkflowNodeType) => {
       if (!paneMenu) return;
+      if (!isNodeSpecAvailableForCreation(nodeType)) {
+        const spec = nodeSpecRegistry[nodeType];
+        toast({
+          title: "Node unavailable",
+          description: spec.ui?.unavailableReason ?? `${spec.title} is not implemented yet.`
+        });
+        setPendingConnect(null);
+        setPaneMenu(null);
+        return;
+      }
       const newNodeId = addNode(nodeType, paneMenu.flowX, paneMenu.flowY);
+      if (!newNodeId) return;
       if (pendingConnect) {
         const pendingNode = nodes.find((node) => node.id === pendingConnect.nodeId);
         if (!pendingNode) {
@@ -1992,6 +2020,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   const addNodeFromSearchMenu = useCallback(
     (nodeType: WorkflowNodeType) => {
       if (!nodeSearchMenu) return;
+      if (!isNodeSpecAvailableForCreation(nodeType)) {
+        const spec = nodeSpecRegistry[nodeType];
+        toast({
+          title: "Node unavailable",
+          description: spec.ui?.unavailableReason ?? `${spec.title} is not implemented yet.`
+        });
+        return;
+      }
       addNode(nodeType, nodeSearchMenu.flowX, nodeSearchMenu.flowY);
       setNodeSearchMenu(null);
     },
@@ -2044,7 +2080,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           setPaneMenu(null);
           setNodeMenu(null);
           setNodeSearchMenu(null);
-          toast({ title: "Pasted", description: "Nodes inserted on canvas." });
+          toast({ title: "Pasted", description: "Nodes inserted in GraphEditor." });
         }
         return;
       }
@@ -2229,7 +2265,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       const builtEdges = built.edges.map((edge) => withStyledEdge(edge as Edge));
       setNodes((prev) => [...prev, ...builtNodes]);
       setEdges((prev) => [...prev, ...builtEdges]);
-      toast({ title: "Workflow inserted", description: `${preset.label} starter added to canvas.` });
+      toast({ title: "Workflow inserted", description: `${preset.label} starter added to GraphEditor.` });
     },
     [nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes]
   );
@@ -2331,7 +2367,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
     setWorkflowGroups((prev) => [...prev, group]);
     setActiveWorkflowTemplateId(built.template.id);
     setActiveWorkflowGroupId(group.id);
-    toast({ title: "Workflow created", description: `${name} saved and grouped on canvas.` });
+    toast({ title: "Workflow created", description: `${name} saved and grouped in GraphEditor.` });
   }, [
     buildWorkflowTemplateFromSelection,
     createWorkflowGroupFromSelection,
@@ -2538,7 +2574,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
       setWorkflowGroups((prev) => [...prev, group]);
       setActiveWorkflowTemplateId(template.id);
       setActiveWorkflowGroupId(group.id);
-      toast({ title: "Workflow placed", description: `${template.name} added to canvas.` });
+      toast({ title: "Workflow placed", description: `${template.name} added to GraphEditor.` });
     },
     [createWorkflowGroupFromSelection, nodeScalePreset, reactFlow, resolvePresetAnchor, setEdges, setNodes, workflowTemplates]
   );
@@ -2571,8 +2607,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         items: group.specs.map((spec) => ({
           id: `add-node-spec-${spec.type}`,
           kind: "action",
-          label: spec.title,
+          label: spec.ui?.available === false ? `${spec.title} (not implemented)` : spec.title,
           shortcut: shortcutByNodeType[spec.type],
+          disabled: spec.ui?.available === false,
           onSelect: () => addNodeFromContextMenu(spec.type)
         }))
       });
@@ -3572,7 +3609,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   };
 
   const shareProject = async () => {
-    const url = `${window.location.origin}/app/p/${projectId}/canvas`;
+    const url = `${window.location.origin}/app/p/${projectId}/graph-editor`;
     await navigator.clipboard.writeText(url);
     toast({ title: "Share link copied", description: url });
   };
@@ -4341,6 +4378,13 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                     event.preventDefault();
                     const target = filteredNodeSearchSpecs[nodeSearchMenu.highlighted] ?? filteredNodeSearchSpecs[0];
                     if (!target) return;
+                    if (target.ui?.available === false) {
+                      toast({
+                        title: "Node unavailable",
+                        description: target.ui.unavailableReason ?? `${target.title} is not implemented yet.`
+                      });
+                      return;
+                    }
                     addNodeFromSearchMenu(target.type);
                   }
                 }}
@@ -4351,12 +4395,17 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                 <div className="space-y-0.5">
                   {filteredNodeSearchSpecs.map((spec, index) => {
                     const isHighlighted = index === nodeSearchMenu.highlighted;
+                    const isUnavailable = spec.ui?.available === false;
                     return (
                       <button
                         key={`search-node-${spec.type}`}
                         type="button"
+                        disabled={isUnavailable}
+                        title={isUnavailable ? spec.ui?.unavailableReason ?? "Node is not implemented yet." : undefined}
                         className={`flex h-7 w-full items-center justify-between rounded px-2 text-left text-[13px] transition ${
-                          isHighlighted
+                          isUnavailable
+                            ? "cursor-not-allowed border border-transparent text-zinc-500 opacity-45"
+                            : isHighlighted
                             ? "border border-cyan-400/50 bg-cyan-400/10 text-zinc-100"
                             : "border border-transparent text-zinc-200 hover:border-[#2f2f2f] hover:bg-[#181a20]"
                         }`}
@@ -4370,10 +4419,15 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                               : current
                           )
                         }
-                        onClick={() => addNodeFromSearchMenu(spec.type)}
+                        onClick={() => {
+                          if (isUnavailable) return;
+                          addNodeFromSearchMenu(spec.type);
+                        }}
                       >
                         <span className="truncate">{spec.title}</span>
-                        <span className="ml-2 text-[11px] text-zinc-500">{spec.type}</span>
+                        <span className="ml-2 text-[11px] text-zinc-500">
+                          {isUnavailable ? "not implemented" : spec.type}
+                        </span>
                       </button>
                     );
                   })}
@@ -4799,10 +4853,12 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
   );
 }
 
-export function CanvasEditor(props: CanvasEditorProps) {
+export function GraphEditor(props: GraphEditorProps) {
   return (
     <ReactFlowProvider>
       <GraphCanvasInner {...props} />
     </ReactFlowProvider>
   );
 }
+
+export const CanvasEditor = GraphEditor;

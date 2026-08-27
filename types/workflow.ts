@@ -79,6 +79,8 @@ export interface NodeSpec {
     hiddenOutputIds?: string[];
     advancedOutputIds?: string[];
     nodeRunEnabled?: boolean;
+    available?: boolean;
+    unavailableReason?: string;
   };
 }
 

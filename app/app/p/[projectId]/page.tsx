@@ -2,5 +2,5 @@ import { redirect } from "next/navigation";
 
 export default async function ProjectIndexPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
-  redirect(`/app/p/${projectId}/canvas`);
+  redirect(`/app/p/${projectId}/graph-editor`);
 }

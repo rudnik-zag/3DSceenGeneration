@@ -20,7 +20,7 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { EXRLoader } from "three/examples/jsm/loaders/EXRLoader.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import { Camera, Crosshair, Download, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
+import { Camera, Crosshair, Download, Lightbulb, MoveHorizontal, Navigation, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +39,23 @@ import {
 } from "@/lib/viewer/ground-plane-alignment";
 import { getSplatRuntimePreference, isSparkRuntimeEnabled } from "@/lib/viewer/splat-runtime-config";
 import { cn } from "@/lib/utils";
+
+type ViewerLightType = "ambient" | "point" | "spot" | "directional";
+
+interface ViewerLightConfig {
+  id: string;
+  type: ViewerLightType;
+  label: string;
+  enabled: boolean;
+  color: string;
+  intensity: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  distance: number;
+  decay: number;
+  angle: number;
+  penumbra: number;
+}
 
 interface WorldManifest {
   artifactId?: string;
@@ -62,6 +79,7 @@ interface WorldManifest {
     sunIntensity: number;
     sunColor: string;
     groundColor: string;
+    lights?: ViewerLightConfig[];
   } | null;
   meshes: Array<{ id: string; url: string; formatHint?: "ply" | "glb" | "gltf" | null }>;
   splats: Array<{
@@ -92,7 +110,7 @@ type ViewerEnvironmentConfig = NonNullable<WorldManifest["environment"]>;
 
 type NavigationMode = "orbit" | "fly";
 type SplatLoadProfile = "full" | "balanced" | "preview";
-type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform" | "cameras";
+type FloatingPanel = "none" | "file" | "settings" | "hud" | "objects" | "transform" | "cameras" | "lights";
 type BundleMode = "same_node" | "project_fallback";
 type SplatRuntimeName = "legacy" | "spark";
 type LoadedSplatRuntime = SplatRuntimeName | "points";
@@ -254,6 +272,23 @@ const DEFAULT_STATS: ViewerHudStats = {
   activeLodDistribution: { "0": 0, "1": 0, "2": 0 }
 };
 
+const DEFAULT_VIEWER_LIGHTS: ViewerLightConfig[] = [
+  {
+    id: "ambient-default",
+    type: "ambient",
+    label: "Ambient Light",
+    enabled: true,
+    color: "#ffffff",
+    intensity: 1.1,
+    position: [0, 0, 0],
+    target: [0, 0, 0],
+    distance: 0,
+    decay: 2,
+    angle: 30,
+    penumbra: 0.25
+  }
+];
+
 const DEFAULT_VIEWER_ENVIRONMENT: ViewerEnvironmentConfig = {
   enabled: true,
   hdriUrl: null,
@@ -267,13 +302,122 @@ const DEFAULT_VIEWER_ENVIRONMENT: ViewerEnvironmentConfig = {
   ambientIntensity: 1.1,
   sunIntensity: 1.2,
   sunColor: "#ffffff",
-  groundColor: "#101828"
+  groundColor: "#101828",
+  lights: DEFAULT_VIEWER_LIGHTS
 };
+
+function isViewerLightType(value: unknown): value is ViewerLightType {
+  return value === "ambient" || value === "point" || value === "spot" || value === "directional";
+}
+
+function normalizeVector3Tuple(value: unknown, fallback: [number, number, number]): [number, number, number] {
+  if (!Array.isArray(value) || value.length < 3) return fallback;
+  return [0, 1, 2].map((index) => {
+    const parsed = Number(value[index]);
+    return Number.isFinite(parsed) ? parsed : fallback[index];
+  }) as [number, number, number];
+}
+
+function makeViewerLightDefaults(type: ViewerLightType, id = `${type}-${Date.now()}`): ViewerLightConfig {
+  if (type === "ambient") {
+    return {
+      ...DEFAULT_VIEWER_LIGHTS[0],
+      id,
+      label: "Ambient Light"
+    };
+  }
+  if (type === "spot") {
+    return {
+      id,
+      type,
+      label: "Spot Light",
+      enabled: true,
+      color: "#ffffff",
+      intensity: 2.5,
+      position: [2.5, 4, 2.5],
+      target: [0, 0, 0],
+      distance: 18,
+      decay: 2,
+      angle: 28,
+      penumbra: 0.35
+    };
+  }
+  if (type === "point") {
+    return {
+      id,
+      type,
+      label: "Point Light",
+      enabled: true,
+      color: "#ffffff",
+      intensity: 3,
+      position: [2, 3, 2],
+      target: [0, 0, 0],
+      distance: 16,
+      decay: 2,
+      angle: 30,
+      penumbra: 0.25
+    };
+  }
+  return {
+    id,
+    type,
+    label: "Directional Light",
+    enabled: true,
+    color: "#ffffff",
+    intensity: 1.2,
+    position: [4, 6, 3],
+    target: [0, 0, 0],
+    distance: 0,
+    decay: 2,
+    angle: 30,
+    penumbra: 0.25
+  };
+}
+
+function normalizeViewerLightConfig(raw: unknown, index: number): ViewerLightConfig | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const type = isViewerLightType(record.type) ? record.type : null;
+  if (!type) return null;
+  const fallback = makeViewerLightDefaults(type, `${type}-${index}`);
+  const idRaw = typeof record.id === "string" ? record.id.trim() : "";
+  const labelRaw = typeof record.label === "string" ? record.label.trim() : "";
+  return {
+    ...fallback,
+    id: idRaw.length > 0 ? idRaw.slice(0, 80) : fallback.id,
+    label: labelRaw.length > 0 ? labelRaw.slice(0, 80) : fallback.label,
+    enabled: typeof record.enabled === "boolean" ? record.enabled : fallback.enabled,
+    color: safeColorOrFallback(typeof record.color === "string" ? record.color : fallback.color, fallback.color),
+    intensity: clampRange(Number.isFinite(Number(record.intensity)) ? Number(record.intensity) : fallback.intensity, 0, 20),
+    position: normalizeVector3Tuple(record.position, fallback.position),
+    target: normalizeVector3Tuple(record.target, fallback.target),
+    distance: clampRange(Number.isFinite(Number(record.distance)) ? Number(record.distance) : fallback.distance, 0, 200),
+    decay: clampRange(Number.isFinite(Number(record.decay)) ? Number(record.decay) : fallback.decay, 0, 8),
+    angle: clampRange(Number.isFinite(Number(record.angle)) ? Number(record.angle) : fallback.angle, 1, 89),
+    penumbra: clampRange(Number.isFinite(Number(record.penumbra)) ? Number(record.penumbra) : fallback.penumbra, 0, 1)
+  };
+}
+
+function normalizeViewerLightsConfig(raw: unknown, legacy: Pick<ViewerEnvironmentConfig, "ambientIntensity" | "sunColor">): ViewerLightConfig[] {
+  if (Array.isArray(raw)) {
+    const lights = raw
+      .map((entry, index) => normalizeViewerLightConfig(entry, index))
+      .filter((entry): entry is ViewerLightConfig => Boolean(entry));
+    if (lights.length > 0) return lights;
+  }
+  return [
+    {
+      ...DEFAULT_VIEWER_LIGHTS[0],
+      color: legacy.sunColor,
+      intensity: legacy.ambientIntensity
+    }
+  ];
+}
 
 function normalizeEnvironmentConfig(input: WorldManifest["environment"] | null | undefined): ViewerEnvironmentConfig {
   const base = input ?? null;
   const hdriUrlRaw = typeof base?.hdriUrl === "string" ? base.hdriUrl.trim() : "";
-  return {
+  const normalizedBase = {
     ...DEFAULT_VIEWER_ENVIRONMENT,
     ...(base ?? {}),
     hdriUrl: hdriUrlRaw.length > 0 ? hdriUrlRaw : null,
@@ -333,6 +477,13 @@ function normalizeEnvironmentConfig(input: WorldManifest["environment"] | null |
         ? base.backgroundMode
         : DEFAULT_VIEWER_ENVIRONMENT.backgroundMode,
     enabled: typeof base?.enabled === "boolean" ? base.enabled : DEFAULT_VIEWER_ENVIRONMENT.enabled
+  };
+  return {
+    ...normalizedBase,
+    lights: normalizeViewerLightsConfig(base?.lights, {
+      ambientIntensity: normalizedBase.ambientIntensity,
+      sunColor: normalizedBase.sunColor
+    })
   };
 }
 
@@ -1209,6 +1360,7 @@ export function UnifiedWorldViewer({
   const modelviewerAutoRotateRef = useRef(false);
   const showGridRef = useRef(true);
   const showCameraPathRef = useRef(true);
+  const showLightHelpersRef = useRef(true);
   const gridRef = useRef<THREE.GridHelper | null>(null);
   const flySpeedRef = useRef(4);
   const rotationDisplayRef = useRef<Map<string, EulerTriplet>>(new Map());
@@ -1225,8 +1377,7 @@ export function UnifiedWorldViewer({
   const groupCounterRef = useRef(1);
   const objectListSelectionAnchorRef = useRef<string | null>(null);
   const loadedExternalAdditionIdsRef = useRef<Set<string>>(new Set());
-  const hemiLightRef = useRef<THREE.HemisphereLight | null>(null);
-  const directionalLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const environmentLightsGroupRef = useRef<THREE.Group | null>(null);
   const pmremGeneratorRef = useRef<THREE.PMREMGenerator | null>(null);
   const hdriSourceTextureRef = useRef<THREE.Texture | null>(null);
   const hdriPmremTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
@@ -1245,6 +1396,7 @@ export function UnifiedWorldViewer({
   const [showGrid, setShowGrid] = useState(true);
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [lightMenuOpen, setLightMenuOpen] = useState(false);
   const [flySpeed, setFlySpeed] = useState([4]);
   const [splatLoadProfile, setSplatLoadProfile] = useState<SplatLoadProfile>("full");
   const [splatDensityDraft, setSplatDensityDraft] = useState([100]);
@@ -1279,6 +1431,7 @@ export function UnifiedWorldViewer({
   const [artifactContextMenu, setArtifactContextMenu] = useState<ArtifactContextMenuState | null>(null);
   const [groundAlignDebug, setGroundAlignDebug] = useState(false);
   const [showCameraPath, setShowCameraPath] = useState(true);
+  const [showLightHelpers, setShowLightHelpers] = useState(true);
   const [activeCameraFrameIndex, setActiveCameraFrameIndex] = useState(0);
   const [activeCameraViewFrameId, setActiveCameraViewFrameId] = useState<string | null>(null);
   const [groupSelectionKeys, setGroupSelectionKeys] = useState<string[]>([]);
@@ -1573,6 +1726,92 @@ export function UnifiedWorldViewer({
     hdriLocalObjectUrlRef.current = null;
   }, []);
 
+  const disposeEnvironmentLights = useCallback(() => {
+    const scene = sceneRef.current;
+    const group = environmentLightsGroupRef.current;
+    if (!group) return;
+    scene?.remove(group);
+    disposeObjectTree(group);
+    environmentLightsGroupRef.current = null;
+  }, []);
+
+  const applyViewerLights = useCallback(
+    (lights: ViewerLightConfig[]) => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+
+      disposeEnvironmentLights();
+
+      const group = new THREE.Group();
+      group.name = "ViewerDynamicLights";
+
+      for (const lightConfig of lights) {
+        if (!lightConfig.enabled) continue;
+        const color = new THREE.Color(lightConfig.color);
+
+        if (lightConfig.type === "ambient") {
+          const light = new THREE.AmbientLight(color, lightConfig.intensity);
+          light.name = lightConfig.label;
+          group.add(light);
+          continue;
+        }
+
+        if (lightConfig.type === "point") {
+          const light = new THREE.PointLight(color, lightConfig.intensity, lightConfig.distance, lightConfig.decay);
+          light.name = lightConfig.label;
+          light.position.set(...lightConfig.position);
+          group.add(light);
+          if (showLightHelpersRef.current) {
+            const helper = new THREE.PointLightHelper(light, 0.25, color);
+            helper.name = `${lightConfig.label} Helper`;
+            group.add(helper);
+          }
+          continue;
+        }
+
+        if (lightConfig.type === "spot") {
+          const light = new THREE.SpotLight(
+            color,
+            lightConfig.intensity,
+            lightConfig.distance,
+            THREE.MathUtils.degToRad(lightConfig.angle),
+            lightConfig.penumbra,
+            lightConfig.decay
+          );
+          light.name = lightConfig.label;
+          light.position.set(...lightConfig.position);
+          light.target.position.set(...lightConfig.target);
+          group.add(light);
+          group.add(light.target);
+          if (showLightHelpersRef.current) {
+            const helper = new THREE.SpotLightHelper(light, color);
+            helper.name = `${lightConfig.label} Helper`;
+            helper.update();
+            group.add(helper);
+          }
+          continue;
+        }
+
+        const light = new THREE.DirectionalLight(color, lightConfig.intensity);
+        light.name = lightConfig.label;
+        light.position.set(...lightConfig.position);
+        light.target.position.set(...lightConfig.target);
+        group.add(light);
+        group.add(light.target);
+        if (showLightHelpersRef.current) {
+          const helper = new THREE.DirectionalLightHelper(light, 0.65, color);
+          helper.name = `${lightConfig.label} Helper`;
+          helper.update();
+          group.add(helper);
+        }
+      }
+
+      scene.add(group);
+      environmentLightsGroupRef.current = group;
+    },
+    [disposeEnvironmentLights]
+  );
+
   const applyViewerEnvironment = useCallback(
     async (config: ViewerEnvironmentConfig) => {
       const scene = sceneRef.current;
@@ -1591,16 +1830,7 @@ export function UnifiedWorldViewer({
       sceneWithEnvironment.environmentIntensity = config.envIntensity;
       sceneWithEnvironment.backgroundIntensity = config.envIntensity;
       sceneWithEnvironment.backgroundBlurriness = config.hdriBlur;
-
-      if (hemiLightRef.current) {
-        hemiLightRef.current.color.set(config.sunColor);
-        hemiLightRef.current.groundColor.set(config.groundColor);
-        hemiLightRef.current.intensity = config.ambientIntensity;
-      }
-      if (directionalLightRef.current) {
-        directionalLightRef.current.color.set(config.sunColor);
-        directionalLightRef.current.intensity = config.sunIntensity;
-      }
+      applyViewerLights(config.lights ?? DEFAULT_VIEWER_LIGHTS);
 
       const applyBackgroundMode = () => {
         if (config.backgroundMode === "transparent") {
@@ -1656,7 +1886,7 @@ export function UnifiedWorldViewer({
         applyBackgroundMode();
       }
     },
-    [disposeActiveHdriResources]
+    [applyViewerLights, disposeActiveHdriResources]
   );
 
   const applyHdriUrlDraft = useCallback(() => {
@@ -1706,6 +1936,92 @@ export function UnifiedWorldViewer({
     },
     [revokeLocalHdriUrl]
   );
+
+  const updateViewerLight = useCallback((lightId: string, patch: Partial<ViewerLightConfig>) => {
+    setViewerEnvironment((current) =>
+      normalizeEnvironmentConfig({
+        ...current,
+        lights: (current.lights ?? DEFAULT_VIEWER_LIGHTS).map((light) =>
+          light.id === lightId
+            ? {
+                ...light,
+                ...patch
+              }
+            : light
+        )
+      })
+    );
+  }, []);
+
+  const updateViewerLightVector = useCallback(
+    (lightId: string, field: "position" | "target", axisIndex: 0 | 1 | 2, rawValue: string) => {
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed)) return;
+      setViewerEnvironment((current) =>
+        normalizeEnvironmentConfig({
+          ...current,
+          lights: (current.lights ?? DEFAULT_VIEWER_LIGHTS).map((light) => {
+            if (light.id !== lightId) return light;
+            const nextVector: [number, number, number] = [...light[field]];
+            nextVector[axisIndex] = parsed;
+            return {
+              ...light,
+              [field]: nextVector
+            };
+          })
+        })
+      );
+    },
+    []
+  );
+
+  const addViewerLight = useCallback((type: Exclude<ViewerLightType, "ambient">) => {
+    const id =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `${type}-${crypto.randomUUID()}`
+        : `${type}-${Date.now()}`;
+    setViewerEnvironment((current) =>
+      normalizeEnvironmentConfig({
+        ...current,
+        lights: [...(current.lights ?? DEFAULT_VIEWER_LIGHTS), makeViewerLightDefaults(type, id)]
+      })
+    );
+    setOpenPanel("lights");
+  }, []);
+
+  const toggleAmbientLight = useCallback(() => {
+    setViewerEnvironment((current) => {
+      const currentLights = current.lights ?? DEFAULT_VIEWER_LIGHTS;
+      const ambientIndex = currentLights.findIndex((light) => light.type === "ambient");
+      const lights =
+        ambientIndex >= 0
+          ? currentLights.map((light, index) => (index === ambientIndex ? { ...light, enabled: !light.enabled } : light))
+          : [makeViewerLightDefaults("ambient", "ambient-default"), ...currentLights];
+      return normalizeEnvironmentConfig({
+        ...current,
+        lights
+      });
+    });
+  }, []);
+
+  const removeViewerLight = useCallback((lightId: string) => {
+    setViewerEnvironment((current) => {
+      const nextLights = (current.lights ?? DEFAULT_VIEWER_LIGHTS).filter((light) => light.id !== lightId);
+      return normalizeEnvironmentConfig({
+        ...current,
+        lights: nextLights.length > 0 ? nextLights : DEFAULT_VIEWER_LIGHTS
+      });
+    });
+  }, []);
+
+  const resetViewerLights = useCallback(() => {
+    setViewerEnvironment((current) =>
+      normalizeEnvironmentConfig({
+        ...current,
+        lights: DEFAULT_VIEWER_LIGHTS
+      })
+    );
+  }, []);
 
   useEffect(() => {
     const normalized = normalizeEnvironmentConfig(manifest.environment);
@@ -1805,6 +2121,11 @@ export function UnifiedWorldViewer({
       gridRef.current.visible = showGrid;
     }
   }, [showGrid]);
+
+  useEffect(() => {
+    showLightHelpersRef.current = showLightHelpers;
+    applyViewerLights(viewerEnvironment.lights ?? DEFAULT_VIEWER_LIGHTS);
+  }, [applyViewerLights, showLightHelpers, viewerEnvironment.lights]);
 
   useEffect(() => {
     flySpeedRef.current = flySpeed[0] ?? 4;
@@ -3686,23 +4007,6 @@ export function UnifiedWorldViewer({
     pmremGeneratorRef.current = new THREE.PMREMGenerator(renderer);
     pmremGeneratorRef.current.compileEquirectangularShader();
 
-    const hemi = new THREE.HemisphereLight(
-      new THREE.Color(initialEnvironment.sunColor),
-      new THREE.Color(initialEnvironment.groundColor),
-      initialEnvironment.ambientIntensity
-    );
-    hemi.position.set(0, 30, 0);
-    scene.add(hemi);
-    hemiLightRef.current = hemi;
-
-    const directional = new THREE.DirectionalLight(
-      new THREE.Color(initialEnvironment.sunColor),
-      initialEnvironment.sunIntensity
-    );
-    directional.position.set(8, 12, 6);
-    scene.add(directional);
-    directionalLightRef.current = directional;
-
     void applyViewerEnvironment(initialEnvironment);
 
     const grid = new THREE.GridHelper(24, 48, 0x263245, 0x111827);
@@ -4195,6 +4499,7 @@ export function UnifiedWorldViewer({
     const onPointerDown = (event: PointerEvent) => {
       setToolMenuOpen(false);
       setViewMenuOpen(false);
+      setLightMenuOpen(false);
       setOpenPanel("none");
       setObjectContextMenu(null);
       setArtifactContextMenu(null);
@@ -5208,10 +5513,9 @@ export function UnifiedWorldViewer({
       splatSupportSampleCache.clear();
       environmentApplyTokenRef.current += 1;
       disposeActiveHdriResources();
+      disposeEnvironmentLights();
       pmremGeneratorRef.current?.dispose();
       pmremGeneratorRef.current = null;
-      hemiLightRef.current = null;
-      directionalLightRef.current = null;
 
       clearGroundAlignDebug();
       disposeObjectTree(root);
@@ -5233,6 +5537,7 @@ export function UnifiedWorldViewer({
     applyMeshTransforms,
     clearGroundAlignDebug,
     disposeActiveHdriResources,
+    disposeEnvironmentLights,
     directSplats,
     applyTransformMode,
     applyViewModeProfile,
@@ -5267,6 +5572,7 @@ export function UnifiedWorldViewer({
     openPanel !== "none" ||
     toolMenuOpen ||
     viewMenuOpen ||
+    lightMenuOpen ||
     loading ||
     Boolean(error) ||
     Boolean(runtimeNotice) ||
@@ -5573,6 +5879,9 @@ export function UnifiedWorldViewer({
     updateHudFromHandles
   ]);
 
+  const viewerLights = viewerEnvironment.lights ?? DEFAULT_VIEWER_LIGHTS;
+  const ambientLight = viewerLights.find((light) => light.type === "ambient") ?? null;
+
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#04060d]">
       <div
@@ -5687,6 +5996,31 @@ export function UnifiedWorldViewer({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <DropdownMenu open={lightMenuOpen} onOpenChange={setLightMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="outline" className="h-8 rounded-lg px-2.5 text-xs">
+              <Lightbulb className="mr-1.5 h-3.5 w-3.5" />
+              Lights
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuLabel>Scene Lights</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={toggleAmbientLight}>
+              Ambient Light
+              <span className="ml-auto text-[10px] text-zinc-400">{ambientLight?.enabled === false ? "Off" : "On"}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => addViewerLight("point")}>Add Point Light</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => addViewerLight("spot")}>Add Spot Light</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => addViewerLight("directional")}>Add Directional Light</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setShowLightHelpers((current) => !current)}>
+              Light Helpers
+              <span className="ml-auto text-[10px] text-zinc-400">{showLightHelpers ? "On" : "Off"}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setOpenPanel("lights")}>Open Light Editor</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <div className="ml-auto flex items-center gap-1">
           <div className="inline-flex items-center rounded-lg border border-border/70 bg-background/35 p-1">
             <Button
@@ -5734,6 +6068,14 @@ export function UnifiedWorldViewer({
             onClick={() => setOpenPanel((prev) => (prev === "settings" ? "none" : "settings"))}
           >
             Env
+          </Button>
+          <Button
+            size="sm"
+            variant={openPanel === "lights" ? "default" : "outline"}
+            className="h-8 rounded-lg px-2.5 text-xs"
+            onClick={() => setOpenPanel((prev) => (prev === "lights" ? "none" : "lights"))}
+          >
+            Lights
           </Button>
           <Button
             size="sm"
@@ -6018,6 +6360,190 @@ export function UnifiedWorldViewer({
               Use `.hdr` or `.exr` files. URL must be reachable from browser (CORS).
             </p>
           </div>
+        </div>
+      ) : null}
+
+      {openPanel === "lights" ? (
+        <div className="absolute right-3 top-[54px] z-30 w-[360px] rounded-xl studio-panel p-3 panel-fade-in">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-300">Lights</div>
+            <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={resetViewerLights}>
+              Reset
+            </Button>
+          </div>
+          <div className="mb-2 grid grid-cols-4 gap-1">
+            <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={toggleAmbientLight}>
+              Ambient {ambientLight?.enabled === false ? "Off" : "On"}
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={() => addViewerLight("point")}>
+              + Point
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={() => addViewerLight("spot")}>
+              + Spot
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 rounded-md text-xs" onClick={() => addViewerLight("directional")}>
+              + Sun
+            </Button>
+          </div>
+          <Button
+            size="sm"
+            variant={showLightHelpers ? "default" : "outline"}
+            className="mb-2 h-7 w-full rounded-md text-xs"
+            onClick={() => setShowLightHelpers((current) => !current)}
+          >
+            Helpers {showLightHelpers ? "On" : "Off"}
+          </Button>
+          <div className="max-h-[520px] space-y-2 overflow-auto pr-1">
+            {viewerLights.map((light) => (
+              <div key={light.id} className="rounded-md border border-border/50 bg-background/20 p-2">
+                <div className="mb-2 flex items-center gap-1">
+                  <Input
+                    className="h-7 min-w-0 flex-1 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                    value={light.label}
+                    onChange={(event) => updateViewerLight(light.id, { label: event.target.value })}
+                  />
+                  <Button
+                    size="sm"
+                    variant={light.enabled ? "default" : "outline"}
+                    className="h-7 rounded-md px-2 text-xs"
+                    onClick={() => updateViewerLight(light.id, { enabled: !light.enabled })}
+                  >
+                    {light.enabled ? "On" : "Off"}
+                  </Button>
+                  {light.type !== "ambient" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-xs"
+                      onClick={() => removeViewerLight(light.id)}
+                    >
+                      Del
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                  <span>{light.type}</span>
+                  <span className="h-px flex-1 bg-border/50" />
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                    Color
+                    <Input
+                      type="color"
+                      className="mt-1 h-8 rounded-md border-border/60 bg-background/50 p-1"
+                      value={light.color}
+                      onChange={(event) => updateViewerLight(light.id, { color: event.target.value })}
+                    />
+                  </label>
+                  <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                    Intensity
+                    <Input
+                      type="number"
+                      min={0}
+                      max={20}
+                      step={0.05}
+                      className="mt-1 h-8 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                      value={light.intensity}
+                      onChange={(event) => updateViewerLight(light.id, { intensity: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+                {light.type !== "ambient" ? (
+                  <>
+                    <div className="mt-2 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Position</div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {([0, 1, 2] as const).map((axisIndex) => (
+                        <Input
+                          key={`${light.id}-position-${axisIndex}`}
+                          type="number"
+                          step={0.1}
+                          className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                          value={light.position[axisIndex]}
+                          onChange={(event) => updateViewerLightVector(light.id, "position", axisIndex, event.target.value)}
+                        />
+                      ))}
+                    </div>
+                    {(light.type === "spot" || light.type === "directional") ? (
+                      <>
+                        <div className="mt-2 text-[10px] uppercase tracking-[0.12em] text-zinc-400">Target</div>
+                        <div className="grid grid-cols-3 gap-1">
+                          {([0, 1, 2] as const).map((axisIndex) => (
+                            <Input
+                              key={`${light.id}-target-${axisIndex}`}
+                              type="number"
+                              step={0.1}
+                              className="h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                              value={light.target[axisIndex]}
+                              onChange={(event) => updateViewerLightVector(light.id, "target", axisIndex, event.target.value)}
+                            />
+                          ))}
+                        </div>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+                {(light.type === "point" || light.type === "spot") ? (
+                  <div className="mt-2 grid grid-cols-2 gap-1">
+                    <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                      Distance
+                      <Input
+                        type="number"
+                        min={0}
+                        max={200}
+                        step={0.5}
+                        className="mt-1 h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                        value={light.distance}
+                        onChange={(event) => updateViewerLight(light.id, { distance: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                      Decay
+                      <Input
+                        type="number"
+                        min={0}
+                        max={8}
+                        step={0.1}
+                        className="mt-1 h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                        value={light.decay}
+                        onChange={(event) => updateViewerLight(light.id, { decay: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+                {light.type === "spot" ? (
+                  <div className="mt-2 grid grid-cols-2 gap-1">
+                    <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                      Angle
+                      <Input
+                        type="number"
+                        min={1}
+                        max={89}
+                        step={1}
+                        className="mt-1 h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                        value={light.angle}
+                        onChange={(event) => updateViewerLight(light.id, { angle: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                      Penumbra
+                      <Input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        className="mt-1 h-7 rounded-md border-border/60 bg-background/50 px-2 text-xs"
+                        value={light.penumbra}
+                        onChange={(event) => updateViewerLight(light.id, { penumbra: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-[10px] text-zinc-500">
+            Ambient has no position. Point, spot, and directional lights use scene units.
+          </p>
         </div>
       ) : null}
 

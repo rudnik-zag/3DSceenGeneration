@@ -54,7 +54,8 @@ const viewerEnvironmentParams = z.object({
   ambientIntensity: z.number().min(0).max(8).default(1.1),
   sunIntensity: z.number().min(0).max(8).default(1.2),
   sunColor: z.string().max(32).default("#ffffff"),
-  groundColor: z.string().max(32).default("#101828")
+  groundColor: z.string().max(32).default("#101828"),
+  lightsJson: z.string().max(20000).default("")
 });
 const groundingDinoParams = z.object({
   prompt: z.string().max(4000).default(""),
@@ -284,7 +285,12 @@ export const nodeSpecEntries = [
       { key: "ambientIntensity", label: "Ambient Intensity", input: "number", min: 0, max: 8, step: 0.05 },
       { key: "sunIntensity", label: "Sun Intensity", input: "number", min: 0, max: 8, step: 0.05 },
       { key: "sunColor", label: "Sun Color", input: "text", placeholder: "#ffffff" },
-      { key: "groundColor", label: "Ground Color", input: "text", placeholder: "#101828" }
+      { key: "groundColor", label: "Ground Color", input: "text", placeholder: "#101828" },
+      {
+        key: "lightsJson",
+        label: "Lights JSON",
+        input: "json"
+      }
     ],
     defaultParams: {
       enabled: true,
@@ -300,7 +306,27 @@ export const nodeSpecEntries = [
       ambientIntensity: 1.1,
       sunIntensity: 1.2,
       sunColor: "#ffffff",
-      groundColor: "#101828"
+      groundColor: "#101828",
+      lightsJson: JSON.stringify(
+        [
+          {
+            id: "ambient-default",
+            type: "ambient",
+            label: "Ambient Light",
+            enabled: true,
+            color: "#ffffff",
+            intensity: 1.1,
+            position: [0, 0, 0],
+            target: [0, 0, 0],
+            distance: 0,
+            decay: 2,
+            angle: 30,
+            penumbra: 0.25
+          }
+        ],
+        null,
+        2
+      )
     },
     ui: {
       nodeRunEnabled: true
@@ -455,7 +481,11 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "json", label: "Analysis", artifactType: "JsonData" }],
     paramSchema: modelPrompt,
     paramFields: [{ key: "prompt", label: "Prompt", input: "textarea" }],
-    defaultParams: { prompt: "Describe composition and salient objects." }
+    defaultParams: { prompt: "Describe composition and salient objects." },
+    ui: {
+      available: false,
+      unavailableReason: "Qwen-VL executor is not implemented yet."
+    }
   }),
   makeSpec("model.qwen_image_edit", {
     type: "model.qwen_image_edit",
@@ -544,7 +574,11 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "textures", label: "Texture Set", artifactType: "TextureSet" }],
     paramSchema: z.object({ style: z.string().max(4000).default("photoreal") }),
     paramFields: [{ key: "style", label: "Style", input: "text" }],
-    defaultParams: { style: "photoreal" }
+    defaultParams: { style: "photoreal" },
+    ui: {
+      available: false,
+      unavailableReason: "Texturing executor is not implemented yet."
+    }
   }),
   makeSpec("geo.depth_estimation", {
     type: "geo.depth_estimation",
@@ -641,7 +675,11 @@ export const nodeSpecEntries = [
     paramFields: [
       { key: "quality", label: "Quality", input: "select", options: ["fast", "balanced", "quality"] }
     ],
-    defaultParams: { quality: "balanced" }
+    defaultParams: { quality: "balanced" },
+    ui: {
+      available: false,
+      unavailableReason: "Mesh reconstruction currently returns placeholder output only."
+    }
   }),
   makeSpec("geo.uv_unwrap", {
     type: "geo.uv_unwrap",
@@ -653,7 +691,11 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "mesh", label: "UV Mesh", artifactType: "Mesh" }],
     paramSchema: uvParams,
     paramFields: [{ key: "padding", label: "Padding", input: "number" }],
-    defaultParams: { padding: 8 }
+    defaultParams: { padding: 8 },
+    ui: {
+      available: false,
+      unavailableReason: "UV unwrap executor is not implemented yet."
+    }
   }),
   makeSpec("geo.bake_textures", {
     type: "geo.bake_textures",
@@ -668,7 +710,11 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "textures", label: "Baked Textures", artifactType: "TextureSet" }],
     paramSchema: bakeParams,
     paramFields: [{ key: "resolution", label: "Resolution", input: "number" }],
-    defaultParams: { resolution: 1024 }
+    defaultParams: { resolution: 1024 },
+    ui: {
+      available: false,
+      unavailableReason: "Texture baking executor is not implemented yet."
+    }
   }),
   makeSpec("out.export_scene", {
     type: "out.export_scene",
@@ -684,7 +730,11 @@ export const nodeSpecEntries = [
     outputPorts: [{ id: "scene", label: "Scene", artifactType: "SceneAsset" }],
     paramSchema: exportParams,
     paramFields: [{ key: "format", label: "Format", input: "select", options: ["mesh_glb", "point_ply", "splat_ksplat"] }],
-    defaultParams: { format: "mesh_glb" }
+    defaultParams: { format: "mesh_glb" },
+    ui: {
+      available: false,
+      unavailableReason: "Scene export currently returns mock assets only."
+    }
   }),
   makeSpec("out.open_in_viewer", {
     type: "out.open_in_viewer",
@@ -712,6 +762,10 @@ export const nodeSpecEntries = [
 export const nodeSpecRegistry: NodeSpecRegistry = Object.fromEntries(nodeSpecEntries) as NodeSpecRegistry;
 
 export const allNodeTypes = Object.keys(nodeSpecRegistry) as WorkflowNodeType[];
+
+export function isNodeSpecAvailableForCreation(nodeType: WorkflowNodeType) {
+  return nodeSpecRegistry[nodeType].ui?.available !== false;
+}
 
 export const nodeGroups = Object.values(nodeSpecRegistry).reduce<Record<string, (typeof nodeSpecRegistry)[WorkflowNodeType][]>>(
   (acc, spec) => {
