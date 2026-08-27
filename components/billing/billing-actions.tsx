@@ -124,7 +124,7 @@ export function BillingActions(props: {
           const isCurrent = plan.key === props.currentPlan;
           const loading = loadingKey === `plan:${plan.key}`;
           return (
-            <div key={plan.key} className="rounded-xl border border-border/70 bg-black/30 p-4">
+            <div key={plan.key} className="rounded-xl border border-white/[0.08] bg-[#1a1a1d]/86 p-4">
               <p className="text-sm font-semibold text-white">{plan.title}</p>
               <p className="mt-1 text-xs text-zinc-400">{plan.description}</p>
               <p className="mt-2 text-lg font-semibold text-white">
@@ -148,7 +148,7 @@ export function BillingActions(props: {
         {props.tokenPacks.map((pack) => {
           const loading = loadingKey === `pack:${pack.key}`;
           return (
-            <div key={pack.key} className="rounded-xl border border-border/70 bg-black/30 p-4">
+            <div key={pack.key} className="rounded-xl border border-white/[0.08] bg-[#1a1a1d]/86 p-4">
               <p className="text-sm font-semibold text-white">{pack.title}</p>
               <p className="mt-1 text-xs text-zinc-400">{pack.description}</p>
               <p className="mt-2 text-base font-semibold text-white">{pack.tokens.toLocaleString()} tokens</p>
@@ -169,4 +169,3 @@ export function BillingActions(props: {
     </div>
   );
 }
-

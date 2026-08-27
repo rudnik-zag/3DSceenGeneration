@@ -35,8 +35,8 @@ export default async function BillingPage() {
     <main className="mx-auto w-full max-w-7xl space-y-6 px-4 py-8 md:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-3xl font-semibold text-white md:text-4xl">Billing & Usage</h1>
-          <p className="mt-1 text-sm text-zinc-300">Plan entitlements, token wallet, and usage ledger.</p>
+          <h1 className="studio-hero-title text-3xl font-medium text-white md:text-4xl">Billing & Usage</h1>
+          <p className="mt-1 text-sm text-zinc-400">Plan entitlements, token wallet, and usage ledger.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link href="/pricing" className="rounded-lg border border-border/70 px-3 py-2 text-sm text-zinc-100 hover:bg-white/5">
@@ -49,7 +49,7 @@ export default async function BillingPage() {
       </div>
 
       <section className="grid gap-4 md:grid-cols-3">
-        <Card className="border-border/70 bg-black/30">
+        <Card className="border-white/[0.08] bg-[#1a1a1d]/86">
           <CardHeader>
             <CardDescription>Current Plan</CardDescription>
             <CardTitle>{state.subscription.plan}</CardTitle>
@@ -58,7 +58,7 @@ export default async function BillingPage() {
             Status: <span className="text-zinc-100">{state.subscription.status}</span>
           </CardContent>
         </Card>
-        <Card className="border-border/70 bg-black/30">
+        <Card className="border-white/[0.08] bg-[#1a1a1d]/86">
           <CardHeader>
             <CardDescription>Monthly Tokens</CardDescription>
             <CardTitle>{state.wallet.monthlyTokensRemaining.toLocaleString()}</CardTitle>
@@ -67,7 +67,7 @@ export default async function BillingPage() {
             Allowance: {state.wallet.monthlyAllowance.toLocaleString()}
           </CardContent>
         </Card>
-        <Card className="border-border/70 bg-black/30">
+        <Card className="border-white/[0.08] bg-[#1a1a1d]/86">
           <CardHeader>
             <CardDescription>Purchased Tokens</CardDescription>
             <CardTitle>{state.wallet.purchasedTokensRemaining.toLocaleString()}</CardTitle>
@@ -86,7 +86,7 @@ export default async function BillingPage() {
       />
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <Card className="border-border/70 bg-black/30">
+        <Card className="border-white/[0.08] bg-[#1a1a1d]/86">
           <CardHeader>
             <CardTitle className="text-base">Recent Token Transactions</CardTitle>
           </CardHeader>
@@ -107,7 +107,7 @@ export default async function BillingPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-border/70 bg-black/30">
+        <Card className="border-white/[0.08] bg-[#1a1a1d]/86">
           <CardHeader>
             <CardTitle className="text-base">Recent Usage Events</CardTitle>
           </CardHeader>

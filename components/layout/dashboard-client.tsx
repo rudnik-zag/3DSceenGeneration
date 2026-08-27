@@ -155,9 +155,9 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1280px] space-y-5">
+    <div className="mx-auto w-full max-w-[1160px] space-y-6">
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="rounded-2xl border-border/70 panel-blur sm:max-w-[520px]">
+        <DialogContent className="rounded-xl border-white/[0.08] panel-blur sm:max-w-[520px]">
           <form
             className="space-y-5"
             onSubmit={(event) => {
@@ -178,7 +178,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                 id="project-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="h-11 rounded-xl border-border/70 bg-background/70 focus-visible:border-primary/50"
+                className="h-11 rounded-lg border-white/10 bg-black/20 focus-visible:border-white/35"
                 placeholder="Project name"
               />
             </div>
@@ -187,13 +187,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
               <Button
                 type="button"
                 variant="outline"
-                className="h-11 w-full rounded-xl"
+                className="h-11 w-full rounded-lg"
                 onClick={() => setCreateOpen(false)}
                 disabled={loading}
               >
                 Cancel
               </Button>
-              <Button type="submit" className="h-11 w-full rounded-xl" disabled={loading || !name.trim()}>
+              <Button type="submit" className="h-11 w-full rounded-lg" disabled={loading || !name.trim()}>
                 {loading ? "Creating..." : "Create Project"}
               </Button>
             </DialogFooter>
@@ -201,26 +201,26 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
         </DialogContent>
       </Dialog>
 
-      <section className="rounded-2xl border border-[#2a3559] bg-[#0b1226]/90 shadow-[0_20px_65px_rgba(1,8,25,0.48)] backdrop-blur">
-        <div className="flex flex-wrap items-center gap-3 border-b border-[#263254] px-4 py-3 md:px-5">
+      <section className="rounded-xl border border-white/[0.08] bg-[#1a1a1d]/86 shadow-[0_20px_65px_rgba(0,0,0,0.24)] backdrop-blur">
+        <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.08] px-4 py-3 md:px-5">
           <div className="inline-flex items-center gap-2">
-            <div className="grid h-7 w-7 place-items-center rounded-lg bg-[#5d57f4] text-white shadow-[0_6px_18px_rgba(93,87,244,0.45)]">
+            <div className="grid h-7 w-7 place-items-center rounded-md bg-white text-[#18181a]">
               <FolderKanban className="h-4 w-4" />
             </div>
-            <p className="text-lg font-semibold tracking-tight text-white">Workspace</p>
+            <p className="studio-hero-title text-lg font-medium tracking-tight text-white">Workspace</p>
           </div>
 
           <div className="ml-auto flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             <div className="relative sm:w-[320px]">
-              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-[#7f8db7]" />
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="h-10 rounded-lg border-[#334068] bg-[#141f3f]/95 pl-9 text-[#d5defc] placeholder:text-[#7f8db7] focus-visible:border-[#5f76d1]"
+                className="h-10 rounded-lg border-white/10 bg-black/20 pl-9 text-zinc-100 placeholder:text-zinc-500 focus-visible:border-white/35"
                 placeholder="Search projects..."
               />
             </div>
-            <Button className="h-10 rounded-lg bg-[#5b58f3] px-4 text-white hover:bg-[#6a67ff]" onClick={() => setCreateOpen(true)}>
+            <Button className="h-10 rounded-lg bg-white px-4 text-[#18181a] hover:bg-zinc-200" onClick={() => setCreateOpen(true)}>
               <Plus className="mr-1.5 h-4 w-4" />
               New Project
             </Button>
@@ -229,30 +229,30 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
 
         {hasProjects ? (
           <div className="grid gap-3 p-4 md:grid-cols-[1.1fr_0.9fr] md:p-5">
-            <div className="rounded-2xl border border-[#2f3f68] bg-[#101a34]/90 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Continue Working</p>
-              <h2 className="mt-2 text-2xl font-semibold text-white">
+            <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-4">
+              <p className="studio-kicker text-xs">Continue Working</p>
+              <h2 className="studio-hero-title mt-2 text-2xl font-medium text-white">
                 {latestProject ? latestProject.name : "Your latest project"}
               </h2>
-              <p className="mt-1 text-sm text-[#a8b7df]">
+              <p className="mt-1 text-sm text-zinc-400">
                 Open your latest graph editor, review runs, or inspect assets in viewer.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {latestProject ? (
                   <>
-                    <Button className="h-9 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${latestProject.id}/graph-editor`)}>
+                    <Button className="h-9 rounded-lg bg-white text-[#18181a] hover:bg-zinc-200" onClick={() => router.push(`/app/p/${latestProject.id}/graph-editor`)}>
                       Open latest graph editor
                     </Button>
                     <Button
                       variant="outline"
-                      className="h-9 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                      className="h-9 rounded-lg"
                       onClick={() => router.push(`/app/p/${latestProject.id}/runs`)}
                     >
                       Runs
                     </Button>
                     <Button
                       variant="outline"
-                      className="h-9 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                      className="h-9 rounded-lg"
                       onClick={() => router.push(`/app/p/${latestProject.id}/viewer`)}
                     >
                       Viewer
@@ -262,25 +262,25 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
               </div>
             </div>
 
-            <div className="rounded-2xl border border-[#2f3f68] bg-[#101a34]/90 p-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Workspace Summary</p>
+            <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-4">
+              <p className="studio-kicker text-xs">Workspace Summary</p>
               <div className="mt-3 grid grid-cols-3 gap-2">
-                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3 text-center">
                   <p className="text-2xl font-semibold text-white">{sorted.length}</p>
-                  <p className="text-xs text-[#9db2e0]">Projects</p>
+                  <p className="text-xs text-zinc-500">Projects</p>
                 </div>
-                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3 text-center">
                   <p className="text-2xl font-semibold text-white">{totalRuns}</p>
-                  <p className="text-xs text-[#9db2e0]">Runs</p>
+                  <p className="text-xs text-zinc-500">Runs</p>
                 </div>
-                <div className="rounded-xl border border-[#33466f] bg-[#131f44]/70 p-3 text-center">
+                <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3 text-center">
                   <p className="text-2xl font-semibold text-white">{totalGraphs}</p>
-                  <p className="text-xs text-[#9db2e0]">Graphs</p>
+                  <p className="text-xs text-zinc-500">Graphs</p>
                 </div>
               </div>
               <Button
                 variant="outline"
-                className="mt-3 h-9 w-full rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                className="mt-3 h-9 w-full rounded-lg"
                 onClick={() => setCreateOpen(true)}
               >
                 Create another project
@@ -290,13 +290,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
           </div>
         ) : (
           <div className="p-5">
-            <div className="rounded-2xl border border-dashed border-[#3c507f] bg-[#0c1631]/70 p-8 text-center">
-              <p className="text-xs uppercase tracking-[0.16em] text-[#8fa2d2]">Empty Workspace</p>
-              <h2 className="mt-2 text-3xl font-semibold text-white">Create your first project</h2>
-              <p className="mt-2 text-sm text-[#a8b7df]">
+            <div className="rounded-xl border border-dashed border-white/15 bg-white/[0.025] p-8 text-center">
+              <p className="studio-kicker text-xs">Empty Workspace</p>
+              <h2 className="studio-hero-title mt-2 text-3xl font-medium text-white">Create your first project</h2>
+              <p className="mt-2 text-sm text-zinc-400">
                 Start from a blank graph editor and build your first Intelligent 3D Environment Maker workflow.
               </p>
-              <Button className="mt-4 h-10 rounded-lg bg-[#5b58f3] px-5 text-white hover:bg-[#6a67ff]" onClick={() => setCreateOpen(true)}>
+              <Button className="mt-4 h-10 rounded-lg bg-white px-5 text-[#18181a] hover:bg-zinc-200" onClick={() => setCreateOpen(true)}>
                 <Plus className="mr-1.5 h-4 w-4" />
                 Create Project
               </Button>
@@ -308,8 +308,8 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
       {hasProjects ? (
         <section>
           <div className="mb-3">
-            <h1 className="text-3xl font-semibold tracking-tight text-white">All Projects</h1>
-            <p className="mt-1 text-sm text-[#8fa2d2]">{filtered.length} projects</p>
+            <h1 className="studio-hero-title text-3xl font-medium text-white">All Projects</h1>
+            <p className="mt-1 text-sm text-zinc-500">{filtered.length} projects</p>
           </div>
 
           {filtered.length > 0 ? (
@@ -327,11 +327,11 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                 return (
                   <Card
                     key={project.id}
-                    className="group overflow-hidden rounded-2xl border border-[#2c3b67] bg-[#121c38]/90 shadow-[0_16px_36px_rgba(2,7,20,0.48)] motion-fast hover:-translate-y-0.5 hover:border-[#4f66a9]"
+                    className="group overflow-hidden rounded-xl border border-white/[0.08] bg-[#1a1a1d]/86 shadow-[0_16px_36px_rgba(0,0,0,0.24)] motion-fast hover:-translate-y-0.5 hover:border-white/20"
                   >
                     <CardHeader className="space-y-2 p-0">
                       {project.previewStorageKey && !brokenPreviewIds[project.id] ? (
-                        <div className="relative h-40 overflow-hidden border-b border-[#2e3d66] bg-black/30">
+                        <div className="relative h-40 overflow-hidden border-b border-white/[0.08] bg-black/30">
                           {!loadedPreviewIds[project.id] ? <div className="skeleton-shimmer absolute inset-0 bg-white/[0.04]" /> : null}
                           <img
                             src={`/api/storage/object?key=${encodeURIComponent(project.previewStorageKey)}`}
@@ -364,7 +364,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                           </span>
                         </div>
                       ) : (
-                        <div className="relative h-40 border-b border-dashed border-[#344577] bg-[#0e1935] skeleton-shimmer">
+                        <div className="relative h-40 border-b border-dashed border-white/15 bg-black/20 skeleton-shimmer">
                           <span className={`absolute right-2 top-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>
                             {statusLabel}
                           </span>
@@ -372,10 +372,10 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                       )}
 
                       <div className="space-y-1 px-3.5 pt-3">
-                        <CardTitle className="line-clamp-1 text-[27px] font-semibold leading-none tracking-tight text-white">
+                        <CardTitle className="studio-hero-title line-clamp-1 text-[27px] font-medium leading-none text-white">
                           {project.name}
                         </CardTitle>
-                        <CardDescription className="line-clamp-2 text-sm leading-6 text-[#a2b0d9]">
+                        <CardDescription className="line-clamp-2 text-sm leading-6 text-zinc-400">
                           {project._count.runs > 0
                             ? `${project._count.runs} workflow runs processed in this project.`
                             : "Start your first run by opening the graph editor and executing a workflow."}
@@ -384,7 +384,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                     </CardHeader>
 
                     <CardContent className="space-y-3 p-3.5 pt-2.5">
-                      <div className="flex items-center justify-between border-t border-[#25365d] pt-2 text-[12px] text-[#8797c4]">
+                      <div className="flex items-center justify-between border-t border-white/[0.08] pt-2 text-[12px] text-zinc-500">
                         <span className="inline-flex items-center gap-1">
                           <CalendarDays className="h-3.5 w-3.5" />
                           {formatCardDate(project.updatedAt)}
@@ -396,13 +396,13 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
                       </div>
 
                       <div className="flex gap-2">
-                        <Button size="sm" className="h-8 flex-1 rounded-lg bg-[#1a8f72] text-white hover:bg-[#1ea783]" onClick={() => router.push(`/app/p/${project.id}/graph-editor`)}>
+                        <Button size="sm" className="h-8 flex-1 rounded-lg bg-white text-[#18181a] hover:bg-zinc-200" onClick={() => router.push(`/app/p/${project.id}/graph-editor`)}>
                           Open graph editor
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-8 rounded-lg border-[#3c4f81] bg-[#16213f] text-[#c2d0f8] hover:bg-[#1f2d55]"
+                          className="h-8 rounded-lg"
                           onClick={() => router.push(`/app/p/${project.id}/runs`)}
                         >
                           Runs
@@ -423,7 +423,7 @@ export function DashboardClient({ initialProjects }: { initialProjects: ProjectI
               })}
             </div>
           ) : (
-            <div className="rounded-2xl border border-[#2c3b67] bg-[#101a34] p-8 text-center text-sm text-[#93a7d9]">
+            <div className="rounded-xl border border-white/[0.08] bg-[#1a1a1d]/82 p-8 text-center text-sm text-zinc-500">
               No projects found for your search.
             </div>
           )}

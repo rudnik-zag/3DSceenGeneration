@@ -15,8 +15,8 @@ export default async function PricingPage() {
   return (
     <main className="mx-auto min-h-screen w-full max-w-7xl px-4 py-10 md:px-6">
       <div className="mb-8">
-        <h1 className="text-4xl font-semibold tracking-tight text-white md:text-5xl">Pricing</h1>
-        <p className="mt-3 max-w-3xl text-sm text-zinc-300 md:text-base">
+        <h1 className="studio-hero-title text-4xl font-medium text-white md:text-5xl">Pricing</h1>
+        <p className="mt-3 max-w-3xl text-sm text-zinc-400 md:text-base">
           Subscription includes monthly tokens. Extra token packs can be purchased anytime.
         </p>
         {isLoggedIn && userLabel ? (
@@ -50,7 +50,7 @@ export default async function PricingPage() {
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {plans.map((plan) => (
-          <Card key={plan.key} className="rounded-2xl border-border/70 bg-black/35">
+          <Card key={plan.key} className="rounded-xl border-white/[0.08] bg-[#1a1a1d]/86">
             <CardHeader>
               <CardTitle className="text-white">{plan.title}</CardTitle>
               <CardDescription>{plan.description}</CardDescription>
@@ -70,10 +70,10 @@ export default async function PricingPage() {
       </section>
 
       <section className="mt-10">
-        <h2 className="mb-4 text-2xl font-semibold text-white">Token Packs</h2>
+        <h2 className="studio-hero-title mb-4 text-2xl font-medium text-white">Token Packs</h2>
         <div className="grid gap-4 md:grid-cols-3">
           {tokenPackDefinitions.map((pack) => (
-            <Card key={pack.key} className="rounded-2xl border-border/70 bg-black/35">
+            <Card key={pack.key} className="rounded-xl border-white/[0.08] bg-[#1a1a1d]/86">
               <CardHeader>
                 <CardTitle className="text-white">{pack.title}</CardTitle>
                 <CardDescription>{pack.description}</CardDescription>

@@ -48,10 +48,10 @@ function LoginForm() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#0b0d14] p-4">
-      <Card className="w-full max-w-md rounded-2xl border-border/70 bg-black/40">
+    <main className="flex min-h-screen items-center justify-center studio-dot-bg p-4">
+      <Card className="w-full max-w-md rounded-xl border-white/[0.08] bg-[#1a1a1d]/86">
         <CardHeader>
-          <CardTitle className="text-2xl text-white">Sign In</CardTitle>
+          <CardTitle className="studio-hero-title text-2xl font-medium text-white">Sign In</CardTitle>
           <CardDescription>Access your projects securely.</CardDescription>
         </CardHeader>
         <CardContent>
@@ -85,7 +85,7 @@ function LoginForm() {
           </form>
           <p className="mt-4 text-sm text-zinc-300">
             No account?{" "}
-            <Link className="text-cyan-300 hover:underline" href="/register">
+            <Link className="text-white hover:underline" href="/register">
               Register
             </Link>
           </p>
@@ -97,7 +97,7 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<main className="min-h-screen bg-[#0b0d14]" />}>
+    <Suspense fallback={<main className="min-h-screen studio-dot-bg" />}>
       <LoginForm />
     </Suspense>
   );

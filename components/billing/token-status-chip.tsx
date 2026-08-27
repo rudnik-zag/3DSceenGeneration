@@ -108,7 +108,7 @@ export function TokenStatusChip() {
   }, [monthlyTokens, purchasedTokens]);
 
   return (
-    <div className="hidden items-center gap-2 rounded-xl border border-border/70 bg-background/75 px-3 py-1.5 text-xs text-zinc-200 lg:flex">
+    <div className="hidden items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.035] px-3 py-1.5 text-xs text-zinc-200 lg:flex">
       <Coins className="h-3.5 w-3.5 text-emerald-300" />
       <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
         {plan}

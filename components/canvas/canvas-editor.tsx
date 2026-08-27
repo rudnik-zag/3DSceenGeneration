@@ -3865,9 +3865,9 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
   return (
     <div className="h-full">
-      <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-border/70 panel-blur md:rounded-2xl" onDrop={onDrop} onDragOver={onDragOver}>
+      <div className="relative flex h-full flex-col overflow-hidden rounded-none border border-white/[0.08] bg-[#18181a] md:rounded-xl" onDrop={onDrop} onDragOver={onDragOver}>
         <div className="pointer-events-none absolute left-3 right-3 top-3 z-30">
-          <div className="pointer-events-auto absolute left-1/2 top-0 flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-border/70 bg-[#0a1020]/90 p-1.5 shadow-[0_16px_45px_rgba(0,0,0,0.5)] backdrop-blur-md">
+          <div className="pointer-events-auto absolute left-1/2 top-0 flex -translate-x-1/2 items-center gap-1 rounded-xl border border-white/[0.08] bg-[#18181a]/90 p-1.5 shadow-[0_16px_45px_rgba(0,0,0,0.34)] backdrop-blur-md">
             <Button
               size="icon"
               className="h-9 w-9 rounded-xl border border-emerald-300/30 bg-emerald-500/85 text-emerald-50 hover:bg-emerald-400"
@@ -3903,14 +3903,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   <Button
                     size="icon"
                     variant="ghost"
-                    className="h-9 w-9 rounded-xl border border-sky-400/35 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                    className="h-9 w-9 rounded-lg border border-white/15 bg-white/[0.035] text-zinc-100 hover:bg-white/[0.08]"
                     title="Edit workflow"
                     aria-label="Edit workflow"
                   >
                     <FilePenLine className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                <DropdownMenuContent align="end" className="w-64 rounded-xl border-white/[0.08] bg-[#18181a]/95 text-zinc-100">
                   <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Project</DropdownMenuLabel>
                   <DropdownMenuItem
                     disabled={isSaving}
@@ -4007,14 +4007,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   <Button
                     size="icon"
                     variant="ghost"
-                    className="h-9 w-9 rounded-xl border border-emerald-400/35 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20"
+                    className="h-9 w-9 rounded-lg border border-white/15 bg-white/[0.035] text-zinc-100 hover:bg-white/[0.08]"
                     title="Workflow management"
                     aria-label="Workflow management"
                   >
                     <Workflow className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-64 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                <DropdownMenuContent align="end" className="w-64 rounded-xl border-white/[0.08] bg-[#18181a]/95 text-zinc-100">
                   <DropdownMenuLabel className="text-xs uppercase tracking-[0.15em] text-zinc-400">Workflow Management</DropdownMenuLabel>
                   <DropdownMenuItem
                     onSelect={(event) => {
@@ -4046,7 +4046,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                     <DropdownMenuSubTrigger disabled={workflowTemplates.length === 0}>
                       Choose existing workflow
                     </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="w-72 rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+                    <DropdownMenuSubContent className="w-72 rounded-xl border-white/[0.08] bg-[#18181a]/95 text-zinc-100">
                       {workflowTemplates.length === 0 ? (
                         <DropdownMenuItem disabled onSelect={(event) => event.preventDefault()}>
                           No workflows saved yet
@@ -4111,14 +4111,14 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
               <Button
                 size="icon"
                 variant="outline"
-                className="pointer-events-auto absolute right-0 top-0 h-9 w-9 rounded-full border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                className="pointer-events-auto absolute right-0 top-0 h-9 w-9 rounded-full border-white/15 bg-white/[0.035] text-zinc-100 hover:bg-white/[0.08]"
                 title="Scene and configuration info"
                 aria-label="Scene and configuration info"
               >
                 <Info className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" sideOffset={10} className="w-[340px] rounded-xl border-border/70 bg-[#090d18]/95 text-zinc-100">
+            <DropdownMenuContent align="end" sideOffset={10} className="w-[340px] rounded-xl border-white/[0.08] bg-[#18181a]/95 text-zinc-100">
               <DropdownMenuLabel className="text-base font-semibold text-zinc-100">Scene &amp; Configuration Info</DropdownMenuLabel>
               <div className="space-y-2 px-2 pb-2 text-xs text-zinc-300">
                 <p className="text-[11px] uppercase tracking-[0.15em] text-zinc-400">Scene Information</p>
@@ -4189,7 +4189,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
           </DropdownMenu>
         </div>
 
-        <div className="canvas-dot-bg relative min-h-0 flex-1 bg-[#1e1e1e]" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
+        <div className="canvas-dot-bg relative min-h-0 flex-1" ref={canvasPanelRef} onDoubleClick={onCanvasDoubleClick}>
           <div className="pointer-events-none absolute inset-0 z-[9]">
             {workflowGroupFrames.map((frame) => {
               const isActiveGroup = frame.id === activeWorkflowGroupId;
@@ -4201,8 +4201,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                   key={frame.id}
                   className={`pointer-events-none absolute rounded-2xl border transition-[border-color,box-shadow,background-color] ${
                     isSelectedFrame
-                      ? "border-sky-300/90 bg-sky-400/[0.06] shadow-[0_0_0_2px_rgba(125,211,252,0.55),0_0_30px_rgba(56,189,248,0.25)]"
-                      : "border-sky-500/35 bg-transparent"
+                      ? "border-white/45 bg-white/[0.035] shadow-[0_0_0_2px_rgba(255,255,255,0.16),0_0_30px_rgba(255,255,255,0.08)]"
+                      : "border-white/15 bg-transparent"
                   }`}
                   style={{
                     left: frame.left,
@@ -4213,7 +4213,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                 >
                   <div
                     className={`pointer-events-auto absolute left-0 top-0 flex h-10 w-full cursor-move items-start rounded-t-2xl px-3 pt-2 ${
-                      isEditingFrame ? "bg-emerald-400/15" : isSelectedFrame ? "bg-sky-400/15" : "bg-sky-500/[0.05]"
+                      isEditingFrame ? "bg-emerald-400/15" : isSelectedFrame ? "bg-white/[0.06]" : "bg-white/[0.025]"
                     }`}
                     onPointerDown={(event) => beginWorkflowFrameDrag(event, frame.id, frame.templateId)}
                     onContextMenu={(event) => openWorkflowFrameMenu(event, frame.id, frame.templateId)}
@@ -4224,8 +4224,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                         isEditingFrame
                           ? "bg-emerald-300/30 text-emerald-50"
                           : isSelectedFrame
-                            ? "bg-sky-300/30 text-sky-50"
-                            : "bg-sky-500/14 text-sky-200"
+                            ? "bg-white/15 text-white"
+                            : "bg-white/[0.06] text-zinc-300"
                       }`}
                     >
                       {frame.name}
@@ -4406,7 +4406,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                           isUnavailable
                             ? "cursor-not-allowed border border-transparent text-zinc-500 opacity-45"
                             : isHighlighted
-                            ? "border border-cyan-400/50 bg-cyan-400/10 text-zinc-100"
+                            ? "border border-white/25 bg-white/[0.07] text-zinc-100"
                             : "border border-transparent text-zinc-200 hover:border-[#2f2f2f] hover:bg-[#181a20]"
                         }`}
                         onMouseEnter={() =>
@@ -4473,12 +4473,12 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
 
           <div
             data-no-connect-menu="true"
-            className={`absolute bottom-3 right-3 top-[88px] z-30 w-[430px] max-w-[calc(100%-24px)] rounded-2xl border border-border/70 bg-[#090d18]/92 p-2 text-zinc-100 backdrop-blur-md shadow-[0_24px_64px_rgba(0,0,0,0.5)] motion-panel ${
+            className={`absolute bottom-3 right-3 top-[88px] z-30 w-[430px] max-w-[calc(100%-24px)] rounded-xl border border-white/[0.08] bg-[#18181a]/92 p-2 text-zinc-100 backdrop-blur-md shadow-[0_24px_64px_rgba(0,0,0,0.34)] motion-panel ${
               inspectorOpen ? "translate-x-0 opacity-100" : "translate-x-[102%] opacity-0 pointer-events-none"
             }`}
           >
             <Tabs defaultValue="params" className="flex h-full w-full flex-col">
-              <TabsList className="grid w-full grid-cols-3 rounded-xl bg-background/70">
+              <TabsList className="grid w-full grid-cols-3 rounded-lg bg-black/25">
                 <TabsTrigger value="params" className="rounded-lg">Params</TabsTrigger>
                 <TabsTrigger value="outputs" className="rounded-lg">Outputs</TabsTrigger>
                 <TabsTrigger value="logs" className="rounded-lg">Logs</TabsTrigger>
@@ -4493,7 +4493,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       <h3 className="font-semibold text-white">{spec.title}</h3>
                       <p className="text-xs text-muted-foreground">{selectedNode.id}</p>
                       {selectedNode.type === "model.sam2" ? (
-                        <p className="text-xs text-cyan-300">
+                        <p className="text-xs text-zinc-300">
                           Mode:{" "}
                           {selectedNode.data.runtimeMode === "guided"
                             ? "Guided segmentation (from ObjectDetection)"
@@ -4519,7 +4519,7 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
                       </div>
                     ) : null}
                     {selectedNodeLocked ? (
-                      <div className="mb-3 rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                      <div className="mb-3 rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2 text-xs text-zinc-200">
                         This node is locked while its run is active.
                       </div>
                     ) : null}

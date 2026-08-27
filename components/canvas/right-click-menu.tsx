@@ -210,7 +210,7 @@ function RightClickMenuImpl({ x, y, items, onClose }: RightClickMenuProps) {
 
               const isActive = activePath[depth] === index;
               const baseClass = isActive
-                ? "border-cyan-400/50 bg-cyan-400/10 text-zinc-100"
+                ? "border-white/25 bg-white/[0.07] text-zinc-100"
                 : "border-transparent bg-transparent text-zinc-200 hover:border-[#2f2f2f] hover:bg-[#181a20]";
               const disabledClass = entry.disabled ? "opacity-45 cursor-not-allowed" : "";
 
@@ -261,7 +261,7 @@ function RightClickMenuImpl({ x, y, items, onClose }: RightClickMenuProps) {
                   <span className="truncate">{entry.label}</span>
                   <span className="ml-3 inline-flex shrink-0 items-center gap-1 text-[11px] text-zinc-500">
                     {entry.shortcut ? <span>{entry.shortcut}</span> : null}
-                    {entry.kind === "submenu" ? <ChevronRight className="h-3.5 w-3.5 text-cyan-300" /> : null}
+                    {entry.kind === "submenu" ? <ChevronRight className="h-3.5 w-3.5 text-zinc-300" /> : null}
                   </span>
                 </button>
               );
