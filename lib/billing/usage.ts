@@ -88,11 +88,13 @@ export async function estimateRunForUser(input: {
   userId: string;
   graphJson: unknown;
   startNodeId?: string;
+  includeAncestors?: boolean;
 }) {
   const state = await resolveBillingStateForUser(input.userId);
   const estimate = estimateRunTokenCost({
     graphJson: input.graphJson,
-    startNodeId: input.startNodeId
+    startNodeId: input.startNodeId,
+    includeAncestors: input.includeAncestors
   });
   assertRunEntitlements({ estimate, state });
   const availableTokens = state.wallet.monthlyTokensRemaining + state.wallet.purchasedTokensRemaining;
@@ -109,12 +111,14 @@ export async function createRunWithTokenReservation(input: {
   graphId: string;
   graphJson: unknown;
   startNodeId?: string;
+  includeAncestors?: boolean;
   logs: string;
 }) {
   const { state, estimate, canAfford } = await estimateRunForUser({
     userId: input.userId,
     graphJson: input.graphJson,
-    startNodeId: input.startNodeId
+    startNodeId: input.startNodeId,
+    includeAncestors: input.includeAncestors
   });
   if (!canAfford) {
     throw new HttpError(402, "Insufficient token balance.", "insufficient_tokens");

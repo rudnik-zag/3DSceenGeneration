@@ -5,7 +5,7 @@ import { ArtifactKind } from "@prisma/client";
 import { ExecutorOutputArtifact, NodeExecutionContext, NodeExecutionResult, NodeExecutor } from "@/lib/execution/contracts";
 import { executeGroundingDinoNode } from "@/lib/execution/executors/groundingdino";
 import { executeSam2Node } from "@/lib/execution/executors/sam2";
-import { executeSceneGenerationNode } from "@/lib/execution/executors/scene-generation";
+import { executeSam3dObjectsNode } from "@/lib/execution/executors/sam3d-objects";
 import { executeDepthEstimationNode } from "@/lib/execution/executors/depth-estimation";
 import { executeVggtNode } from "@/lib/execution/executors/vggt";
 import { executePointcloudFromDepthNode } from "@/lib/execution/executors/pointcloud-from-depth";
@@ -63,7 +63,7 @@ export class MockModelRunner implements NodeExecutor {
       case "model.sam2":
         return executeSam2Node(ctx);
       case "model.sam3d_objects":
-        return executeSceneGenerationNode(ctx);
+        return executeSam3dObjectsNode(ctx);
       case "pipeline.scene_generation":
         throw new Error("SceneGeneration pipeline nodes are executed via template expansion in run-workflow.");
       case "input.image": {

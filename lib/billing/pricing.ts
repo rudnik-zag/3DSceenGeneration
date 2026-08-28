@@ -74,9 +74,12 @@ function sam3dMultiplier(params: Record<string, unknown>) {
 export function estimateRunTokenCost(input: {
   graphJson: unknown;
   startNodeId?: string;
+  includeAncestors?: boolean;
 }): RunCostEstimate {
   const parsedGraph = parseGraphDocument(input.graphJson);
-  const plan = buildExecutionPlan(parsedGraph, input.startNodeId);
+  const plan = buildExecutionPlan(parsedGraph, input.startNodeId, {
+    includeAncestors: input.includeAncestors !== false
+  });
   const nodesById = new Map(parsedGraph.nodes.map((node) => [node.id, node]));
   const breakdown: RunCostBreakdownEntry[] = [];
 

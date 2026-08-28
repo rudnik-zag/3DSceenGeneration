@@ -278,7 +278,7 @@ async function runProcess(
     args,
     cwd,
     env: processEnv,
-    label: "SceneGeneration process",
+    label: "CustomSceneGen (SAM3D) process",
     timeoutMs: Number(process.env.SAM3D_TIMEOUT_MS ?? 1_800_000),
     isCancellationRequested
   });
@@ -304,12 +304,12 @@ async function materializeImageInput(
 
 async function parseSam2ConfigInput(ctx: NodeExecutionContext, input: ResolvedArtifactInput | null) {
   if (!input) {
-    throw new Error("SceneGeneration requires SegmentScene config JSON input.");
+    throw new Error("CustomSceneGen requires SegmentScene config JSON input.");
   }
   const raw = await ctx.loadInputBuffer(input);
   const parsed = safeJsonParse<Record<string, unknown>>(raw.toString("utf8"));
   if (!parsed) {
-    throw new Error("SceneGeneration config input is not valid JSON.");
+    throw new Error("CustomSceneGen config input is not valid JSON.");
   }
 
   const masksDir =
@@ -321,13 +321,13 @@ async function parseSam2ConfigInput(ctx: NodeExecutionContext, input: ResolvedAr
           ? parsed.outputDir
           : null;
   if (!masksDir) {
-    throw new Error("SceneGeneration config JSON is missing masksDir path.");
+    throw new Error("CustomSceneGen config JSON is missing masksDir path.");
   }
 
   try {
     await fs.access(masksDir);
   } catch {
-    throw new Error(`SceneGeneration masks directory does not exist: ${masksDir}`);
+    throw new Error(`CustomSceneGen masks directory does not exist: ${masksDir}`);
   }
 
   const sourceImagePath =
@@ -568,7 +568,7 @@ async function collectRealOutputs(params: {
   ) {
     pushWarningUnique(
       params.warnings,
-      `SceneGeneration processed ${outputMaskCount}/${inputMaskCount} masks; one or more objects were skipped during mesh generation.`
+      `CustomSceneGen processed ${outputMaskCount}/${inputMaskCount} masks; one or more objects were skipped during SAM3D reconstruction.`
     );
   }
 
@@ -580,7 +580,7 @@ async function collectRealOutputs(params: {
     const fallbackPath = path.join(params.command.outputDir, `scene.${expected.extension}`);
     scenePath = manifest.scene_path ?? fallbackPath;
     sceneBuffer = await fs.readFile(scenePath).catch((error) => {
-      throw new Error(`SceneGeneration output not found at ${scenePath}: ${(error as Error).message}`);
+      throw new Error(`CustomSceneGen output not found at ${scenePath}: ${(error as Error).message}`);
     });
   } else {
     const meshObjectPathSet = new Set<string>();
@@ -650,7 +650,7 @@ async function collectRealOutputs(params: {
     }
     if (!primaryScenePath) {
       throw new Error(
-        `SceneGeneration mesh output missing transformed GLB files under ${path.join(
+        `CustomSceneGen mesh output missing transformed GLB files under ${path.join(
           params.command.outputDir,
           "mesh_objects_transformed"
         )}`
@@ -740,6 +740,7 @@ async function collectRealOutputs(params: {
         settings: params.command.settings,
         scenePath,
         meshObjectStorageKeys,
+        warnings: params.warnings,
         contentHash: hashBuffer(sceneBuffer)
       }
     },
@@ -753,7 +754,8 @@ async function collectRealOutputs(params: {
       meta: {
         outputKey: "meta",
         hidden: true,
-        mode: params.mode
+        mode: params.mode,
+        warnings: params.warnings
       }
     }
   ];
@@ -775,7 +777,7 @@ async function executePerMaskReal(params: {
     .sort((a, b) => a.localeCompare(b));
 
   if (sortedMasks.length === 0) {
-    throw new Error(`SceneGeneration found no masks in ${params.masksDir}`);
+    throw new Error(`CustomSceneGen found no masks in ${params.masksDir}`);
   }
 
   const settings = resolveSceneSettings(params.ctx);
@@ -813,7 +815,7 @@ async function executePerMaskReal(params: {
       });
       const commandLine = formatCommandLine(command.command, command.args);
       console.log(
-        `[scene-generation] runId=${params.ctx.runId} nodeId=${params.ctx.nodeId} mode=${params.mode} execution=real per-mask index=${index} cmd=${commandLine}`
+        `[sam3d-objects] runId=${params.ctx.runId} nodeId=${params.ctx.nodeId} mode=${params.mode} execution=real per-mask index=${index} cmd=${commandLine}`
       );
 
       try {
@@ -911,7 +913,7 @@ async function executePerMaskReal(params: {
   }
 
   if (!firstMeshObjectPath || keptCount === 0) {
-    throw new Error("SceneGeneration per-mask mode produced no valid mesh objects.");
+    throw new Error("CustomSceneGen per-mask mode produced no valid mesh objects.");
   }
 
   const composedManifest: SceneManifest = {
@@ -966,6 +968,7 @@ function buildMockOutputs(params: { mode: SceneMode; warnings: string[]; imagePa
         outputKey: "scene",
         mode: params.mode,
         mock: true,
+        warnings: params.warnings,
         contentHash: hashBuffer(sceneBuffer)
       }
     },
@@ -979,13 +982,15 @@ function buildMockOutputs(params: { mode: SceneMode; warnings: string[]; imagePa
       meta: {
         outputKey: "meta",
         hidden: true,
-        mode: params.mode
+        mode: params.mode,
+        mock: true,
+        warnings: params.warnings
       }
     }
   ] satisfies ExecutorOutputArtifact[];
 }
 
-export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
+export async function executeSam3dObjectsNode(ctx: NodeExecutionContext): Promise<NodeExecutionResult> {
   const imageInput = ctx.inputs.image?.[0] ?? null;
   const selectedConfigInputPort = ctx.inputs.config?.[0]
     ? "config"
@@ -1026,7 +1031,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
   }
 
   if (!resolvedImagePath) {
-    throw new Error("SceneGeneration could not resolve input image path.");
+    throw new Error("CustomSceneGen could not resolve input image path.");
   }
 
   const runModeRaw = (process.env.SAM3D_EXECUTION_MODE ?? "mock").toLowerCase();
@@ -1058,7 +1063,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
           path: config.sourceImagePath
         }
       : null;
-  const executionConfigPath = path.join(nodeOutputRoot, "scene_generation_execution_config.json");
+  const executionConfigPath = path.join(nodeOutputRoot, "sam3d_execution_config.json");
   const executionConfig: SceneExecutionConfigMetadata = {
     schemaVersion: "1.0",
     createdAt: new Date().toISOString(),
@@ -1112,7 +1117,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
       let processResult: { stdout: string; stderr: string };
       if (usePerMaskSubprocess) {
         console.log(
-          `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=per-mask-subprocess`
+          `[sam3d-objects] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=per-mask-subprocess`
         );
         processResult = await executePerMaskReal({
           ctx,
@@ -1125,7 +1130,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
       } else {
         const commandLine = formatCommandLine(command.command, command.args);
         console.log(
-          `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process cmd=${commandLine}`
+          `[sam3d-objects] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process cmd=${commandLine}`
         );
         try {
           processResult = await runProcess(command.command, command.args, command.cwd, ctx.isCancellationRequested);
@@ -1136,10 +1141,10 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
 
           pushWarningUnique(
             warnings,
-            "SceneGeneration hit CUDA OOM in single-process mode; retrying with per-mask subprocess strategy."
+            "CustomSceneGen hit CUDA OOM in single-process mode; retrying with per-mask subprocess strategy."
           );
           console.log(
-            `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process oom_detected=true retry=per-mask-subprocess`
+            `[sam3d-objects] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=real strategy=single-process oom_detected=true retry=per-mask-subprocess`
           );
           processResult = await executePerMaskReal({
             ctx,
@@ -1167,7 +1172,7 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
       if (!allowFallback) {
         throw error;
       }
-      warnings.push(`SceneGeneration real execution failed. Using mock fallback. ${(error as Error).message}`);
+      warnings.push(`CustomSceneGen real SAM3D execution failed. Using mock fallback. ${(error as Error).message}`);
     }
   } else {
     try {
@@ -1180,18 +1185,18 @@ export async function executeSceneGenerationNode(ctx: NodeExecutionContext): Pro
       });
       const mockCommandLine = formatCommandLine(mockCommand.command, mockCommand.args);
       console.log(
-        `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock strategy=${usePerMaskSubprocess ? "per-mask-subprocess" : "single-process"} would_run=${mockCommandLine}`
+        `[sam3d-objects] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock strategy=${usePerMaskSubprocess ? "per-mask-subprocess" : "single-process"} would_run=${mockCommandLine}`
       );
     } catch (error) {
       console.log(
-        `[scene-generation] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock unable_to_build_command=${
+        `[sam3d-objects] runId=${ctx.runId} nodeId=${ctx.nodeId} mode=${mode} execution=mock unable_to_build_command=${
           error instanceof Error ? error.message : String(error)
         }`
       );
     }
   }
 
-  const mockWarning = "SceneGeneration mock mode active. Set SAM3D_EXECUTION_MODE=real to run SAM3D python export.";
+  const mockWarning = "CustomSceneGen mock mode active. Set SAM3D_EXECUTION_MODE=real to run SAM3D python export.";
   if (!warnings.includes(mockWarning)) {
     warnings.push(mockWarning);
   }

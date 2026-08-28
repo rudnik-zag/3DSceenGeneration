@@ -3477,7 +3477,8 @@ function GraphCanvasInner({ projectId, initialGraph, versions: initialVersions, 
         body: JSON.stringify({
           projectId,
           graphId: latestGraphId,
-          startNodeId
+          startNodeId,
+          includeAncestors: startNodeId ? false : undefined
         })
       });
       if (!estimateRes.ok) {

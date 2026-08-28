@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { projectId, graphId, startNodeId } = parsed.data;
+    const { projectId, graphId, startNodeId, includeAncestors } = parsed.data;
     const access = await requireProjectAccess(projectId, "editor");
     await enforceRateLimit({
       bucket: "billing:estimate",
@@ -46,7 +46,8 @@ export async function POST(req: NextRequest) {
     const estimation = await estimateRunForUser({
       userId: access.user.id,
       graphJson: graph.graphJson,
-      startNodeId
+      startNodeId,
+      includeAncestors
     });
 
     return NextResponse.json({

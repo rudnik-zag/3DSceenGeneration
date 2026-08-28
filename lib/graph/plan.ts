@@ -186,9 +186,14 @@ function resolveBindingFromEdge(edge: GraphEdge, nodesById: Map<string, GraphNod
   };
 }
 
-export function buildExecutionPlan(document: GraphDocument, startNodeId?: string): ExecutionPlan {
+export function buildExecutionPlan(
+  document: GraphDocument,
+  startNodeId?: string,
+  options?: { includeAncestors?: boolean }
+): ExecutionPlan {
   const nodesById = byId(document.nodes);
   const incoming = buildIncoming(document.edges);
+  const includeAncestors = options?.includeAncestors !== false;
 
   let targetNodes: Set<string>;
   if (startNodeId) {
@@ -196,7 +201,11 @@ export function buildExecutionPlan(document: GraphDocument, startNodeId?: string
       throw new Error(`startNodeId ${startNodeId} not found`);
     }
     targetNodes = new Set<string>();
-    collectAncestors(startNodeId, incoming, targetNodes);
+    if (includeAncestors) {
+      collectAncestors(startNodeId, incoming, targetNodes);
+    } else {
+      targetNodes.add(startNodeId);
+    }
   } else {
     targetNodes = new Set(document.nodes.map((n) => n.id));
   }
@@ -251,7 +260,7 @@ export function buildExecutionPlan(document: GraphDocument, startNodeId?: string
 
   const tasks = ordered.map((node) => ({
     inputBindings: document.edges
-      .filter((edge) => edge.target === node.id && targetNodes.has(edge.source))
+      .filter((edge) => edge.target === node.id && (targetNodes.has(edge.source) || includeAncestors === false))
       .map((edge) => resolveBindingFromEdge(edge, nodesById))
       .filter((binding): binding is NonNullable<typeof binding> => Boolean(binding)),
     nodeId: node.id,

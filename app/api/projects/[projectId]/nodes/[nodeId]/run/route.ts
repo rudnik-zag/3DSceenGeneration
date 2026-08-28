@@ -73,6 +73,7 @@ export async function POST(
           graphId: graph.id,
           graphJson: graph.graphJson,
           startNodeId: nodeId,
+          includeAncestors: false,
           logs: initialLog
         })
       : null;
@@ -107,7 +108,8 @@ export async function POST(
           graphId: graph.id,
           runId: run.id,
           startNodeId: nodeId,
-          forceNodeIds: forceNodeCacheBypass ? [nodeId] : []
+          forceNodeIds: forceNodeCacheBypass ? [nodeId] : [],
+          includeAncestors: false
         },
         {
           ...queueOptions

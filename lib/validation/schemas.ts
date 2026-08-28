@@ -85,7 +85,8 @@ export const buildTilesetPayloadSchema = z.object({
 export const billingEstimatePayloadSchema = z.object({
   projectId: z.string().cuid(),
   graphId: z.string().cuid(),
-  startNodeId: z.string().min(1).max(180).optional()
+  startNodeId: z.string().min(1).max(180).optional(),
+  includeAncestors: z.boolean().optional()
 });
 
 export const createSubscriptionCheckoutSchema = z.object({

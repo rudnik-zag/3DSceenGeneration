@@ -30,6 +30,7 @@ export interface RunWorkflowInput {
   runId: string;
   startNodeId?: string;
   forceNodeIds?: string[];
+  includeAncestors?: boolean;
 }
 
 const runner = new MockModelRunner();
@@ -608,7 +609,9 @@ export async function executeWorkflowRun(input: RunWorkflowInput) {
 
     const document = parseGraphDocument(graph.graphJson);
     const documentNodeById = new Map(document.nodes.map((node) => [node.id, node]));
-    const plan = buildExecutionPlan(document, input.startNodeId);
+    const plan = buildExecutionPlan(document, input.startNodeId, {
+      includeAncestors: input.includeAncestors !== false
+    });
     const producedByOutput = new Map<string, RuntimeArtifactRef>();
     const producedByArtifactId = new Map<string, RuntimeArtifactRef>();
     const total = Math.max(1, plan.tasks.length);
