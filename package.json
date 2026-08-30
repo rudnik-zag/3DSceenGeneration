@@ -43,7 +43,7 @@
     "@sentry/nextjs": "^10.63.0",
     "@sentry/node": "^10.63.0",
     "@sparkjsdev/spark": "^2.0.0",
-    "@types/uuid": "^10.0.0",
+    "@types/uuid": "^11.0.0",
     "argon2": "^0.44.0",
     "bullmq": "^5.21.1",
     "class-variance-authority": "^0.7.0",
